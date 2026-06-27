@@ -396,6 +396,12 @@ var flags = append([]cli.Flag{
 		Value:   "{{ .context }}/{{ .event }}/{{ .workflow }}{{if not (eq .axis_id 0)}}/{{.axis_id}}{{end}}",
 	},
 	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_REPORT_SKIPPED_WORKFLOWS"),
+		Name:    "report-skipped-workflows",
+		Usage:   "report workflows filtered out by their `when` conditions as skipped checks (requires a forge that supports skipped states, e.g. the GitHub Checks API)",
+		Value:   false,
+	},
+	&cli.BoolFlag{
 		Sources: cli.EnvVars("WOODPECKER_MIGRATIONS_ALLOW_LONG"),
 		Name:    "migrations-allow-long",
 		Value:   false,

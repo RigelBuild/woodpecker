@@ -374,3 +374,77 @@ func TestCheckRunStaleIDRecreates(t *testing.T) {
 	assert.Equal(t, 1, updateCount, "the stale cached ID must be PATCHed once (the 404'd attempt)")
 	assert.Equal(t, 2, createCount, "the 404 must trigger a second create to recover")
 }
+
+// TestStatusChecksAPISkipped verifies a filtered (skipped) workflow is reported
+// as a check-run with the `skipped` conclusion.
+func TestStatusChecksAPISkipped(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	var created github.CreateCheckRunOptions
+	mockedHTTPClient := github_mock.NewMockedHTTPClient(
+		github_mock.WithRequestMatch(
+			github_mock.GetReposInstallationByOwnerByRepo,
+			github.Installation{ID: github.Ptr(int64(99))},
+		),
+		github_mock.WithRequestMatch(
+			github_mock.PostAppInstallationsAccessTokensByInstallationId,
+			github.InstallationToken{Token: github.Ptr("inst-token")},
+		),
+		github_mock.WithRequestMatch(
+			github_mock.GetReposCommitsCheckRunsByOwnerByRepoByRef,
+			github.ListCheckRunsResults{Total: github.Ptr(0), CheckRuns: []*github.CheckRun{}},
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostReposCheckRunsByOwnerByRepo,
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&created)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id":1}`))
+			}),
+		),
+	)
+	gh, err := github.NewClient(github.WithHTTPClient(mockedHTTPClient))
+	require.NoError(t, err)
+	ctx := context.WithValue(context.Background(), githubClientKey, gh)
+
+	c := &client{API: defaultAPI, url: defaultURL, appID: 123, appKey: key}
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPush}
+	workflow := &model.Workflow{ID: 7, Name: "lint", State: model.StatusSkipped}
+
+	err = c.Status(ctx, &model.User{AccessToken: "x"}, repo, pipeline, workflow)
+	require.NoError(t, err)
+	require.NotNil(t, created.Status)
+	assert.Equal(t, checkRunStatusCompleted, *created.Status)
+	require.NotNil(t, created.Conclusion)
+	assert.Equal(t, checkRunConclusionSkipped, *created.Conclusion)
+}
+
+// TestStatusSkippedNoCommitStatus verifies skipped workflows are not reported
+// via the commit-status API (which has no skipped state) when no App is set.
+func TestStatusSkippedNoCommitStatus(t *testing.T) {
+	var statusPosted bool
+	mockedHTTPClient := github_mock.NewMockedHTTPClient(
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostReposStatusesByOwnerByRepoBySha,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				statusPosted = true
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{}`))
+			}),
+		),
+	)
+	gh, err := github.NewClient(github.WithHTTPClient(mockedHTTPClient))
+	require.NoError(t, err)
+	ctx := context.WithValue(context.Background(), githubClientKey, gh)
+
+	c := &client{API: defaultAPI, url: defaultURL} // no app configured
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPush}
+	workflow := &model.Workflow{ID: 7, Name: "lint", State: model.StatusSkipped}
+
+	err = c.Status(ctx, &model.User{AccessToken: "x"}, repo, pipeline, workflow)
+	require.NoError(t, err)
+	assert.False(t, statusPosted, "skipped workflows must not be reported via commit status")
+}

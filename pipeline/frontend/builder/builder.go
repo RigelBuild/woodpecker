@@ -47,6 +47,9 @@ type PipelineBuilder struct {
 	PrivilegedPlugins   []string
 	CompilerOptions     []compiler.Option
 	GetWorkflowMetadata func(workflow *Workflow) metadata.Metadata
+	// ReportSkipped keeps workflows filtered out by their `when` conditions as
+	// skipped items instead of dropping them.
+	ReportSkipped bool
 }
 
 func (b *PipelineBuilder) Build() (items []*Item, errorsAndWarnings error) {
@@ -144,6 +147,9 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 		log.Debug().Str("pipeline", workflow.Name).Msg(
 			"marked as skipped, does not match metadata",
 		)
+		if b.ReportSkipped {
+			return &Item{Workflow: workflow, Skipped: true}, errorsAndWarnings
+		}
 		return nil, nil
 	} else if err != nil {
 		log.Debug().Str("pipeline", workflow.Name).Msg(

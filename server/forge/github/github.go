@@ -640,6 +640,13 @@ func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo,
 		return c.createOrUpdateCheckRun(ctx, gh, repo, pipeline, workflow)
 	}
 
+	// The commit-status API has no "skipped" state, so skipped workflows are
+	// only reported via the Checks API above. Reporting them here would surface
+	// as a stuck "pending" status, so skip them.
+	if workflow.State == model.StatusSkipped {
+		return nil
+	}
+
 	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
 		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
 			Context:     github.Ptr(common.GetPipelineStatusContext(repo, pipeline, workflow)),

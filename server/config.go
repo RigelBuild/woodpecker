@@ -36,23 +36,24 @@ var Config = struct {
 		LogStore   log.Service
 	}
 	Server struct {
-		JWTSecret             string
-		Key                   string
-		Cert                  string
-		OAuthHost             string
-		Host                  string
-		WebhookHost           string
-		Port                  string
-		PortTLS               string
-		AgentToken            string
-		StatusContext         string
-		StatusContextFormat   string
-		SessionExpires        time.Duration
-		RootPath              string
-		CustomCSSFile         string
-		CustomJsFile          string
-		AsyncRepositoryUpdate bool
-		WebhookSyncTimeout    time.Duration
+		JWTSecret              string
+		Key                    string
+		Cert                   string
+		OAuthHost              string
+		Host                   string
+		WebhookHost            string
+		Port                   string
+		PortTLS                string
+		AgentToken             string
+		StatusContext          string
+		StatusContextFormat    string
+		ReportSkippedWorkflows bool
+		SessionExpires         time.Duration
+		RootPath               string
+		CustomCSSFile          string
+		CustomJsFile           string
+		AsyncRepositoryUpdate  bool
+		WebhookSyncTimeout     time.Duration
 	}
 	Agent struct {
 		DisableUserRegisteredAgentRegistration bool

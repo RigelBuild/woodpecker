@@ -123,6 +123,7 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 			Security: repo.Trusted.Security,
 		},
 		DefaultLabels: server.Config.Pipeline.DefaultWorkflowLabels,
+		ReportSkipped: server.Config.Server.ReportSkippedWorkflows,
 		CompilerOptions: []compiler.Option{
 			compiler.WithLocal(false),
 			compiler.WithRegistry(registries...),
@@ -187,11 +188,19 @@ func createPipelineItems(ctx context.Context, forge forge.Forge, store store.Sto
 		return currentPipeline, nil, parseErr, nil
 	}
 
-	// An empty pipeline (e.g. everything filtered out) has no workflows to
-	// persist. Return early so the caller can filter it without us touching
-	// the store.
-	if len(pipelineItems) == 0 {
-		return currentPipeline, pipelineItems, parseErr, nil
+	// A pipeline with no workflows to run (everything filtered out) has nothing
+	// to persist. Skipped workflows are only kept alongside at least one workflow
+	// that actually runs, so treat the all-skipped case as empty and let the
+	// caller filter it without us touching the store.
+	willRun := false
+	for _, item := range pipelineItems {
+		if !item.Skipped {
+			willRun = true
+			break
+		}
+	}
+	if !willRun {
+		return currentPipeline, nil, parseErr, nil
 	}
 
 	enrichPipelineItemSteps(pipelineItems, repo)
@@ -211,6 +220,9 @@ func createPipelineItems(ctx context.Context, forge forge.Forge, store store.Sto
 // no backend-specific fields.
 func enrichPipelineItemSteps(items []*builder.Item, repo *model.Repo) {
 	for _, item := range items {
+		if item.Skipped {
+			continue
+		}
 		for stageI := range item.Config.Stages {
 			for stepI := range item.Config.Stages[stageI].Steps {
 				item.Config.Stages[stageI].Steps[stepI].WorkflowLabels = item.Labels
@@ -269,29 +281,33 @@ func workflowsFromPipelineBuilder(pipeline *model.Pipeline, pipelineItems []*bui
 			AxisID:     item.Workflow.AxisID,
 		}
 
-		if pipeline.Status == model.StatusBlocked {
-			workflow.State = model.StatusBlocked
-		}
+		if item.Skipped {
+			workflow.State = model.StatusSkipped
+		} else {
+			if pipeline.Status == model.StatusBlocked {
+				workflow.State = model.StatusBlocked
+			}
 
-		// gather all workflow steps through stages as flat list
-		for _, stage := range item.Config.Stages {
-			for _, step := range stage.Steps {
-				pidSequence++
-				step := &model.Step{
-					Name:       step.Name,
-					UUID:       step.UUID,
-					PipelineID: pipeline.ID,
-					PID:        pidSequence,
-					PPID:       item.Workflow.PID,
-					State:      model.StatusPending,
-					Failure:    step.Failure,
-					Type:       model.StepType(step.Type),
-				}
+			// gather all workflow steps through stages as flat list
+			for _, stage := range item.Config.Stages {
+				for _, step := range stage.Steps {
+					pidSequence++
+					step := &model.Step{
+						Name:       step.Name,
+						UUID:       step.UUID,
+						PipelineID: pipeline.ID,
+						PID:        pidSequence,
+						PPID:       item.Workflow.PID,
+						State:      model.StatusPending,
+						Failure:    step.Failure,
+						Type:       model.StepType(step.Type),
+					}
 
-				if pipeline.Status == model.StatusBlocked {
-					step.State = model.StatusBlocked
+					if pipeline.Status == model.StatusBlocked {
+						step.State = model.StatusBlocked
+					}
+					workflow.Children = append(workflow.Children, step)
 				}
-				workflow.Children = append(workflow.Children, step)
 			}
 		}
 
