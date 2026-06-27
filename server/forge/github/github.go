@@ -17,6 +17,7 @@ package github
 
 import (
 	"context"
+	"crypto/rsa"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -25,8 +26,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/go-github/v88/github"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
@@ -59,6 +62,8 @@ type Opts struct {
 	MergeRef          bool   // Clone pull requests using the merge ref.
 	OnlyPublic        bool   // Only obtain OAuth tokens with access to public repos.
 	OAuthHost         string // Public url for oauth if different from url.
+	AppID             int64  // GitHub App id (enables Checks API reporting).
+	AppPrivateKey     string // GitHub App private key (PEM).
 }
 
 // New returns a Forge implementation that integrates with a GitHub Cloud or
@@ -74,10 +79,19 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		SkipVerify: opts.SkipVerify,
 		MergeRef:   opts.MergeRef,
 		OnlyPublic: opts.OnlyPublic,
+		appID:      opts.AppID,
 	}
 	if opts.URL != defaultURL {
 		r.url = strings.TrimSuffix(opts.URL, "/")
 		r.API = r.url + "/api/v3/"
+	}
+
+	if opts.AppPrivateKey != "" {
+		key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(opts.AppPrivateKey))
+		if err != nil {
+			return nil, fmt.Errorf("could not parse GitHub App private key: %w", err)
+		}
+		r.appKey = key
 	}
 
 	return r, nil
@@ -93,6 +107,10 @@ type client struct {
 	MergeRef   bool
 	OnlyPublic bool
 	oAuthHost  string
+	appID      int64
+	appKey     *rsa.PrivateKey
+	appTokens  map[string]appToken
+	appTokenMu sync.Mutex
 }
 
 // Name returns the string name of this driver.
@@ -594,6 +612,17 @@ func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo,
 			LogURL:      github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
 		})
 		return err
+	}
+
+	// Report via the Checks API when a GitHub App is configured: it supports
+	// skipped/neutral conclusions and check-suite grouping that the legacy
+	// commit-status API lacks.
+	if c.appConfigured() {
+		gh, err := c.installationClient(ctx, repo.Owner, repo.Name)
+		if err != nil {
+			return err
+		}
+		return c.createOrUpdateCheckRun(ctx, gh, repo, pipeline, workflow)
 	}
 
 	_, _, err = client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
