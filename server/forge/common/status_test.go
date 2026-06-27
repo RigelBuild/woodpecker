@@ -47,3 +47,22 @@ func TestGetPipelineStatusContext(t *testing.T) {
 	server.Config.Server.StatusContextFormat = "{{ .context }}:{{ .owner }}/{{ .repo }}:{{ .event }}:{{ .workflow }}"
 	assert.EqualValues(t, "ci:user1/repo1:push:lint", GetPipelineStatusContext(repo, pipeline, workflow))
 }
+
+func TestGetPipelineStatusContextGrouping(t *testing.T) {
+	origFormat := server.Config.Server.StatusContextFormat
+	origCtx := server.Config.Server.StatusContext
+	defer func() {
+		server.Config.Server.StatusContextFormat = origFormat
+		server.Config.Server.StatusContext = origCtx
+	}()
+
+	repo := &model.Repo{Owner: "user1", Name: "repo1"}
+	pipeline := &model.Pipeline{Event: model.EventPull}
+	// A workflow with a custom, slash-bearing name lets the status context
+	// express a grouping level, e.g. "CI / Infra / Deploy (pr)".
+	workflow := &model.Workflow{Name: "Infra / Deploy"}
+
+	server.Config.Server.StatusContext = "CI"
+	server.Config.Server.StatusContextFormat = "{{ .context }} / {{ .workflow }} ({{ .event }})"
+	assert.EqualValues(t, "CI / Infra / Deploy (pr)", GetPipelineStatusContext(repo, pipeline, workflow))
+}
