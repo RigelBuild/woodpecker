@@ -585,6 +585,12 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 			log.Error().Err(err).Msgf("error setting commit status for %s/%d", repo.FullName, pipeline.Number)
 		}
 	}
+
+	if server.Config.Server.StatusAggregate {
+		if err := forge.ReportAggregateStatus(ctx, _forge, user, repo, pipeline); err != nil {
+			log.Error().Err(err).Msgf("error setting aggregate status for %s/%d", repo.FullName, pipeline.Number)
+		}
+	}
 }
 
 func (s *RPC) getAgentFromContext(ctx context.Context) (*model.Agent, error) {

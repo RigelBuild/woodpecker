@@ -47,6 +47,8 @@ var Config = struct {
 		AgentToken            string
 		StatusContext         string
 		StatusContextFormat   string
+		StatusAggregate       bool
+		StatusAggregateFormat string
 		SessionExpires        time.Duration
 		RootPath              string
 		CustomCSSFile         string

@@ -1013,6 +1013,24 @@ Supported variables:
 
 ---
 
+### STATUS_AGGREGATE
+
+- Name: `WOODPECKER_STATUS_AGGREGATE`
+- Default: `false`
+
+Report an additional single pipeline-level status that rolls up every workflow's state (pending while any run, success only when all pass). Because it has no per-workflow component, its context stays stable across an affected-aware fan-out, so it can be used as a required branch-protection check that only goes green when the whole pipeline is green. Uses the commit-status API (no GitHub App required).
+
+---
+
+### STATUS_AGGREGATE_FORMAT
+
+- Name: `WOODPECKER_STATUS_AGGREGATE_FORMAT`
+- Default: `{{ .context }} ({{ .event }})`
+
+Template for the aggregate status context. Supported variables: `context`, `event`, `owner`, `repo` (no `workflow`/`axis_id`, so the context is stable across the fan-out).
+
+---
+
 ### CONFIG_EXTENSION_ENDPOINT
 
 - Name: `WOODPECKER_CONFIG_EXTENSION_ENDPOINT`
