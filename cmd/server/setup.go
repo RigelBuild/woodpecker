@@ -247,6 +247,8 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Server.PortTLS = c.String("server-addr-tls")
 	server.Config.Server.StatusContext = c.String("status-context")
 	server.Config.Server.StatusContextFormat = c.String("status-context-format")
+	server.Config.Server.StatusAggregate = c.Bool("status-aggregate")
+	server.Config.Server.StatusAggregateFormat = c.String("status-aggregate-format")
 	server.Config.Server.SessionExpires = c.Duration("session-expires")
 	u, _ := url.Parse(server.Config.Server.Host)
 	rootPath := strings.TrimSuffix(u.Path, "/")

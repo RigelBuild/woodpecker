@@ -396,6 +396,18 @@ var flags = append([]cli.Flag{
 		Value:   "{{ .context }}/{{ .event }}/{{ .workflow }}{{if not (eq .axis_id 0)}}/{{.axis_id}}{{end}}",
 	},
 	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_AGGREGATE"),
+		Name:    "status-aggregate",
+		Usage:   "report a single pipeline-level aggregate status (rolls up all workflows) usable as a required branch-protection check",
+		Value:   false,
+	},
+	&cli.StringFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_AGGREGATE_FORMAT"),
+		Name:    "status-aggregate-format",
+		Usage:   "format for the aggregate status context; has no per-workflow component so it stays stable across an affected-aware fan-out",
+		Value:   "{{ .context }} ({{ .event }})",
+	},
+	&cli.BoolFlag{
 		Sources: cli.EnvVars("WOODPECKER_MIGRATIONS_ALLOW_LONG"),
 		Name:    "migrations-allow-long",
 		Value:   false,
