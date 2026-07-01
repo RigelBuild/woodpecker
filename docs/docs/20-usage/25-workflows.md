@@ -72,9 +72,31 @@ steps:
       - sleep 5
 ```
 
+## Workflow name
+
+By default a workflow's name is derived from its file name (without the path, leading dots and the `.yml`/`.yaml` extension). For example `.woodpecker/lint.yaml` becomes the workflow `lint`.
+
+Set a top-level `name` to override this:
+
+```yaml title=".woodpecker/deploy.yaml"
+name: Infra / Deploy
+
+steps:
+  - name: build
+    image: debian:stable-slim
+    commands:
+      - echo building
+```
+
+The custom name is used for the [forge status check](#status-lines), the web UI, [`depends_on`](#flow-control) references and the `CI_WORKFLOW_NAME` environment variable. As the name may contain a slash, it can also express a grouping level in the status check: with `WOODPECKER_STATUS_CONTEXT_FORMAT="{{ .context }} / {{ .workflow }} ({{ .event }})"` a workflow named `Infra / Deploy` reports the context `CI / Infra / Deploy (pr)`.
+
+:::warning
+A custom name replaces the file name everywhere, so reference the workflow by its custom name in `depends_on`. Make sure each workflow's name is unique within a pipeline.
+:::
+
 ## Status lines
 
-Each workflow will report its own status back to your forge.
+Each workflow will report its own status back to your forge, using its [name](#workflow-name) (the file name by default, or a custom `name` if set).
 
 ## Flow control
 
@@ -82,7 +104,7 @@ The workflows run in parallel on separate agents and share nothing.
 
 Dependencies between workflows can be set with the `depends_on` element. A workflow doesn't execute until all of its dependencies finished successfully.
 
-The name for a `depends_on` entry is the filename without the path, leading dots and without the file extension `.yml` or `.yaml`. If the project config for example uses `.woodpecker/` as path for CI files with a file named `.woodpecker/.lint.yaml` the corresponding `depends_on` entry would be `lint`.
+The name for a `depends_on` entry is the filename without the path, leading dots and without the file extension `.yml` or `.yaml`. If the project config for example uses `.woodpecker/` as path for CI files with a file named `.woodpecker/.lint.yaml` the corresponding `depends_on` entry would be `lint`. If a workflow sets a custom [`name`](#workflow-name), reference it by that name instead.
 
 ```diff
  steps:

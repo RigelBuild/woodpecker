@@ -80,6 +80,10 @@ func TestSchema(t *testing.T) {
 			testFile: ".woodpecker/test-labels.yaml",
 		},
 		{
+			name:     "Named workflow",
+			testFile: ".woodpecker/test-named.yaml",
+		},
+		{
 			name:     "Map and Sequence Merge", // https://woodpecker-ci.org/docs/next/usage/advanced-yaml-syntax
 			testFile: ".woodpecker/test-merge-map-and-sequence.yaml",
 		},

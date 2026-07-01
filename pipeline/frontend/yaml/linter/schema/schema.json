@@ -11,6 +11,10 @@
       "type": "string",
       "format": "uri"
     },
+    "name": {
+      "type": "string",
+      "description": "Custom name for this workflow, shown in the web UI and forge status checks instead of the file name. Also used for `depends_on` and `CI_WORKFLOW_NAME`. Read more: https://woodpecker-ci.org/docs/usage/workflows"
+    },
     "variables": {
       "description": "Use yaml aliases to define variables. Read more: https://woodpecker-ci.org/docs/usage/advanced-usage"
     },

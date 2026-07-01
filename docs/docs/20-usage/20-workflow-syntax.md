@@ -777,6 +777,16 @@ Example conditional execution by branch:
 
 The workflow now triggers on `main`, but also if the target branch of a pull request is `main`.
 
+## `name`
+
+By default a workflow's name is derived from its file name (without the path, leading dots and the `.yml`/`.yaml` extension). Set a top-level `name` to override it:
+
+```yaml
+name: Infra / Deploy
+```
+
+The custom name is shown in the web UI and forge status checks, and is used for [`depends_on`](#depends_on) references and the `CI_WORKFLOW_NAME` environment variable. See [workflow naming](./25-workflows.md#workflow-name) for grouping status checks.
+
 <!-- markdownlint-disable no-duplicate-heading -->
 
 ## `depends_on`
