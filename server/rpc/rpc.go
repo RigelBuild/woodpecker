@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -54,6 +55,9 @@ type RPC struct {
 	store         store.Store
 	pipelineTime  *prometheus.GaugeVec
 	pipelineCount *prometheus.CounterVec
+	// reportWG, when non-nil, tracks in-flight background forge reports so tests
+	// can await them deterministically. Nil in production (fire-and-forget).
+	reportWG *sync.WaitGroup
 }
 
 // Next blocks until it provides the next workflow to execute.
@@ -283,7 +287,7 @@ func (s *RPC) Init(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		}
 	}
 
-	s.updateForgeStatus(c, repo, currentPipeline, workflow)
+	s.reportForgeStatusAsync(c, repo, currentPipeline, workflow)
 
 	defer func() {
 		currentPipeline.Workflows, _ = s.store.WorkflowGetTree(currentPipeline)
@@ -297,7 +301,7 @@ func (s *RPC) Init(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 	if err != nil {
 		return err
 	}
-	s.updateForgeStatus(c, repo, currentPipeline, workflow)
+	s.reportForgeStatusAsync(c, repo, currentPipeline, workflow)
 
 	return s.updateAgentLastWork(agent)
 }
@@ -392,7 +396,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		}
 	}
 
-	s.updateForgeStatus(c, repo, currentPipeline, workflow)
+	s.reportForgeStatusAsync(c, repo, currentPipeline, workflow)
 
 	// make sure writes to pubsub are non blocking (https://github.com/woodpecker-ci/woodpecker/blob/c919f32e0b6432a95e1a6d3d0ad662f591adf73f/server/logging/log.go#L9)
 	go func() {
@@ -585,6 +589,38 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 			log.Error().Err(err).Msgf("error setting commit status for %s/%d", repo.FullName, pipeline.Number)
 		}
 	}
+}
+
+// forgeReportTimeout backstops a backgrounded forge status report; it is longer
+// than the per-call statusReportTimeout so the report's own retry/backoff runs
+// to completion, while still guaranteeing the goroutine cannot leak.
+const forgeReportTimeout = 60 * time.Second
+
+// reportForgeStatusAsync runs updateForgeStatus in the background so a slow or
+// rate-limited forge never blocks the agent gRPC call that triggered it. GitHub's
+// secondary-limit backoff can be tens of seconds; a synchronous report would burn
+// the RPC deadline and error the pipeline even though its steps already ran. The
+// pipeline and workflow are snapshotted so the caller's later mutations cannot
+// race the report.
+func (s *RPC) reportForgeStatusAsync(ctx context.Context, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow) {
+	pipelineCopy := *pipeline
+	var workflowCopy *model.Workflow
+	if workflow != nil {
+		wc := *workflow
+		workflowCopy = &wc
+	}
+	if s.reportWG != nil {
+		s.reportWG.Add(1)
+	}
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		if s.reportWG != nil {
+			defer s.reportWG.Done()
+		}
+		ctx, cancel := context.WithTimeout(detached, forgeReportTimeout)
+		defer cancel()
+		s.updateForgeStatus(ctx, repo, &pipelineCopy, workflowCopy)
+	}()
 }
 
 func (s *RPC) getAgentFromContext(ctx context.Context) (*model.Agent, error) {

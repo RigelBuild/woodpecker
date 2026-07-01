@@ -618,10 +618,13 @@ func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo,
 		}
 		id, _ := strconv.Atoi(matches[1])
 
-		_, _, err := client.Repositories.CreateDeploymentStatus(ctx, repo.Owner, repo.Name, int64(id), &github.DeploymentStatusRequest{
-			State:       github.Ptr(convertStatus(pipeline.Status)),
-			Description: github.Ptr(common.GetPipelineStatusDescription(pipeline.Status)),
-			LogURL:      github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
+		_, err := doForgeWrite(ctx, func() (*github.Response, error) {
+			_, resp, e := client.Repositories.CreateDeploymentStatus(ctx, repo.Owner, repo.Name, int64(id), &github.DeploymentStatusRequest{
+				State:       github.Ptr(convertStatus(pipeline.Status)),
+				Description: github.Ptr(common.GetPipelineStatusDescription(pipeline.Status)),
+				LogURL:      github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
+			})
+			return resp, e
 		})
 		return err
 	}
@@ -637,11 +640,14 @@ func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo,
 		return c.createOrUpdateCheckRun(ctx, gh, repo, pipeline, workflow)
 	}
 
-	_, _, err = client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
-		Context:     github.Ptr(common.GetPipelineStatusContext(repo, pipeline, workflow)),
-		State:       github.Ptr(convertStatus(workflow.State)),
-		Description: github.Ptr(common.GetPipelineStatusDescription(workflow.State)),
-		TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, pipeline, workflow)),
+	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
+		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
+			Context:     github.Ptr(common.GetPipelineStatusContext(repo, pipeline, workflow)),
+			State:       github.Ptr(convertStatus(workflow.State)),
+			Description: github.Ptr(common.GetPipelineStatusDescription(workflow.State)),
+			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, pipeline, workflow)),
+		})
+		return resp, e
 	})
 	return err
 }

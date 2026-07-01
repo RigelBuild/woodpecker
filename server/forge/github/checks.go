@@ -118,7 +118,10 @@ func (c *client) createOrUpdateCheckRun(ctx context.Context, gh *github.Client, 
 		if status == checkRunStatusCompleted {
 			opts.Conclusion = github.Ptr(checkRunConclusion(workflow.State))
 		}
-		_, resp, err := gh.Checks.UpdateCheckRun(ctx, repo.Owner, repo.Name, runID, opts)
+		resp, err := doForgeWrite(ctx, func() (*github.Response, error) {
+			_, r, e := gh.Checks.UpdateCheckRun(ctx, repo.Owner, repo.Name, runID, opts)
+			return r, e
+		})
 		if err != nil {
 			// A cached run ID can go stale (deleted, or a re-run replaced it).
 			// Drop it and fall through to recreate; propagate any other error.
@@ -144,7 +147,12 @@ func (c *client) createOrUpdateCheckRun(ctx context.Context, gh *github.Client, 
 	if status == checkRunStatusCompleted {
 		opts.Conclusion = github.Ptr(checkRunConclusion(workflow.State))
 	}
-	run, _, err := gh.Checks.CreateCheckRun(ctx, repo.Owner, repo.Name, opts)
+	var run *github.CheckRun
+	_, err := doForgeWrite(ctx, func() (*github.Response, error) {
+		r, resp, e := gh.Checks.CreateCheckRun(ctx, repo.Owner, repo.Name, opts)
+		run = r
+		return resp, e
+	})
 	if err != nil {
 		return err
 	}

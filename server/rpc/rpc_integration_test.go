@@ -17,6 +17,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,12 +52,18 @@ func newTestRPC(t *testing.T, mockStore *store_mocks.MockStore, q queue.Queue) R
 		Name:      "pipeline_count_" + t.Name(),
 	}, []string{"repo", "branch", "status", "pipeline"})
 
+	// Track background forge reports so the mock store's cleanup assertions run
+	// only after the async report goroutines finish (this t.Cleanup is registered
+	// after NewMockStore's, so it runs first, LIFO).
+	reportWG := &sync.WaitGroup{}
+	t.Cleanup(reportWG.Wait)
 	return RPC{
 		store:         mockStore,
 		scheduler:     scheduler.NewScheduler(t.Context(), mockStore, q, memory.New()),
 		logger:        logging.New(),
 		pipelineTime:  pipelineTime,
 		pipelineCount: pipelineCount,
+		reportWG:      reportWG,
 	}
 }
 
