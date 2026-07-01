@@ -1031,6 +1031,15 @@ Template for the aggregate status context. Supported variables: `context`, `even
 
 ---
 
+### REPORT_SKIPPED_WORKFLOWS
+
+- Name: `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`
+- Default: `false`
+
+Report workflows filtered out by their `when` conditions as skipped checks instead of dropping them. Requires a forge that supports a skipped state (the GitHub Checks API; see `WOODPECKER_GITHUB_APP_ID`). Skipped workflows are only kept when at least one workflow in the pipeline runs.
+
+---
+
 ### CONFIG_EXTENSION_ENDPOINT
 
 - Name: `WOODPECKER_CONFIG_EXTENSION_ENDPOINT`

@@ -1081,3 +1081,61 @@ func (t *testMetadata) GetWorkflowMetadata(w *Workflow) metadata.Metadata {
 		},
 	}
 }
+
+func TestReportSkippedWorkflows(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{pipelineEvent: "push"}
+	yamls := []*YamlFile{
+		{Name: ".woodpecker/run.yml", Data: []byte(`
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+		{Name: ".woodpecker/skip.yml", Data: []byte(`
+when:
+  event: tag
+steps:
+  - name: build
+    image: scratch
+`)},
+	}
+
+	t.Run("kept as skipped when enabled", func(t *testing.T) {
+		b := PipelineBuilder{
+			GetWorkflowMetadata: m.GetWorkflowMetadata,
+			RepoTrusted:         &metadata.TrustedConfiguration{},
+			ReportSkipped:       true,
+			Yamls:               yamls,
+		}
+		items, err := b.Build()
+		assert.NoError(t, err)
+		assert.Len(t, items, 2, "filtered workflow should be kept as a skipped item")
+
+		var skipped *Item
+		for _, it := range items {
+			if it.Workflow.Name == "skip" {
+				skipped = it
+			}
+		}
+		assert.NotNil(t, skipped, "skip workflow should be present")
+		if skipped != nil {
+			assert.True(t, skipped.Skipped, "filtered workflow should be flagged skipped")
+			assert.Nil(t, skipped.Config, "skipped workflow should have no compiled config")
+		}
+	})
+
+	t.Run("dropped when disabled", func(t *testing.T) {
+		b := PipelineBuilder{
+			GetWorkflowMetadata: m.GetWorkflowMetadata,
+			RepoTrusted:         &metadata.TrustedConfiguration{},
+			Yamls:               yamls,
+		}
+		items, err := b.Build()
+		assert.NoError(t, err)
+		assert.Len(t, items, 1, "filtered workflow should be dropped by default")
+		assert.Equal(t, "run", items[0].Workflow.Name)
+	})
+}

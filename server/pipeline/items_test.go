@@ -82,6 +82,45 @@ func TestSetPipelineStepsOnPipeline(t *testing.T) {
 	}
 }
 
+func TestSaveWorkflowsSkipped(t *testing.T) {
+	t.Parallel()
+
+	pipeline := &model.Pipeline{ID: 1, Event: model.EventPush}
+
+	pipelineItems := []*builder.Item{
+		{
+			Workflow: &builder.Workflow{ID: 1, PID: 1, Name: "run"},
+			Config: &backend_types.Config{
+				Stages: []*backend_types.Stage{
+					{Steps: []*backend_types.Step{{Name: "build"}}},
+				},
+			},
+		},
+		{
+			Workflow: &builder.Workflow{ID: 2, PID: 2, Name: "skip"},
+			Skipped:  true,
+		},
+	}
+
+	s := store_mocks.NewMockStore(t)
+	s.On("WorkflowsCreate", mock.Anything).Return(nil)
+
+	pipeline, err := saveWorkflowsFromPipelineBuilder(s, pipeline, pipelineItems, false)
+	require.NoError(t, err)
+	require.Len(t, pipeline.Workflows, 2)
+
+	byName := map[string]*model.Workflow{}
+	for _, wf := range pipeline.Workflows {
+		byName[wf.Name] = wf
+	}
+	require.Contains(t, byName, "run")
+	require.Contains(t, byName, "skip")
+	assert.Equal(t, model.StatusPending, byName["run"].State)
+	assert.NotEmpty(t, byName["run"].Children)
+	assert.Equal(t, model.StatusSkipped, byName["skip"].State)
+	assert.Empty(t, byName["skip"].Children, "skipped workflow should carry no steps")
+}
+
 func TestSaveWorkflowsReplaceExisting(t *testing.T) {
 	t.Parallel()
 

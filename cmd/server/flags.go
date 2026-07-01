@@ -408,6 +408,12 @@ var flags = append([]cli.Flag{
 		Value:   "{{ .context }} ({{ .event }})",
 	},
 	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_REPORT_SKIPPED_WORKFLOWS"),
+		Name:    "report-skipped-workflows",
+		Usage:   "report workflows filtered out by their `when` conditions as skipped checks (requires a forge that supports skipped states, e.g. the GitHub Checks API)",
+		Value:   false,
+	},
+	&cli.BoolFlag{
 		Sources: cli.EnvVars("WOODPECKER_MIGRATIONS_ALLOW_LONG"),
 		Name:    "migrations-allow-long",
 		Value:   false,
@@ -581,6 +587,22 @@ var flags = append([]cli.Flag{
 		Name:    "github-public-only",
 		Usage:   "github tokens should only get access to public repos",
 		Value:   false,
+	},
+	&cli.StringFlag{
+		Sources: cli.EnvVars("WOODPECKER_GITHUB_APP_ID"),
+		Name:    "github-app-id",
+		Usage:   "github app id; enables reporting via the GitHub Checks API (skipped/neutral states)",
+	},
+	&cli.StringFlag{
+		Sources: cli.NewValueSourceChain(
+			cli.File(getFirstNonEmptyEnvVar("WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE")),
+			cli.EnvVar("WOODPECKER_GITHUB_APP_PRIVATE_KEY"),
+		),
+		Name:  "github-app-private-key",
+		Usage: "github app private key in PEM format (or use WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE)",
+		Config: cli.StringConfig{
+			TrimSpace: true,
+		},
 	},
 	//
 	// Gitea
