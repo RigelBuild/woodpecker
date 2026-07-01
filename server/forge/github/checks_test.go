@@ -163,3 +163,214 @@ func TestStatusCommitStatusFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, statusPosted, "commit status should be posted when no app is configured")
 }
+
+// setCheckRunStatusContext configures the status-context template used to render
+// the check-run name, restoring the previous values when the test finishes.
+func setCheckRunStatusContext(t *testing.T) {
+	t.Helper()
+	origFormat := server.Config.Server.StatusContextFormat
+	origCtx := server.Config.Server.StatusContext
+	server.Config.Server.StatusContext = "ci"
+	server.Config.Server.StatusContextFormat = "{{ .context }}/{{ .workflow }}"
+	t.Cleanup(func() {
+		server.Config.Server.StatusContextFormat = origFormat
+		server.Config.Server.StatusContext = origCtx
+	})
+}
+
+// checkRunAppTokenMocks mocks the App installation-token exchange that precedes
+// every Checks-API call. The installation token carries no expiry in these
+// fixtures, so it is re-minted on each Status call; using handlers (not the
+// panicking FIFO WithRequestMatch) lets both endpoints answer every time.
+func checkRunAppTokenMocks() []github_mock.MockBackendOption {
+	return []github_mock.MockBackendOption{
+		github_mock.WithRequestMatchHandler(
+			github_mock.GetReposInstallationByOwnerByRepo,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"id":99}`))
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostAppInstallationsAccessTokensByInstallationId,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"token":"inst-token"}`))
+			}),
+		),
+	}
+}
+
+// TestCheckRunCacheAvoidsRelist pins the core anti-amplification contract:
+// reporting the same workflow twice must paginate ListCheckRunsForRef only once
+// (on the first, cache-miss call). The second report resolves the run from the
+// in-memory cache and PATCHes it directly.
+//
+// Red against the pre-fix code: without the cache, createOrUpdateCheckRun listed
+// on every transition, so the second report would list again and listCount
+// would be 2.
+func TestCheckRunCacheAvoidsRelist(t *testing.T) {
+	setCheckRunStatusContext(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	var listCount, createCount, updateCount int
+	opts := append(
+		checkRunAppTokenMocks(),
+		github_mock.WithRequestMatchHandler(
+			github_mock.GetReposCommitsCheckRunsByOwnerByRepoByRef,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				listCount++
+				_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostReposCheckRunsByOwnerByRepo,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				createCount++
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id":1}`))
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PatchReposCheckRunsByOwnerByRepoByCheckRunId,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				updateCount++
+				_, _ = w.Write([]byte(`{"id":1}`))
+			}),
+		),
+	)
+	gh, err := github.NewClient(github.WithHTTPClient(github_mock.NewMockedHTTPClient(opts...)))
+	require.NoError(t, err)
+	ctx := context.WithValue(context.Background(), githubClientKey, gh)
+
+	c := &client{API: defaultAPI, url: defaultURL, appID: 123, appKey: key}
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPush}
+	user := &model.User{AccessToken: "x"}
+
+	// First report: cache miss → list once, then create + cache.
+	require.NoError(t, c.Status(ctx, user, repo, pipeline,
+		&model.Workflow{ID: 7, Name: "lint", State: model.StatusRunning}))
+	// Second report of the same workflow: cache hit → PATCH directly, no relist.
+	require.NoError(t, c.Status(ctx, user, repo, pipeline,
+		&model.Workflow{ID: 7, Name: "lint", State: model.StatusSuccess}))
+
+	assert.Equal(t, 1, listCount, "list must happen only on the first (cache-miss) call")
+	assert.Equal(t, 1, createCount, "create must happen exactly once")
+	assert.Equal(t, 1, updateCount, "the second report must update the cached run")
+}
+
+// TestCheckRunNoDowngradeAfterComplete pins the state-precedence guard: once a
+// check-run is reported completed, a later out-of-order non-terminal status must
+// not downgrade it. The guard returns before any GitHub API call.
+//
+// Red against the pre-fix code: without precedence handling the second report
+// would find the run and PATCH it back to in_progress, so updateCount would be 1.
+func TestCheckRunNoDowngradeAfterComplete(t *testing.T) {
+	setCheckRunStatusContext(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	var listCount, createCount, updateCount int
+	opts := append(
+		checkRunAppTokenMocks(),
+		github_mock.WithRequestMatchHandler(
+			github_mock.GetReposCommitsCheckRunsByOwnerByRepoByRef,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				listCount++
+				_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostReposCheckRunsByOwnerByRepo,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				createCount++
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id":1}`))
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PatchReposCheckRunsByOwnerByRepoByCheckRunId,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				updateCount++
+				_, _ = w.Write([]byte(`{"id":1}`))
+			}),
+		),
+	)
+	gh, err := github.NewClient(github.WithHTTPClient(github_mock.NewMockedHTTPClient(opts...)))
+	require.NoError(t, err)
+	ctx := context.WithValue(context.Background(), githubClientKey, gh)
+
+	c := &client{API: defaultAPI, url: defaultURL, appID: 123, appKey: key}
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPush}
+	user := &model.User{AccessToken: "x"}
+
+	// First report: success → completed, creates + caches the terminal state.
+	require.NoError(t, c.Status(ctx, user, repo, pipeline,
+		&model.Workflow{ID: 7, Name: "lint", State: model.StatusSuccess}))
+	// Second report: a late/out-of-order running update must NOT downgrade it.
+	require.NoError(t, c.Status(ctx, user, repo, pipeline,
+		&model.Workflow{ID: 7, Name: "lint", State: model.StatusRunning}))
+
+	assert.Equal(t, 1, listCount, "only the first call lists; the guard short-circuits the second")
+	assert.Equal(t, 1, createCount, "create must happen once")
+	assert.Equal(t, 0, updateCount, "a completed run must never be downgraded to in_progress")
+}
+
+// TestCheckRunStaleIDRecreates pins the stale-ID fallback: if the cached run ID
+// no longer exists, the PATCH returns 404, the cache entry is dropped, and the
+// report recreates the run via CreateCheckRun.
+//
+// Red against the pre-fix code: with no cache there was no cached ID to go stale
+// and no 404 recovery path, so this create-after-404 behavior did not exist.
+func TestCheckRunStaleIDRecreates(t *testing.T) {
+	setCheckRunStatusContext(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	var listCount, createCount, updateCount int
+	opts := append(
+		checkRunAppTokenMocks(),
+		github_mock.WithRequestMatchHandler(
+			github_mock.GetReposCommitsCheckRunsByOwnerByRepoByRef,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				listCount++
+				_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostReposCheckRunsByOwnerByRepo,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				createCount++
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id":1}`))
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PatchReposCheckRunsByOwnerByRepoByCheckRunId,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				updateCount++
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+			}),
+		),
+	)
+	gh, err := github.NewClient(github.WithHTTPClient(github_mock.NewMockedHTTPClient(opts...)))
+	require.NoError(t, err)
+	ctx := context.WithValue(context.Background(), githubClientKey, gh)
+
+	c := &client{API: defaultAPI, url: defaultURL, appID: 123, appKey: key}
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPush}
+	user := &model.User{AccessToken: "x"}
+
+	// First report: cache miss → create run id 1 (cached).
+	require.NoError(t, c.Status(ctx, user, repo, pipeline,
+		&model.Workflow{ID: 7, Name: "lint", State: model.StatusRunning}))
+	// Second report: cache hit → PATCH id 1 → 404 → drop cache → recreate.
+	require.NoError(t, c.Status(ctx, user, repo, pipeline,
+		&model.Workflow{ID: 7, Name: "lint", State: model.StatusSuccess}))
+
+	assert.Equal(t, 1, updateCount, "the stale cached ID must be PATCHed once (the 404'd attempt)")
+	assert.Equal(t, 2, createCount, "the 404 must trigger a second create to recover")
+}

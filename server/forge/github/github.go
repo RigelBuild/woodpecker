@@ -47,10 +47,14 @@ import (
 type contextKey string
 
 const (
-	defaultURL                 = "https://github.com"      // Default GitHub URL
-	defaultAPI                 = "https://api.github.com/" // Default GitHub API URL
-	defaultPageSize            = 100
-	githubClientKey contextKey = "github_client"
+	defaultURL      = "https://github.com"      // Default GitHub URL
+	defaultAPI      = "https://api.github.com/" // Default GitHub API URL
+	defaultPageSize = 100
+	// Status/check-run reports run on their own budget: statusReportTimeout caps
+	// each one independently of the agent gRPC deadline it is called under, so a
+	// slow GitHub call does not fail with "context deadline exceeded" mid-report.
+	statusReportTimeout            = 30 * time.Second
+	githubClientKey     contextKey = "github_client"
 )
 
 // Opts defines configuration options.
@@ -111,6 +115,8 @@ type client struct {
 	appKey     *rsa.PrivateKey
 	appTokens  map[string]appToken
 	appTokenMu sync.Mutex
+	checkRuns  map[string]checkRunRef
+	checkRunMu sync.Mutex
 }
 
 // Name returns the string name of this driver.
@@ -592,6 +598,12 @@ var reDeploy = regexp.MustCompile(`.+/deployments/(\d+)`)
 // Status sends the commit status to the forge.
 // An example would be the GitHub pull request status.
 func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow) error {
+	// Decouple from the caller's (agent gRPC) deadline: status reporting must
+	// finish on its own budget, not race the RPC that triggered it. Values
+	// (e.g. an injected test client) are preserved.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusReportTimeout)
+	defer cancel()
+
 	client, err := c.newClientToken(ctx, user.AccessToken)
 	if err != nil {
 		return err
