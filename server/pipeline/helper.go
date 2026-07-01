@@ -19,16 +19,23 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
-func updatePipelineStatus(ctx context.Context, forge forge.Forge, pipeline *model.Pipeline, repo *model.Repo, user *model.User) {
+func updatePipelineStatus(ctx context.Context, _forge forge.Forge, pipeline *model.Pipeline, repo *model.Repo, user *model.User) {
 	for _, workflow := range pipeline.Workflows {
-		err := forge.Status(ctx, user, repo, pipeline, workflow)
+		err := _forge.Status(ctx, user, repo, pipeline, workflow)
 		if err != nil {
 			log.Error().Err(err).Msgf("error setting commit status for %s/%d", repo.FullName, pipeline.Number)
 			return
+		}
+	}
+
+	if server.Config.Server.StatusAggregate {
+		if err := forge.ReportAggregateStatus(ctx, _forge, user, repo, pipeline); err != nil {
+			log.Error().Err(err).Msgf("error setting aggregate status for %s/%d", repo.FullName, pipeline.Number)
 		}
 	}
 }

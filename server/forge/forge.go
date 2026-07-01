@@ -176,3 +176,21 @@ type Forge interface {
 	// If identifier is a user, return org with IsUser: true.
 	Org(ctx context.Context, u *model.User, org string) (*model.Org, error)
 }
+
+// AggregateStatusReporter is an optional Forge capability: report a single
+// pipeline-level status that rolls up every workflow's state. Because it has no
+// per-workflow component, it is stable across an affected-aware fan-out and can
+// serve as a required branch-protection check that only passes when the whole
+// pipeline passes.
+type AggregateStatusReporter interface {
+	StatusAggregate(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline) error
+}
+
+// ReportAggregateStatus reports the pipeline-level aggregate status when the
+// forge supports it; it is a no-op for forges that don't.
+func ReportAggregateStatus(ctx context.Context, f Forge, u *model.User, r *model.Repo, b *model.Pipeline) error {
+	if reporter, ok := f.(AggregateStatusReporter); ok {
+		return reporter.StatusAggregate(ctx, u, r, b)
+	}
+	return nil
+}
