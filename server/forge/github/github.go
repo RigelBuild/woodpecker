@@ -638,6 +638,16 @@ func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo,
 		return err
 	}
 
+	// Skipped workflows: with the affected-aware fan-out a pipeline can carry
+	// dozens of skipped workflows, each an extra check-run POST. Reporting them
+	// is opt-in (ReportSkippedWorkflows) — off by default they are dropped here,
+	// before any forge write, so they add no GitHub check-run noise and no
+	// rate-limit pressure. The pipeline-level aggregate status still rolls them
+	// up, and Woodpecker's own UI still shows them.
+	if workflow != nil && workflow.State == model.StatusSkipped && !server.Config.Server.ReportSkippedWorkflows {
+		return nil
+	}
+
 	// Report via the Checks API when a GitHub App is configured: it supports
 	// skipped/neutral conclusions and check-suite grouping that the legacy
 	// commit-status API lacks.
