@@ -189,7 +189,7 @@ func TestFetchFromConfigService(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(fixtureHandler))
 	defer ts.Close()
 
-	client, err := utils.NewHTTPClient(privEd25519Key, "loopback")
+	client, err := utils.NewHTTPClient(privEd25519Key, "loopback", 10*time.Second)
 	require.NoError(t, err)
 
 	httpFetcher := config.NewHTTP(ts.URL+"/", client, true)

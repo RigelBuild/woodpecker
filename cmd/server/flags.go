@@ -352,6 +352,12 @@ var flags = append([]cli.Flag{
 		Usage:   "Hosts that are allowed to be contacted by extensions",
 		Value:   hostmatcher.MatchBuiltinExternal,
 	},
+	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_EXTENSIONS_TIMEOUT"),
+		Name:    "extensions-timeout",
+		Usage:   "how long before timeout when contacting extension endpoints (config/registry/secret)",
+		Value:   time.Second * 10,
+	},
 	&cli.StringFlag{
 		Sources: cli.EnvVars("WOODPECKER_DATABASE_DRIVER"),
 		Name:    "db-driver",
