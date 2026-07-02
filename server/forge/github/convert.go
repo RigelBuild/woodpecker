@@ -49,14 +49,18 @@ const (
 // GitHub commit status.
 func convertStatus(status model.StatusValue) string {
 	switch status {
-	case model.StatusPending, model.StatusRunning, model.StatusBlocked, model.StatusSkipped, model.StatusCanceled:
-		return statusPending
-	case model.StatusFailure, model.StatusDeclined:
+	case model.StatusFailure, model.StatusDeclined, model.StatusKilled, model.StatusError:
 		return statusFailure
 	case model.StatusSuccess:
 		return statusSuccess
 	default:
-		return statusError
+		// Every not-yet-terminal or internal state (pending, running, blocked,
+		// skipped, canceled, created, and anything future) reports as pending.
+		// A status *report* must never invent a red CI failure from a transient
+		// or unrecognized state — StatusCreated ("internal use only") briefly
+		// surfaces during a merge-queue re-run and previously fell through to
+		// "error", which failed the batch (a spurious required-check failure).
+		return statusPending
 	}
 }
 
