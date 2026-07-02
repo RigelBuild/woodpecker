@@ -14,7 +14,7 @@
         # Fork build version. Must not collide with upstream tags (`v3.16.x`)
         # or upstream dev builds (`next-<sha>`). Bump the `-sealed.N` suffix per
         # fork release.
-        version = "3.16.0-sealed.5";
+        version = "3.16.0-sealed.6";
 
         # The repo requires Go 1.26 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
