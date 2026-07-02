@@ -35,16 +35,26 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 		return nil
 	}
 
+	// Decouple from the caller's (agent gRPC) deadline and bound the report on
+	// its own budget: the aggregate status is the required branch-protection
+	// check, so a slow or rate-limited commit-status POST must fail fast with
+	// backoff rather than hang and leave the check stuck "pending" forever.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusReportTimeout)
+	defer cancel()
+
 	client, err := c.newClientToken(ctx, user.AccessToken)
 	if err != nil {
 		return err
 	}
 
-	_, _, err = client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
-		Context:     github.Ptr(common.GetPipelineAggregateStatusContext(repo, pipeline)),
-		State:       github.Ptr(convertStatus(pipeline.Status)),
-		Description: github.Ptr(common.GetPipelineStatusDescription(pipeline.Status)),
-		TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
+	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
+		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
+			Context:     github.Ptr(common.GetPipelineAggregateStatusContext(repo, pipeline)),
+			State:       github.Ptr(convertStatus(pipeline.Status)),
+			Description: github.Ptr(common.GetPipelineStatusDescription(pipeline.Status)),
+			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
+		})
+		return resp, e
 	})
 	return err
 }
