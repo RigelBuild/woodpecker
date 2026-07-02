@@ -526,9 +526,17 @@ func (c *client) newConfig() *oauth2.Config {
 	}
 }
 
-// newClientToken returns the GitHub oauth2 client.
-// It first checks if a client is available in the context, otherwise creates a new one.
+// newClientToken returns a GitHub client authenticated with a user OAuth token.
+// For App-installation tokens use newClientTokenKind with tokenKindApp so the
+// rate-limit metrics attribute usage to the correct quota bucket.
 func (c *client) newClientToken(ctx context.Context, token string) (*github.Client, error) {
+	return c.newClientTokenKind(ctx, token, tokenKindUser)
+}
+
+// newClientTokenKind returns the GitHub oauth2 client for token, tagging its
+// rate-limit observations with tokenKind. It first checks if a client is
+// available in the context (test injection), otherwise creates a new one.
+func (c *client) newClientTokenKind(ctx context.Context, token, tokenKind string) (*github.Client, error) {
 	// Check if a client is already in the context
 	if ctxClient, ok := ctx.Value(githubClientKey).(*github.Client); ok {
 		return ctxClient, nil
@@ -551,8 +559,9 @@ func (c *client) newClientToken(ctx context.Context, token string) (*github.Clie
 		}
 	}
 
-	// Wrap the base transport with User-Agent support
-	tp.Base = httputil.NewUserAgentRoundTripper(baseTransport, "forge-github")
+	// Wrap the base transport with User-Agent support, then observe rate-limit
+	// headers on every response.
+	tp.Base = newRateLimitObserver(httputil.NewUserAgentRoundTripper(baseTransport, "forge-github"), tokenKind)
 
 	return github.NewClient(github.WithURLs(github.Ptr(c.API), nil), github.WithHTTPClient(tc))
 }

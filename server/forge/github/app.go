@@ -73,7 +73,7 @@ func (c *client) installationToken(ctx context.Context, owner, name string) (str
 	if err != nil {
 		return "", err
 	}
-	appClient, err := c.newClientToken(ctx, jwtToken)
+	appClient, err := c.newClientTokenKind(ctx, jwtToken, tokenKindApp)
 	if err != nil {
 		return "", err
 	}
@@ -97,5 +97,5 @@ func (c *client) installationClient(ctx context.Context, owner, name string) (*g
 	if err != nil {
 		return nil, err
 	}
-	return c.newClientToken(ctx, token)
+	return c.newClientTokenKind(ctx, token, tokenKindApp)
 }
