@@ -250,6 +250,7 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Server.StatusAggregate = c.Bool("status-aggregate")
 	server.Config.Server.StatusAggregateFormat = c.String("status-aggregate-format")
 	server.Config.Server.ReportSkippedWorkflows = c.Bool("report-skipped-workflows")
+	server.Config.Server.ReportSkippedToForge = c.Bool("report-skipped-to-forge")
 	server.Config.Server.SessionExpires = c.Duration("session-expires")
 	u, _ := url.Parse(server.Config.Server.Host)
 	rootPath := strings.TrimSuffix(u.Path, "/")

@@ -41,6 +41,17 @@ func setReportSkippedWorkflows(t *testing.T, v bool) {
 	t.Cleanup(func() { server.Config.Server.ReportSkippedWorkflows = orig })
 }
 
+// setReportSkippedToForge sets the ReportSkippedToForge flag for the duration of
+// a test, restoring the previous value on cleanup. Like ReportSkippedWorkflows it
+// is process-global (server.Config), so every test that depends on it must
+// save/restore.
+func setReportSkippedToForge(t *testing.T, v bool) {
+	t.Helper()
+	orig := server.Config.Server.ReportSkippedToForge
+	server.Config.Server.ReportSkippedToForge = v
+	t.Cleanup(func() { server.Config.Server.ReportSkippedToForge = orig })
+}
+
 // skippedGateAppClient wires an App-configured client (appConfigured() == true)
 // whose Checks-API endpoints are all mocked, and whose check-run POST increments
 // posts. It mirrors the harness in checks_test.go's TestStatusChecksAPISkipped.
@@ -86,7 +97,7 @@ func skippedGateAppClient(t *testing.T, posts *atomic.Int32) (*client, context.C
 }
 
 // TestStatusSkippedGateDropsSkippedWhenReportingDisabled is the core rate-limit
-// regression: with ReportSkippedWorkflows off (the default), a skipped workflow
+// regression: with ReportSkippedToForge off (the default), a skipped workflow
 // must be dropped BEFORE any forge write, so it produces zero check-run POSTs.
 // The production bug was that every one of the dozens of skipped workflows an
 // affected-aware fan-out carries became a check-run POST, tripping GitHub's
@@ -97,7 +108,7 @@ func skippedGateAppClient(t *testing.T, posts *atomic.Int32) (*client, context.C
 // this assertion (posts == 0) fails. That is the RED that proves the gate has
 // teeth.
 func TestStatusSkippedGateDropsSkippedWhenReportingDisabled(t *testing.T) {
-	setReportSkippedWorkflows(t, false)
+	setReportSkippedToForge(t, false)
 
 	var posts atomic.Int32
 	c, ctx := skippedGateAppClient(t, &posts)
@@ -108,7 +119,7 @@ func TestStatusSkippedGateDropsSkippedWhenReportingDisabled(t *testing.T) {
 	err := c.Status(ctx, &model.User{AccessToken: "x"}, repo, pipeline, workflow)
 	require.NoError(t, err)
 	assert.Equal(t, int32(0), posts.Load(),
-		"a skipped workflow must make no forge check-run POST when ReportSkippedWorkflows is off")
+		"a skipped workflow must make no forge check-run POST when ReportSkippedToForge is off")
 }
 
 // TestStatusSkippedGateReportsNonSkippedWhenReportingDisabled pins the other side
@@ -121,7 +132,7 @@ func TestStatusSkippedGateDropsSkippedWhenReportingDisabled(t *testing.T) {
 // for a success workflow); it exists to guard against a future "drop everything"
 // over-broadening of the gate, which would drop this POST and redden the test.
 func TestStatusSkippedGateReportsNonSkippedWhenReportingDisabled(t *testing.T) {
-	setReportSkippedWorkflows(t, false)
+	setReportSkippedToForge(t, false)
 
 	var posts atomic.Int32
 	c, ctx := skippedGateAppClient(t, &posts)
@@ -132,5 +143,32 @@ func TestStatusSkippedGateReportsNonSkippedWhenReportingDisabled(t *testing.T) {
 	err := c.Status(ctx, &model.User{AccessToken: "x"}, repo, pipeline, workflow)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, posts.Load(), int32(1),
-		"a non-skipped workflow must still be reported even when ReportSkippedWorkflows is off")
+		"a non-skipped workflow must still be reported even when ReportSkippedToForge is off")
+}
+
+// TestStatusSkippedPersistedButNotReportedToForge is the SEA-1102 decouple
+// contract: persisting skipped workflows (so the Woodpecker UI shows them) must
+// NOT drag them onto the GitHub check list. With persist ON (ReportSkippedWorkflows)
+// but forge-report OFF (ReportSkippedToForge), a skipped workflow must make zero
+// check-run POSTs — the forge gate keys off ReportSkippedToForge alone, so the
+// persist flag no longer forces a report.
+//
+// Pre-fix relevance: before the decouple the github.go gate read
+// ReportSkippedWorkflows, so turning persist ON also turned reporting ON and this
+// skipped workflow POSTed a check-run (posts == 1), reddening this assertion. That
+// is the RED that proves persist and forge-report are genuinely independent.
+func TestStatusSkippedPersistedButNotReportedToForge(t *testing.T) {
+	setReportSkippedWorkflows(t, true)
+	setReportSkippedToForge(t, false)
+
+	var posts atomic.Int32
+	c, ctx := skippedGateAppClient(t, &posts)
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPush}
+	workflow := &model.Workflow{ID: 7, Name: "lint", State: model.StatusSkipped}
+
+	err := c.Status(ctx, &model.User{AccessToken: "x"}, repo, pipeline, workflow)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), posts.Load(),
+		"a skipped workflow must make no forge check-run POST when ReportSkippedToForge is off, even with persist on")
 }

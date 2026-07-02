@@ -640,11 +640,13 @@ func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo,
 
 	// Skipped workflows: with the affected-aware fan-out a pipeline can carry
 	// dozens of skipped workflows, each an extra check-run POST. Reporting them
-	// is opt-in (ReportSkippedWorkflows) — off by default they are dropped here,
-	// before any forge write, so they add no GitHub check-run noise and no
-	// rate-limit pressure. The pipeline-level aggregate status still rolls them
-	// up, and Woodpecker's own UI still shows them.
-	if workflow != nil && workflow.State == model.StatusSkipped && !server.Config.Server.ReportSkippedWorkflows {
+	// to the forge is opt-in (ReportSkippedToForge) — off by default they are
+	// dropped here, before any forge write, so they add no GitHub check-run noise
+	// and no rate-limit pressure. This is independent of whether they are
+	// persisted: ReportSkippedWorkflows keeps skipped workflows in the DB so the
+	// Woodpecker UI can show them, without implying a forge report. The
+	// pipeline-level aggregate status still rolls them up.
+	if workflow != nil && workflow.State == model.StatusSkipped && !server.Config.Server.ReportSkippedToForge {
 		return nil
 	}
 

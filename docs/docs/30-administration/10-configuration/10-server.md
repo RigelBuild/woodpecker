@@ -1047,7 +1047,16 @@ Template for the aggregate status context. Supported variables: `context`, `even
 - Name: `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`
 - Default: `false`
 
-Report workflows filtered out by their `when` conditions as skipped checks instead of dropping them. Requires a forge that supports a skipped state (the GitHub Checks API; see `WOODPECKER_GITHUB_APP_ID`). Skipped workflows are only kept when at least one workflow in the pipeline runs.
+Persist workflows filtered out by their `when` conditions as skipped instead of dropping them, so they remain visible in the Woodpecker UI. Skipped workflows are only kept when at least one workflow in the pipeline runs. This controls persistence only; it does not report them to the forge — see `WOODPECKER_REPORT_SKIPPED_TO_FORGE`.
+
+---
+
+### REPORT_SKIPPED_TO_FORGE
+
+- Name: `WOODPECKER_REPORT_SKIPPED_TO_FORGE`
+- Default: `false`
+
+Report skipped workflows to the forge as skipped checks. Requires a forge that supports a skipped state (the GitHub Checks API; see `WOODPECKER_GITHUB_APP_ID`). Independent of `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`: persistence (UI visibility) and forge reporting are separate, so you can show skipped workflows in the UI while keeping them off the forge check list.
 
 ---
 

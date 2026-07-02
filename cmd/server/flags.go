@@ -420,6 +420,12 @@ var flags = append([]cli.Flag{
 		Value:   false,
 	},
 	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_REPORT_SKIPPED_TO_FORGE"),
+		Name:    "report-skipped-to-forge",
+		Usage:   "report skipped workflows to the forge as check-runs (requires a forge that supports skipped states, e.g. the GitHub Checks API). Independent of report-skipped-workflows, which only controls whether skipped workflows are persisted and shown in the Woodpecker UI.",
+		Value:   false,
+	},
+	&cli.BoolFlag{
 		Sources: cli.EnvVars("WOODPECKER_MIGRATIONS_ALLOW_LONG"),
 		Name:    "migrations-allow-long",
 		Value:   false,

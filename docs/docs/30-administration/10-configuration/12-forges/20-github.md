@@ -47,7 +47,7 @@ WOODPECKER_GITHUB_APP_ID=YOUR_APP_ID
 WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
 ```
 
-When configured, workflows are reported as check-runs; otherwise Woodpecker keeps using the commit-status API. With the Checks API you can also enable [`WOODPECKER_REPORT_SKIPPED_WORKFLOWS`](../10-server.md#report_skipped_workflows) to surface workflows filtered out by their `when` conditions as grey `skipped` checks.
+When configured, workflows are reported as check-runs; otherwise Woodpecker keeps using the commit-status API. With the Checks API you can also enable [`WOODPECKER_REPORT_SKIPPED_TO_FORGE`](../10-server.md#report_skipped_to_forge) to surface workflows filtered out by their `when` conditions as grey `skipped` checks. To keep skipped workflows visible in the Woodpecker UI without adding them to the forge check list, enable [`WOODPECKER_REPORT_SKIPPED_WORKFLOWS`](../10-server.md#report_skipped_workflows) (persist) and leave `WOODPECKER_REPORT_SKIPPED_TO_FORGE` off.
 
 ## Configuration
 

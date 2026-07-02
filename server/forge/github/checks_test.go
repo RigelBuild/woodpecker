@@ -375,13 +375,14 @@ func TestCheckRunStaleIDRecreates(t *testing.T) {
 	assert.Equal(t, 2, createCount, "the 404 must trigger a second create to recover")
 }
 
-// TestStatusChecksAPISkipped verifies that when ReportSkippedWorkflows is ON, a
+// TestStatusChecksAPISkipped verifies that when ReportSkippedToForge is ON, a
 // skipped workflow IS reported as a check-run with the `skipped` conclusion (the
-// opt-in path through the Checks API). The complementary flag-OFF default — where
-// the same skipped workflow is dropped before any forge write — is covered by
-// TestStatusSkippedGateDropsSkippedWhenReportingDisabled in status_skipped_test.go.
+// opt-in forge path through the Checks API). The complementary flag-OFF default —
+// where the same skipped workflow is dropped before any forge write — is covered
+// by TestStatusSkippedGateDropsSkippedWhenReportingDisabled in
+// status_skipped_test.go.
 func TestStatusChecksAPISkipped(t *testing.T) {
-	setReportSkippedWorkflows(t, true)
+	setReportSkippedToForge(t, true)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)

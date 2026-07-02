@@ -50,6 +50,7 @@ var Config = struct {
 		StatusAggregate        bool
 		StatusAggregateFormat  string
 		ReportSkippedWorkflows bool
+		ReportSkippedToForge   bool
 		SessionExpires         time.Duration
 		RootPath               string
 		CustomCSSFile          string
