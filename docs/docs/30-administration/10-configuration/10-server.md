@@ -371,6 +371,17 @@ As an alternative, the token can also be read from a file:
 List of Prometheus metrics specific to Woodpecker:
 
 ```yaml
+# HELP woodpecker_github_ratelimit_remaining Remaining GitHub API requests in the current window, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_remaining gauge
+woodpecker_github_ratelimit_remaining{resource="core",token_kind="user"} 4832
+woodpecker_github_ratelimit_remaining{resource="core",token_kind="app"} 12103
+# HELP woodpecker_github_ratelimit_limit Total GitHub API request quota for the current window, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_limit gauge
+woodpecker_github_ratelimit_limit{resource="core",token_kind="user"} 5000
+woodpecker_github_ratelimit_limit{resource="core",token_kind="app"} 12500
+# HELP woodpecker_github_ratelimit_reset_timestamp_seconds Unix time at which the GitHub API quota window resets, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_reset_timestamp_seconds gauge
+woodpecker_github_ratelimit_reset_timestamp_seconds{resource="core",token_kind="user"} 1751330400
 # HELP woodpecker_pipeline_count Pipeline count.
 # TYPE woodpecker_pipeline_count counter
 woodpecker_pipeline_count{branch="main",pipeline="total",repo="woodpecker-ci/woodpecker",status="success"} 3
