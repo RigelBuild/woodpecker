@@ -35,7 +35,7 @@
 
         # Locked against this fork's go.sum / web pnpm-lock. To refresh: set to
         # pkgs.lib.fakeHash, build, and paste the hash nix reports.
-        vendorHash = "sha256-z87enzlH2jVq/BI6uVbpLG6jKsO5Wr2alJOcFjt/+MM=";
+        vendorHash = "sha256-hZV7ZLoyhsKyugutlSh6R49g1xyqZvBoBryP8TSrfJc=";
         webuiHash = "sha256-6sWSybiSJj7G1KO2iv81yylmOV6DBVN1D15PFYpilC0=";
 
         # The Vue web UI, built from this fork's web/ so future UI changes are
