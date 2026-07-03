@@ -414,6 +414,12 @@ var flags = append([]cli.Flag{
 		Value:   "{{ .context }} ({{ .event }})",
 	},
 	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_PER_WORKFLOW"),
+		Name:    "status-per-workflow",
+		Usage:   "report a separate commit status / check-run per workflow. On an affected-aware fan-out a pipeline can carry dozens of workflows, each a forge write; turning this off reports only the pipeline-level aggregate (see status-aggregate) and avoids the forge's rate limit. Default on for upstream compatibility.",
+		Value:   true,
+	},
+	&cli.BoolFlag{
 		Sources: cli.EnvVars("WOODPECKER_REPORT_SKIPPED_WORKFLOWS"),
 		Name:    "report-skipped-workflows",
 		Usage:   "report workflows filtered out by their `when` conditions as skipped checks (requires a forge that supports skipped states, e.g. the GitHub Checks API)",

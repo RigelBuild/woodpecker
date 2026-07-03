@@ -588,8 +588,10 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 
 	forge.Refresh(ctx, _forge, s.store, user)
 
-	// only do status updates for parent steps
-	if workflow != nil {
+	// only do status updates for parent steps; per-workflow reporting is opt-out
+	// (StatusPerWorkflow, default on) — off, only the aggregate below is posted,
+	// avoiding a forge write per workflow on an affected-aware fan-out.
+	if workflow != nil && server.Config.Server.StatusPerWorkflow {
 		err = _forge.Status(ctx, user, repo, pipeline, workflow)
 		if err != nil {
 			log.Error().Err(err).Msgf("error setting commit status for %s/%d", repo.FullName, pipeline.Number)
