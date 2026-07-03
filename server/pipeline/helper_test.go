@@ -72,6 +72,18 @@ func setStatusAggregate(t *testing.T, v bool) {
 	t.Cleanup(func() { server.Config.Server.StatusAggregate = orig })
 }
 
+// setStatusPerWorkflow toggles the process-global StatusPerWorkflow flag for the
+// duration of a test, restoring the previous value on cleanup. The per-workflow
+// loop in updatePipelineStatus is gated on it, and it defaults to the Go
+// zero-value (false) in the test binary, so any test that exercises the loop must
+// set it explicitly.
+func setStatusPerWorkflow(t *testing.T, v bool) {
+	t.Helper()
+	orig := server.Config.Server.StatusPerWorkflow
+	server.Config.Server.StatusPerWorkflow = v
+	t.Cleanup(func() { server.Config.Server.StatusPerWorkflow = orig })
+}
+
 func threeWorkflowPipeline() (*model.Pipeline, *model.Repo, *model.User) {
 	pipeline := &model.Pipeline{
 		Number: 1,
@@ -105,6 +117,7 @@ func threeWorkflowPipeline() (*model.Pipeline, *model.Repo, *model.User) {
 // return and both assertions below fail.
 func TestUpdatePipelineStatusAggregateSurvivesPerWorkflowError(t *testing.T) {
 	setStatusAggregate(t, true)
+	setStatusPerWorkflow(t, true)
 
 	f := &aggregateResilienceForge{statusErrForWorkflowID: 1} // first workflow fails
 	pipeline, repo, user := threeWorkflowPipeline()
@@ -123,6 +136,7 @@ func TestUpdatePipelineStatusAggregateSurvivesPerWorkflowError(t *testing.T) {
 // double-report or drop the aggregate on the common all-green path.
 func TestUpdatePipelineStatusAggregateOnAllSuccess(t *testing.T) {
 	setStatusAggregate(t, true)
+	setStatusPerWorkflow(t, true)
 
 	f := &aggregateResilienceForge{statusErrForWorkflowID: -1} // no workflow fails
 	pipeline, repo, user := threeWorkflowPipeline()
@@ -141,6 +155,7 @@ func TestUpdatePipelineStatusAggregateOnAllSuccess(t *testing.T) {
 // above honest — they prove the flag drives the call, not that it always fires.
 func TestUpdatePipelineStatusNoAggregateWhenDisabled(t *testing.T) {
 	setStatusAggregate(t, false)
+	setStatusPerWorkflow(t, true)
 
 	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
 	pipeline, repo, user := threeWorkflowPipeline()
@@ -151,4 +166,76 @@ func TestUpdatePipelineStatusNoAggregateWhenDisabled(t *testing.T) {
 		"every workflow must be reported regardless of the aggregate flag")
 	require.Zero(t, f.aggregateCalls,
 		"the aggregate must not be reported when StatusAggregate is disabled")
+}
+
+// TestUpdatePipelineStatusPerWorkflowDisabledSkipsPerWorkflowStatus is the core
+// rate-limit regression this gate exists to prevent. With StatusPerWorkflow off
+// (StatusAggregate still on), updatePipelineStatus must post ZERO per-workflow
+// forge Status writes — on an affected-aware fan-out those per-workflow POSTs are
+// exactly what trips the forge's rate limit — while the pipeline-level aggregate
+// (the required branch-protection check) must still fire exactly once.
+//
+// Red check: remove the `if server.Config.Server.StatusPerWorkflow` guard around
+// the loop in helper.go (or invert it) and the loop runs regardless, so
+// statusCalledFor becomes [1,2,3] and the Empty assertion fails.
+func TestUpdatePipelineStatusPerWorkflowDisabledSkipsPerWorkflowStatus(t *testing.T) {
+	setStatusPerWorkflow(t, false)
+	setStatusAggregate(t, true)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1} // no workflow fails
+	pipeline, repo, user := threeWorkflowPipeline()
+
+	updatePipelineStatus(context.Background(), f, pipeline, repo, user)
+
+	assert.Empty(t, f.statusCalledFor,
+		"no per-workflow Status must be posted when StatusPerWorkflow is disabled")
+	assert.Equal(t, 1, f.aggregateCalls,
+		"the pipeline-level aggregate must still run exactly once when only StatusPerWorkflow is disabled")
+}
+
+// TestUpdatePipelineStatusPerWorkflowEnabledReportsEveryWorkflow pins the ON
+// branch of the gate (the upstream-compatible default): with StatusPerWorkflow
+// enabled, every workflow gets its own forge Status write, and the aggregate
+// still fires when enabled. Paired with the disabled test above, these prove the
+// flag — not incidental behavior — drives whether per-workflow statuses are
+// posted.
+//
+// Red check: hardcode the gate to false (loop never runs) and statusCalledFor is
+// empty, so the [1,2,3] assertion fails.
+func TestUpdatePipelineStatusPerWorkflowEnabledReportsEveryWorkflow(t *testing.T) {
+	setStatusPerWorkflow(t, true)
+	setStatusAggregate(t, true)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1} // no workflow fails
+	pipeline, repo, user := threeWorkflowPipeline()
+
+	updatePipelineStatus(context.Background(), f, pipeline, repo, user)
+
+	assert.Equal(t, []int64{1, 2, 3}, f.statusCalledFor,
+		"every workflow must be reported when StatusPerWorkflow is enabled")
+	assert.Equal(t, 1, f.aggregateCalls,
+		"the aggregate must still fire exactly once when StatusPerWorkflow is enabled")
+}
+
+// TestUpdatePipelineStatusAllReportingDisabledPostsNothing pins the both-off
+// corner: with StatusPerWorkflow and StatusAggregate both disabled,
+// updatePipelineStatus must perform no forge writes whatsoever — neither a
+// per-workflow Status nor the aggregate. This keeps the two gates independent and
+// guards against either one leaking a write when both are meant to be silent.
+//
+// Red check: either gate defaulting open (loop or aggregate running unguarded)
+// reddens one of the two assertions below.
+func TestUpdatePipelineStatusAllReportingDisabledPostsNothing(t *testing.T) {
+	setStatusPerWorkflow(t, false)
+	setStatusAggregate(t, false)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1} // no workflow fails
+	pipeline, repo, user := threeWorkflowPipeline()
+
+	updatePipelineStatus(context.Background(), f, pipeline, repo, user)
+
+	assert.Empty(t, f.statusCalledFor,
+		"no per-workflow Status must be posted when StatusPerWorkflow is disabled")
+	require.Zero(t, f.aggregateCalls,
+		"the aggregate must not be posted when StatusAggregate is disabled")
 }
