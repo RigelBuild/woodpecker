@@ -53,11 +53,21 @@ func convertStatus(status model.StatusValue) string {
 		return statusFailure
 	case model.StatusSuccess:
 		return statusSuccess
+	case model.StatusCanceled:
+		// "canceled but hasn't been started" — a pipeline superseded before it ran
+		// any work (e.g. a stacked/rebased PR whose older run is deduplicated). It
+		// is terminal, so it must NOT stay pending (that wedges the required
+		// aggregate check and blocks the merge queue forever). Report success: a
+		// mid-stack supersede is not a failure of the change, and the superseding
+		// run is the one that actually gates the merge. (A user-killed *running*
+		// pipeline is StatusKilled → failure above; only the never-started
+		// supersede lands here.)
+		return statusSuccess
 	default:
 		// Every not-yet-terminal or internal state (pending, running, blocked,
-		// skipped, canceled, created, and anything future) reports as pending.
-		// A status *report* must never invent a red CI failure from a transient
-		// or unrecognized state — StatusCreated ("internal use only") briefly
+		// skipped, created, and anything future) reports as pending. A status
+		// *report* must never invent a red CI failure from a transient or
+		// unrecognized state — StatusCreated ("internal use only") briefly
 		// surfaces during a merge-queue re-run and previously fell through to
 		// "error", which failed the batch (a spurious required-check failure).
 		return statusPending

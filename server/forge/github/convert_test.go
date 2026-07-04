@@ -45,7 +45,9 @@ func Test_convertStatus(t *testing.T) {
 		{name: "running", status: model.StatusRunning, want: statusPending},
 		{name: "blocked", status: model.StatusBlocked, want: statusPending},
 		{name: "skipped", status: model.StatusSkipped, want: statusPending},
-		{name: "canceled", status: model.StatusCanceled, want: statusPending},
+		// A never-started supersede (StatusCanceled) is terminal → success, so it
+		// can't wedge the required aggregate check / block the merge queue.
+		{name: "canceled", status: model.StatusCanceled, want: statusSuccess},
 		// Regression: StatusCreated ("internal use only") briefly surfaces
 		// during a merge-queue re-run. It used to fall through to statusError.
 		{name: "created", status: model.StatusCreated, want: statusPending},
