@@ -53,10 +53,16 @@ func convertStatus(status model.StatusValue) string {
 		return statusPending
 	case model.StatusFailure, model.StatusDeclined:
 		return statusFailure
+	case model.StatusKilled, model.StatusError:
+		return statusError
 	case model.StatusSuccess:
 		return statusSuccess
 	default:
-		return statusError
+		// A not-yet-terminal or internal state (e.g. the internal-only
+		// StatusCreated) must never be reported as a red "error" commit
+		// status. Treat any unrecognized state as pending rather than
+		// inventing a failure the pipeline never had.
+		return statusPending
 	}
 }
 
