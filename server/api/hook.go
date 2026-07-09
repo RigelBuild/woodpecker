@@ -226,7 +226,14 @@ func PostHook(c *gin.Context) {
 		defer cancel()
 		pl, err = pipeline.Create(bgCtx, _store, repo, pipelineFromForge)
 		if err != nil {
-			log.Error().Err(err).Str("repo", repo.FullName).Msg("could not create pipeline from webhook")
+			// An all-filtered pipeline (no workflow matched its `when`) is a clean
+			// no-op, not a failure: Create already deleted it. Log it at debug so
+			// PR/metadata/closed webhooks that match nothing don't spam error logs.
+			if errors.Is(err, pipeline.ErrFiltered) {
+				log.Debug().Str("repo", repo.FullName).Msg("webhook produced no matching workflows; skipped")
+			} else {
+				log.Error().Err(err).Str("repo", repo.FullName).Msg("could not create pipeline from webhook")
+			}
 		}
 		done <- struct{}{}
 	}()
