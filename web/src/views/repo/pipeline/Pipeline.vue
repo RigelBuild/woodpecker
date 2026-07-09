@@ -90,14 +90,14 @@ const repoPermissions = requiredInject('repo-permissions');
 
 const stepId = toRef(props, 'stepId');
 
-const defaultStepId = computed(() => pipeline.value?.workflows?.[0].children?.[0].pid ?? null);
+const defaultStepId = computed(() => pipeline.value?.workflows?.[0]?.children?.[0]?.pid ?? null);
 
 const selectedStepId = computed({
   get() {
     if (stepId.value !== '' && stepId.value !== null && stepId.value !== undefined) {
       const id = Number.parseInt(stepId.value, 10);
 
-      let step = pipeline.value.workflows?.find((workflow) => workflow.pid === id)?.children[0];
+      let step = pipeline.value.workflows?.find((workflow) => workflow.pid === id)?.children?.[0];
       if (step) {
         return step.pid;
       }
