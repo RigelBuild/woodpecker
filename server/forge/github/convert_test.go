@@ -25,12 +25,37 @@ import (
 )
 
 func Test_convertStatus(t *testing.T) {
-	assert.Equal(t, statusSuccess, convertStatus(model.StatusSuccess))
-	assert.Equal(t, statusPending, convertStatus(model.StatusPending))
-	assert.Equal(t, statusPending, convertStatus(model.StatusRunning))
-	assert.Equal(t, statusFailure, convertStatus(model.StatusFailure))
-	assert.Equal(t, statusError, convertStatus(model.StatusKilled))
-	assert.Equal(t, statusError, convertStatus(model.StatusError))
+	// Exhaustive over every model.StatusValue. The contract: terminal bad
+	// outcomes map to GitHub "failure"/"error"; success maps to "success";
+	// every not-yet-terminal or internal state maps to "pending".
+	// convertStatus must never turn a transient or unrecognized status into a
+	// spurious red "error" commit status — the internal-only StatusCreated in
+	// particular previously fell through the default to "error".
+	tests := []struct {
+		name   string
+		status model.StatusValue
+		want   string
+	}{
+		{name: "success", status: model.StatusSuccess, want: statusSuccess},
+		{name: "failure", status: model.StatusFailure, want: statusFailure},
+		{name: "declined", status: model.StatusDeclined, want: statusFailure},
+		{name: "killed", status: model.StatusKilled, want: statusError},
+		{name: "error", status: model.StatusError, want: statusError},
+		{name: "pending", status: model.StatusPending, want: statusPending},
+		{name: "running", status: model.StatusRunning, want: statusPending},
+		{name: "blocked", status: model.StatusBlocked, want: statusPending},
+		{name: "skipped", status: model.StatusSkipped, want: statusPending},
+		{name: "canceled", status: model.StatusCanceled, want: statusPending},
+		// Regression: the internal-only StatusCreated used to fall through the
+		// default to statusError, posting a spurious red commit status.
+		{name: "created", status: model.StatusCreated, want: statusPending},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, convertStatus(tc.status))
+		})
+	}
 }
 
 func Test_convertDesc(t *testing.T) {

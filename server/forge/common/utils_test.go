@@ -81,20 +81,28 @@ func TestNormalizeEventReason(t *testing.T) {
 func TestGetPipelineStatusDescription(t *testing.T) {
 	t.Parallel()
 
+	// The fix removed the "unknown status" default: the internal-only
+	// StatusCreated previously produced "unknown status" (paired with a
+	// spurious red commit status). No defined status may yield it now.
 	tests := map[model.StatusValue]string{
-		model.StatusPending:        "Pipeline is pending",
-		model.StatusRunning:        "Pipeline is running",
-		model.StatusSuccess:        "Pipeline was successful",
-		model.StatusFailure:        "Pipeline failed",
-		model.StatusError:          "Pipeline failed",
-		model.StatusKilled:         "Pipeline was canceled",
-		model.StatusBlocked:        "Pipeline is pending approval",
-		model.StatusDeclined:       "Pipeline was rejected",
-		model.StatusValue("bogus"): "unknown status",
+		model.StatusPending:  "Pipeline is pending",
+		model.StatusRunning:  "Pipeline is running",
+		model.StatusSuccess:  "Pipeline was successful",
+		model.StatusFailure:  "Pipeline failed",
+		model.StatusError:    "Pipeline failed",
+		model.StatusKilled:   "Pipeline was canceled",
+		model.StatusBlocked:  "Pipeline is pending approval",
+		model.StatusDeclined: "Pipeline was rejected",
+		model.StatusCanceled: "Pipeline is pending",
+		model.StatusSkipped:  "Pipeline is pending",
+		// Regression: StatusCreated used to yield the "unknown status" default.
+		model.StatusCreated: "Pipeline is pending",
 	}
 
 	for status, want := range tests {
-		assert.Equalf(t, want, common.GetPipelineStatusDescription(status), "status %q", status)
+		got := common.GetPipelineStatusDescription(status)
+		assert.Equalf(t, want, got, "status %q", status)
+		assert.NotEqualf(t, "unknown status", got, "GetPipelineStatusDescription must never return \"unknown status\" for defined status %q", status)
 	}
 }
 
