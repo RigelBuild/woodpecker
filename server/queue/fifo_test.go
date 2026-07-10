@@ -1311,3 +1311,186 @@ func findTaskByAgent(tasks map[string]int64, agentID int64) string {
 	}
 	return ""
 }
+
+func TestFifoFairDispatch(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("older pipeline dependent dispatches before newer pipeline task", func(t *testing.T) {
+		// Core fair-dispatch bug: when an older pipeline's dependent clears its
+		// dependency it is PushBack'd to the TAIL of pending, landing behind a
+		// task from a pipeline created later and getting starved. Dispatch must
+		// order by Created, not insertion order, so the earlier task deliberately
+		// carries the HIGHER ID to prove ordering is by Created, never by ID.
+		dep := &model.Task{ID: "10", PipelineID: 1, Created: 100}
+		older := &model.Task{
+			ID:           "20",
+			PipelineID:   1,
+			Created:      100,
+			Dependencies: []string{"10"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+		newer := &model.Task{ID: "30", PipelineID: 2, Created: 200}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dep, older, newer}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 1, info.Stats.WaitingOnDeps) // older is parked on its dependency
+
+		// dep and newer are runnable; dep sorts first by Created either way.
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got.ID)
+
+		// completing dep clears older's dependency; filterWaiting PushBacks older
+		// to the tail of pending, leaving pending == [newer, older].
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		// the now-ready older dependent (lower Created) must win over newer.
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got2.ID, "older pipeline's now-ready dependent must dispatch before the newer pipeline's task")
+
+		// drain whichever task actually dispatched so the queue empties cleanly
+		// on both the red (pre-A1) and green (post-A1) paths; the defended
+		// contract lives entirely in the assertion above.
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"20", "30"}, []string{got2.ID, got3.ID})
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("concurrency admission is invariant to the Created-ordered walk", func(t *testing.T) {
+		// A1 reorders the pending walk by Created; the concurrency admit/defer
+		// decision (a full, position-independent scan) must be unchanged. An
+		// unlimited task whose Created falls BETWEEN the two group members must
+		// run freely without disturbing which member takes the single slot.
+		// IDs track Created only incidentally here; ordering is proved elsewhere.
+		a := &model.Task{ID: "100", PipelineID: 1, Created: 100, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+		c := &model.Task{ID: "150", PipelineID: 3, Created: 150} // unlimited, sorts BETWEEN a and b
+		b := &model.Task{ID: "200", PipelineID: 2, Created: 200, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{a, b, c}))
+		waitForProcess()
+
+		g1, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		g2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		// a (earliest group member) takes the single group slot; c (unlimited)
+		// runs freely; b is deferred even though the sorted walk visits c between.
+		assert.ElementsMatch(t, []string{"100", "150"}, []string{g1.ID, g2.ID})
+
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 2)
+		assert.Len(t, info.Pending, 1) // b deferred by the concurrency limit
+
+		// b cannot be polled while a holds the only slot.
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		_, err = q.Poll(pollCtx, 3, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err)
+
+		// freeing a's slot lets b (the remaining group member) run.
+		assert.NoError(t, q.Done(ctx, "100", model.StatusSuccess))
+		waitForProcess()
+		g3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "200", g3.ID)
+
+		assert.NoError(t, q.Done(ctx, "150", model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, g3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("expired lease retries before a newer pending task", func(t *testing.T) {
+		// resubmitExpiredPipelines PushFronts an expired task to the pending
+		// head. Under A1 the expired task (lower Created) still sorts first, so
+		// retry priority is preserved. The retried older task carries the LOWER
+		// ID, so a pass proves ordering-by-Created, not the incidental ID order.
+		q.extension = 0
+		t.Cleanup(func() { q.extension = 50 * time.Millisecond })
+
+		old := &model.Task{ID: "10", Created: 100}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{old}))
+		waitForProcess()
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got.ID)
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- q.Wait(ctx, got.ID) }()
+
+		waitForProcess()
+		select {
+		case werr := <-errCh:
+			assert.ErrorIs(t, werr, ErrTaskExpired) // lease expired, task resubmitted to pending head
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Wait to return")
+		}
+
+		newer := &model.Task{ID: "20", Created: 200}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{newer}))
+		waitForProcess()
+
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got2.ID, "expired older task retries before the newer pending task")
+
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got3.ID)
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("same-Created siblings dispatch in name order", func(t *testing.T) {
+		// Two independent same-pipeline siblings share Created; the tiebreaker is
+		// the workflow Name, not insertion order or ID. "aaa" sorts before "zzz"
+		// yet carries the HIGHER ID, so a pass proves ordering is by Name, not ID.
+		zzz := &model.Task{ID: "10", PipelineID: 1, Created: 100, Name: "zzz"}
+		aaa := &model.Task{ID: "20", PipelineID: 1, Created: 100, Name: "aaa"}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{zzz, aaa}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got.ID, "same-Created siblings dispatch in name order")
+
+		// drain off the actually dispatched IDs so the red (pre-A1) path ends as
+		// an assertion failure rather than hanging on an empty queue.
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"10", "20"}, []string{got.ID, got2.ID})
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+}
