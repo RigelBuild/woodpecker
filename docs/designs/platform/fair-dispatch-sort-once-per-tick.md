@@ -208,6 +208,13 @@ Relies on the tick invariant above.
   per-task worker scoring MUST be byte-for-byte identical to PR #5 baseline
   `8e73b4d6`. This change is a pure internal optimization — zero observable
   behavior change. PR #5's tests are the oracle.
+- **Depends on PR #5 (fair-dispatch, SEA-938):** this optimization stacks on the
+  fair-dispatch change. `TestFifoFairDispatch` and the creation-order dispatch
+  behavior land in PR #5, **not** in this PR's base (`sealed-fork` at
+  `81d343dbc`). Implementation of SEA-1180 MUST begin only after PR #5 has merged
+  to `sealed-fork`; all `fifo.go`/`fifo_test.go` line numbers and the
+  `TestFifoFairDispatch` oracle cited below are **as of PR #5's head `8e73b4d6`**,
+  the post-merge state the executor will branch from.
 - **Locking unchanged:** all work stays within the existing single `q.Lock()`/
   `q.Unlock()` per-tick critical section (lines 265/285). No new goroutines, no
   lock-scope changes.
@@ -235,8 +242,10 @@ refactor, so it is written first and stays green throughout.
 
 - **Interfaces:** consumes `setupTestQueue(t)` (server/queue/fifo_test.go:54 and
   siblings); produces a new `TestFifo…` subtest colocated with
-  `TestFifoFairDispatch` (fifo_test.go:1315). Uses `model.Task{Created, ...}` and
-  the existing worker-registration test helpers.
+  `TestFifoFairDispatch` (at fifo_test.go:1315 **once PR #5 has merged** — that
+  test and line number do not exist on this PR's `sealed-fork` base, see Global
+  Constraints). Uses `model.Task{Created, ...}` and the existing
+  worker-registration test helpers.
 
 ### Task 2 — Implement the chosen approach (assume C)
 
@@ -258,11 +267,12 @@ now-redundant per-call sort. Keep `taskOrderLess`/stable-sort semantics.
 
 ### Task 3 — Regression + perf guard
 
-Run the full queue suite; all must stay green unchanged:
-`TestFifoFairDispatch` (1315), `TestFifoConcurrency` (674),
+Run the full queue suite (line numbers as of PR #5's head `8e73b4d6`, the
+post-merge state this work branches from); all must stay green unchanged:
+`TestFifoFairDispatch` (1315, added by PR #5), `TestFifoConcurrency` (674),
 `TestFifoDependencies` (362), `TestFifoBasicOperations` (53),
 `TestFifoLeaseManagement` (896), `TestFifoLabelBasedScoring` (1180). Optionally
-add a micro-benchmark asserting one sort per tick (guards against regto
+add a micro-benchmark asserting one sort per tick (guards against regression to
 per-call sort).
 
 - **Interfaces:** `go test ./server/queue/...` (local; no fork CI). Optional
