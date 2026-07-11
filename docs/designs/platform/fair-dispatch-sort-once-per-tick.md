@@ -120,9 +120,21 @@ All citations are `server/queue/fifo.go` at baseline `8e73b4d6`, read in-session
 The whole tick runs under one lock — `q.Lock()` at line 265, `q.Unlock()` at 285.
 Within that critical section:
 
-- **`q.running` only grows** (line 278 adds; completion is handled off the
-  `done` channel elsewhere, never inside this locked loop) ⇒ `canRunConcurrent(task)`
-  (line 324) only ever **tightens** during a tick.
+- **`canRunConcurrent(task)` (call site line 324) only ever tightens during a
+  tick.** The early gate `if running >= task.ConcurrencyLimit` (fifo.go:409-411)
+  is monotone: `q.running` only grows (line 278 adds; completion is handled off
+  the `done` channel elsewhere, never inside this locked loop). The main verdict
+  is `running + ahead < limit` (fifo.go:438), where `ahead` counts earlier
+  same-group members from **both** `q.pending` and `q.waitingOnDeps`
+  (fifo.go:429-436) — so `ahead` *shrinks* as pending drains, and "running grows"
+  alone does not prove the gate tightens. The real guarantee is **conservation**:
+  every member counted in `ahead` is by construction same-group (fifo.go:418), so
+  when it dispatches it leaves `q.pending` (`ahead--`, `Remove` line 277) and
+  enters `q.running` (`running++`, line 278) in lockstep — `running + ahead` is
+  conserved. Same-pipeline members are excluded from `ahead` (fifo.go:422-424),
+  so their dispatch raises only `running` (strictly tighter). `q.waitingOnDeps`
+  is fixed for the loop (`filterWaiting` ran once at line 272, before the loop).
+  Hence `running + ahead` never decreases: the gate never loosens.
 - **`q.workers` only shrinks** (line 276 `delete`; no worker is added mid-loop).
 - **`q.pending` only shrinks** (line 277 `Remove`), and `filterWaiting()` (line
   272) has already run once before the loop, so pending membership is fixed for
@@ -147,8 +159,11 @@ the first eligible task in order; per-task worker selection is unchanged.)
 
 ## Approach
 
-Three candidate approaches. Recommendation: **Approach C (single-pass
-restructure)**, with the final choice deferred to an Open Question for Matt.
+Three approaches that all "sort once per tick" (A/B/C), plus two lower-risk
+alternatives surfaced by the critic pass (D sorted-insert, B′ slice+cursor — see
+`## Alternatives considered`). The original recommendation is **Approach C**, but
+the adversarial pass reframed the decision criterion (see Open Questions): the
+final choice is deferred to Matt.
 
 ### Approach A — cache + invalidate on the `fifo` struct
 
@@ -194,9 +209,58 @@ Relies on the tick invariant above.
   control-flow change → design approval per `AGENTS.md`), and MUST carefully
   preserve the per-task `bestWorker`/`bestScore` reset (see scoring caveat) so
   worker selection stays byte-for-byte identical to PR #5.
-- **Verdict:** recommended. Only approach that removes the redundant work without
-  adding invalidation or membership surface; the invariant makes the behavioral
-  equivalence provable.
+- **Verdict:** recommended *for the single-pass shape*, but its "only clean
+  option" claim is contested — the adversarial critic pass (see
+  `## Alternatives considered`) surfaced a lower-risk alternative (D,
+  sorted-insert) that also removes the redundant work with no cache/membership
+  surface *and* no control-flow change. C's equivalence is provable from the
+  invariant; the open question is whether its larger blast radius is warranted
+  (see Open Questions).
+
+## Alternatives considered
+
+Surfaced by the adversarial design-critic pass (SEA-1188); folded here because
+they were absent from the original A/B/C set and change the risk calculus.
+
+### D — sorted-insert: keep `q.pending` ordered, drop the sort entirely
+
+`taskOrderLess` keys only on `Created` and `Name` (fifo.go:445-450), both
+**immutable** task fields — so a task's sort position never changes over its
+lifetime. Insert each task at its ordered position instead of `PushBack` +
+sort-on-read (mutation sites: `PushAtOnce` line 80, `filterWaiting` re-push line
+293, `resubmitExpiredPipelines` `PushFront` line 457), and `pendingByCreation()`
+degenerates to a plain `O(M)` snapshot with **no sort at all**.
+
+- **Pro:** eliminates the sort rather than hoisting it; no cache state, no
+  membership guard, and — crucially — **no `process()`/`assignToWorker()`
+  control-flow restructure**, so it may not even trip the `AGENTS.md`
+  design-approval gate C incurs. Lowest blast radius of any option.
+- **Con / load-bearing catch:** `resubmitExpiredPipelines` deliberately
+  `PushFront`s an expired task (fifo.go:457) to re-dispatch it ahead of the
+  queue. Sorted-insert would relocate it to creation order — a **behavioral
+  change** unless resubmit is special-cased. This seam is what makes D a genuine
+  fork, not a free win: it must be verified that no path depends on
+  `PushFront`/`PushBack` insertion order diverging from `taskOrderLess` order.
+- **Verdict:** lower-risk than C for the same result; contingent on the
+  resubmit-ordering check. Surfaced to the Open Question.
+
+### B′ — slice + resume-cursor (membership-free variant of B)
+
+B was rejected (lines 188-193) because a removed `*list.Element` lingers in the
+hoisted slice and `container/list` has no clean membership test. But the tick
+invariant guarantees the walk only ever moves **forward** — a skipped element is
+never revisited in the tick — so `assignToWorker()` needs no membership test:
+sort once in `process()`, pass the sorted slice **and a resume cursor**, and have
+`assignToWorker` resume from the cursor, returning `(element, worker, nextCursor)`.
+This keeps the `process()`/`assignToWorker()` call protocol (smaller diff than
+C's full inline dispatch) while still sorting once per tick.
+
+- **Pro:** removes B's stated con (the membership hack was a strawman given the
+  invariant); smaller control-flow change than C.
+- **Con:** still threads a cursor through the call signature; marginally more
+  surface than D.
+- **Verdict:** viable lower-risk middle ground; dominated by D on blast radius,
+  retained for completeness.
 
 ## Global Constraints
 
@@ -235,10 +299,22 @@ approach Open Question is decided (assume **C** unless Matt says otherwise).
 ### Task 1 — Lock behavioral equivalence with a red test
 
 Add a test that dispatches **multiple tasks in a single tick** and asserts (a)
-dispatch order = creation order and (b) a concurrency-deferred task stays
-deferred while later-eligible tasks in the same tick dispatch. This test must
-pass on the PR #5 baseline (it encodes current behavior) — it guards the
-refactor, so it is written first and stays green throughout.
+dispatch order = creation order, (b) a concurrency-deferred task stays deferred
+while later-eligible tasks in the same tick dispatch, and (c) **per-task worker
+scoring is reset** — in one tick, dispatch an earlier task to its highest-scoring
+worker, then assert a *later* same-tick task is dispatched to a worker whose
+score is **strictly lower** than the earlier winner's. This test must pass on the
+PR #5 baseline (it encodes current behavior) — it guards the refactor, so it is
+written first and stays green throughout.
+
+Assertion (c) is load-bearing and NOT covered by the existing suite: the closest
+guard, `TestFifoLabelBasedScoring` (`8e73b4d6:fifo_test.go:1180-1249`), catches a
+`bestScore` carried across tasks only by coincidence — both its matching filters
+score exactly `20` (fifo_test.go:1195,1203), so a non-reset `bestScore` fails the
+`score > bestScore` check (fifo.go:331) and the later task never dispatches. If a
+later task's best score were strictly *higher* than the earlier winner's, a
+missing reset would still dispatch and the cross-task scoring regression — the #1
+hazard of Approach C (see scoring caveat) — would pass green. (c) closes that gap.
 
 - **Interfaces:** consumes `setupTestQueue(t)` (server/queue/fifo_test.go:54 and
   siblings); produces a new `TestFifo…` subtest colocated with
@@ -262,7 +338,7 @@ now-redundant per-call sort. Keep `taskOrderLess`/stable-sort semantics.
     reset preserved.
   - `pendingByCreation() []*list.Element` (fifo.go:356) — unchanged; now called
     once per tick.
-  - No change to `canRunConcurrent` (fifo.go:376), `worker.filter`, or
+  - No change to `canRunConcurrent` (fifo.go:395), `worker.filter`, or
     `taskOrderLess`.
 
 ### Task 3 — Regression + perf guard
@@ -280,17 +356,33 @@ per-call sort).
 
 ## Tasks
 
-- [ ] Task 1 — red/equivalence test: multi-dispatch-per-tick order + deferred-stays-deferred
+- [ ] Task 1 — red/equivalence test: order + deferred-stays-deferred + per-task scoring reset (strictly-lower later task)
 - [ ] Task 2 — implement chosen approach (assume C: single-pass restructure), preserve per-task scoring reset
 - [ ] Task 3 — full queue suite stays green; optional per-tick sort benchmark
 
 ## Open Questions
 
-- **[LOAD-BEARING] Which approach?** Recommend **C (single-pass restructure)** —
-  cleanest, no cache/membership surface, equivalence provable from the tick
-  invariant. Alternatives: **A** (cache+invalidate — most correctness surface,
-  rejected-leaning), **B** (hoist sort — needs an awkward mid-loop-removal
-  guard). This blocks the merge-freeze: an executor needs the decided shape.
+- **[LOAD-BEARING] Do this at all — and if so, by which criterion?** The
+  adversarial critic pass (SEA-1188) raised that the Problem section admits the
+  gain is "negligible at realistic queue depth" (line 18) and CodeRabbit tagged
+  it Trivial (line 17) — so the rational decision criterion is **lowest risk**,
+  not lowest big-O. Under that criterion the options reorder:
+  - **WONTFIX — accept the per-call sort.** Never weighed in the original draft.
+    Zero correctness surface, zero design-approval cost; for a non-observable
+    gain, doing nothing is the safest option and a legitimate answer.
+  - **D (sorted-insert)** or **B′ (slice+cursor)** — remove/hoist the sort with
+    materially less blast radius than C (D adds no control-flow change; see
+    `## Alternatives considered`), D contingent on its resubmit-ordering check.
+  - **C (single-pass restructure)** — the original recommendation: cleanest
+    single-pass shape, equivalence provable from the tick invariant, but the
+    **largest** blast radius (control-flow restructure → design-approval gate at
+    lines 208-209; must preserve the per-task scoring reset, the #1 regression
+    hazard). On a lowest-risk criterion, C is the *weakest* pick.
+  - **A (cache+invalidate)** — most correctness surface; rejected-leaning.
+
+  I did **not** flip the recommendation unilaterally — that is Matt's
+  ratification. My read: if the gain is truly negligible, **WONTFIX or D**
+  dominate C. This blocks the merge-freeze: the executor needs the decided shape.
   *mercator relays to Matt.*
 - **[NON-LOAD-BEARING] Fold into PR #5, or ship as its own follow-up PR?**
   Recommend a **separate follow-up PR** (keeps PR #5's fairness diff minimal and
