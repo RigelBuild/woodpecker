@@ -241,12 +241,16 @@ degenerates to a plain `O(M)` snapshot with **no sort at all**.
   change** unless resubmit is special-cased. This seam is what makes D a genuine
   fork, not a free win: it must be verified that no path depends on
   `PushFront`/`PushBack` insertion order diverging from `taskOrderLess` order.
+  - **Review-swarm check (SEA-1180, unratified — for Matt):** this catch appears
+    **inverted**. See Open Questions: at baseline `8e73b4d6` every `q.pending` reader
+    already derives order from `taskOrderLess`, so `PushFront`'s physical placement is
+    already overridden — D would *match* current dispatch behavior, not diverge from it.
 - **Verdict:** lower-risk than C for the same result; contingent on the
   resubmit-ordering check. Surfaced to the Open Question.
 
 ### B′ — slice + resume-cursor (membership-free variant of B)
 
-B was rejected (lines 188-193) because a removed `*list.Element` lingers in the
+B was found viable-but-ugly (lines 188-193) because a removed `*list.Element` lingers in the
 hoisted slice and `container/list` has no clean membership test. But the tick
 invariant guarantees the walk only ever moves **forward** — a skipped element is
 never revisited in the tick — so `assignToWorker()` needs no membership test:
@@ -316,8 +320,8 @@ later task's best score were strictly *higher* than the earlier winner's, a
 missing reset would still dispatch and the cross-task scoring regression — the #1
 hazard of Approach C (see scoring caveat) — would pass green. (c) closes that gap.
 
-- **Interfaces:** consumes `setupTestQueue(t)` (server/queue/fifo_test.go:54 and
-  siblings); produces a new `TestFifo…` subtest colocated with
+- **Interfaces:** consumes `setupTestQueue(t)` (defined at server/queue/fifo_test.go:41);
+  produces a new `TestFifo…` subtest colocated with
   `TestFifoFairDispatch` (at fifo_test.go:1315 **once PR #5 has merged** — that
   test and line number do not exist on this PR's `sealed-fork` base, see Global
   Constraints). Uses `model.Task{Created, ...}` and the existing
@@ -384,6 +388,26 @@ per-call sort).
   ratification. My read: if the gain is truly negligible, **WONTFIX or D**
   dominate C. This blocks the merge-freeze: the executor needs the decided shape.
   *mercator relays to Matt.*
+- **[LOAD-BEARING — review-swarm finding, SEA-1180, UNRATIFIED] D's "load-bearing
+  catch" is inverted; D is lower-risk than the `## Alternatives considered` Con
+  states.** The mandated review-swarm (advisory) grounded the D resubmit-ordering
+  catch (lines 238-243) against baseline `8e73b4d6` this session. Result: all eight
+  `q.pending` readers are order-independent or re-derive order via `taskOrderLess` —
+  dispatch walks the sorted `pendingByCreation()` (fifo.go:318); the concurrency-group
+  `ahead` scan iterates physically but counts via `taskOrderLess(other, task)`
+  (fifo.go:425-429); `depsInQueue`, `updateDepStatusInQueue`,
+  `removeFromPendingAndWaiting` match by task ID; `stats` reads `Len()`;
+  `filterWaiting` rebuilds a set. `resubmitExpiredPipelines` `PushFront`s (fifo.go:457)
+  but does **not** mutate `Created`, so the sort-on-read overrides the physical front
+  every tick. **Net: the resubmitted task already dispatches in creation order at
+  baseline — D's sorted-insert *matches* current behavior; it is the
+  `PushFront`-*preserving* special-case that would diverge.** The check the D verdict
+  defers here comes back clean, which *removes* D's one contingency and *strengthens*
+  the "D dominates C" read — bearing on the "assume C" Plan default (lines 297/326),
+  which assumes the option this OQ ranks weakest. **Not flipping the recommendation —
+  Matt ratifies.** Secondary observation for Matt: this means PR #5's sort already
+  defeats `resubmitExpiredPipelines`'s intent to re-dispatch an expired task *ahead*
+  of the queue — a latent PR #5 behavior question, his call.
 - **[NON-LOAD-BEARING] Fold into PR #5, or ship as its own follow-up PR?**
   Recommend a **separate follow-up PR** (keeps PR #5's fairness diff minimal and
   already-reviewed; this is a pure optimization). Deferrable — doesn't change the
