@@ -24,6 +24,8 @@ change so the approach fork gets a decision before any code lands.
 
 All citations are `server/queue/fifo.go` at baseline `8e73b4d6`, read in-session.
 
+<!-- markdownlint-disable MD010 -->
+
 **`process()` — the per-tick dispatch loop calls `assignToWorker()` per dispatch** (lines 257-287):
 
 ```go
@@ -87,8 +89,9 @@ All citations are `server/queue/fifo.go` at baseline `8e73b4d6`, read in-session
 338: 			return element, bestWorker
 339: 		}
 340: 	}
-341: 	return nil, nil
-342: }
+341:
+342: 	return nil, nil
+343: }
 ```
 
 **`pendingByCreation()` — fresh slice alloc + full stable sort every call** (lines 356-374):
@@ -114,6 +117,8 @@ All citations are `server/queue/fifo.go` at baseline `8e73b4d6`, read in-session
 373: 	return elements
 374: }
 ```
+
+<!-- markdownlint-enable MD010 -->
 
 ## Key invariant (why a single pass per tick is safe)
 
@@ -156,6 +161,26 @@ task, never across tasks. Any restructure that keeps one running pass MUST reset
 `bestWorker`/`bestScore` per element to preserve this. (This is the same property
 the Greptile P2 on PR #5 raised and `seal-agent` confirmed: dispatch commits to
 the first eligible task in order; per-task worker selection is unchanged.)
+
+**Dependency-safety caveat (must preserve):** dispatch never inverts a
+dependency — a dependent task is never dispatched before the task it depends on.
+At baseline this holds *structurally but implicitly*: `filterWaiting()` (fifo.go:272)
+runs immediately before the dispatch loop and moves every task whose dependency is
+still in `q.pending` or `q.running` into `q.waitingOnDeps` (`depsInQueue`,
+fifo.go:433-449), so the post-`filterWaiting` pending set provably contains no
+task/dependent pair. The safety therefore rides entirely on *ordering-independence*:
+it is true because `filterWaiting` already removed every dependent, **not** because
+the walk order happens to visit dependencies first. This is a comment-only temporal
+invariant — nothing structural or test-level enforces the `filterWaiting`→dispatch
+adjacency. **Any approach here that decouples the ordered snapshot from its
+`filterWaiting` anchor** (B/B′ hoist the sort above the loop; C restructures the
+loop; A memoizes across ticks) **MUST keep the ordered set built from the
+*post-`filterWaiting`* pending state** — a snapshot taken before `filterWaiting`,
+or reused across a `filterWaiting` re-run, could dispatch a dependent ahead of its
+dependency. The review-swarm design lens flagged this as the highest-value
+preservation constraint (SEA-1180). Task 1's equivalence test SHOULD add a
+dependency-ordering assertion (a dependent enqueued earlier by `Created` than its
+dependency still dispatches after it) so the invariant is executable, not prose.
 
 ## Approach
 
@@ -314,7 +339,7 @@ written first and stays green throughout.
 Assertion (c) is load-bearing and NOT covered by the existing suite: the closest
 guard, `TestFifoLabelBasedScoring` (`8e73b4d6:fifo_test.go:1180-1249`), catches a
 `bestScore` carried across tasks only by coincidence — both its matching filters
-score exactly `20` (fifo_test.go:1195,1203), so a non-reset `bestScore` fails the
+score exactly `20` (fifo_test.go:1196,1203), so a non-reset `bestScore` fails the
 `score > bestScore` check (fifo.go:331) and the later task never dispatches. If a
 later task's best score were strictly *higher* than the earlier winner's, a
 missing reset would still dispatch and the cross-task scoring regression — the #1
@@ -384,14 +409,12 @@ per-call sort).
     hazard). On a lowest-risk criterion, C is the *weakest* pick.
   - **A (cache+invalidate)** — most correctness surface; rejected-leaning.
 
-  I did **not** flip the recommendation unilaterally — that is Matt's
-  ratification. My read: if the gain is truly negligible, **WONTFIX or D**
-  dominate C. This blocks the merge-freeze: the executor needs the decided shape.
-  *mercator relays to Matt.*
-- **[LOAD-BEARING — review-swarm finding, SEA-1180, UNRATIFIED] D's "load-bearing
+  My read: if the gain is truly negligible, **WONTFIX or D** dominate C. The
+  executor needs the decided shape before implementation can start.
+- **[LOAD-BEARING] D's "load-bearing
   catch" is inverted; D is lower-risk than the `## Alternatives considered` Con
-  states.** The mandated review-swarm (advisory) grounded the D resubmit-ordering
-  catch (lines 238-243) against baseline `8e73b4d6` this session. Result: all eight
+  states.** Grounding the D resubmit-ordering
+  catch (lines 238-243) against baseline `8e73b4d6`: all eight
   `q.pending` readers are order-independent or re-derive order via `taskOrderLess` —
   dispatch walks the sorted `pendingByCreation()` (fifo.go:318); the concurrency-group
   `ahead` scan iterates physically but counts via `taskOrderLess(other, task)`
@@ -403,9 +426,8 @@ per-call sort).
   baseline — D's sorted-insert *matches* current behavior; it is the
   `PushFront`-*preserving* special-case that would diverge.** The check the D verdict
   defers here comes back clean, which *removes* D's one contingency and *strengthens*
-  the "D dominates C" read — bearing on the "assume C" Plan default (lines 297/326),
-  which assumes the option this OQ ranks weakest. **Not flipping the recommendation —
-  Matt ratifies.** Secondary observation for Matt: this means PR #5's sort already
+  the "D dominates C" read — bearing on the Plan's "assume C" default (Plan intro and Task 2),
+  which assumes the option this OQ ranks weakest. Secondary observation for Matt: this means PR #5's sort already
   defeats `resubmitExpiredPipelines`'s intent to re-dispatch an expired task *ahead*
   of the queue — a latent PR #5 behavior question, his call.
 - **[NON-LOAD-BEARING] Fold into PR #5, or ship as its own follow-up PR?**
