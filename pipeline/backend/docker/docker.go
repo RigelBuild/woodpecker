@@ -232,8 +232,16 @@ func (e *docker) StartStep(ctx context.Context, step *backend_types.Step, taskUU
 		}
 		// TODO(1936): show image pull progress in web-ui
 		fd, isTerminal := term.GetFdInfo(os.Stdout)
+		// This is the authoritative pull: the create already failed NotFound, so
+		// the image is not present locally and this pull is the only chance to
+		// obtain it. A registry error is delivered INSIDE the message stream (not
+		// as pErr), so a swallowed stream error here lets the retried
+		// ContainerCreate fail with a misleading "No such image" that masks the
+		// real cause (rate-limit, timeout, manifest/blob error). Return it so the
+		// genuine failure reaches the step log instead of the downstream NotFound.
 		if err := jsonmessage.DisplayJSONMessagesStream(responseBody, os.Stdout, fd, isTerminal, nil); err != nil {
-			log.Error().Err(err).Msg("DisplayJSONMessagesStream")
+			responseBody.Close()
+			return err
 		}
 		responseBody.Close()
 
