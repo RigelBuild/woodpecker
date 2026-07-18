@@ -111,6 +111,9 @@ type Queue interface {
 	// applied to each candidate: returning false skips the task, the int is a
 	// match score (higher is better). The named scheduler.FilterFn wraps this
 	// signature for callers.
+	// Ordering among eligible candidates is implementation-defined. The fifo
+	// implementation dispatches in task creation order (by Created, then
+	// workflow Name) so earlier pipelines are not starved by later ones.
 	Poll(c context.Context, agentID int64, f func(*model.Task) (bool, int)) (*model.Task, error)
 
 	// Extend extends the deadline for a task.
