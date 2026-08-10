@@ -41,15 +41,16 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		return nil, &ErrBadRequest{Msg: "cannot restart a pipeline with status blocked"}
 	}
 
-	// fetch the old pipeline config from the database
-	configs, err := store.ConfigsForPipeline(lastPipeline.ID)
+	// Seed the refetch with the old pipeline's persisted config. The forge
+	// fetcher reuses this as-is on restart; a config extension may replace it.
+	oldConfigs, err := store.ConfigsForPipeline(lastPipeline.ID)
 	if err != nil {
 		log.Error().Err(err).Msgf("failure to get pipeline config for %s", repo.FullName)
 		return nil, &ErrNotFound{Msg: fmt.Sprintf("failure to get pipeline config for %s. %s", repo.FullName, err)}
 	}
 
 	var pipelineFiles []*forge_types.FileMeta
-	for _, y := range configs {
+	for _, y := range oldConfigs {
 		pipelineFiles = append(pipelineFiles, &forge_types.FileMeta{Data: y.Data, Name: y.Name})
 	}
 
@@ -74,7 +75,12 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		return nil, errors.New(msg)
 	}
 
-	if len(configs) == 0 {
+	// Guard on the refetched config, not the old persisted rows. A pipeline that
+	// errored before persisting any config (e.g. a transient config-extension
+	// failure) has no old rows, yet a healthy refetch here can still yield a
+	// valid definition to restart from. Only a genuinely empty result — no old
+	// config and nothing served — is "definition not found".
+	if len(pipelineFiles) == 0 {
 		newPipeline, uErr := UpdateToStatusError(store, *newPipeline, errors.New("pipeline definition not found"))
 		if uErr != nil {
 			log.Debug().Err(uErr).Msg("failure to update pipeline status")
@@ -82,6 +88,19 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 			updatePipelineStatus(ctx, forge, newPipeline, repo, user)
 		}
 		return newPipeline, nil
+	}
+	// Persist the refetched config and link it, so the restart's config-of-record
+	// matches what it actually runs (mirrors Create). ConfigPersist dedups by
+	// (repo, name, hash), so an unchanged config reuses the existing rows.
+	configs := make([]*model.Config, 0, len(pipelineFiles))
+	for _, pipelineFile := range pipelineFiles {
+		config, cErr := findOrPersistPipelineConfig(store, newPipeline, pipelineFile)
+		if cErr != nil {
+			msg := fmt.Sprintf("failure to find or persist pipeline config for %s", repo.FullName)
+			log.Error().Err(cErr).Msg(msg)
+			return nil, errors.New(msg)
+		}
+		configs = append(configs, config)
 	}
 	if err := linkPipelineConfigs(store, configs, newPipeline.ID); err != nil {
 		msg := fmt.Sprintf("failure to persist pipeline config for %s.", repo.FullName)
