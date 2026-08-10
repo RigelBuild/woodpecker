@@ -25,6 +25,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
@@ -464,5 +465,119 @@ func TestCreatePipeline(t *testing.T) {
 		mockStore.AssertCalled(t, "GetUser", int64(1))
 		mockStore.AssertCalled(t, "CreatePipeline", mock.Anything)
 		mockStore.AssertCalled(t, "UpdatePipeline", mock.Anything)
+	})
+}
+
+// TestPostPipeline covers restart (PostPipeline -> pipeline.Restart). The
+// regression case: a pipeline that errored before persisting any config (e.g. a
+// transient config-extension outage) has no old config rows, but a healthy
+// refetch on restart still yields a valid definition. It must restart, not fail
+// with "pipeline definition not found". The guard case: when the refetch is also
+// empty, that error still fires.
+func TestPostPipeline(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// erroredParent mimics a pipeline that failed during creation before its
+	// config was persisted: status error, and ConfigsForPipeline returns nothing.
+	newErroredParent := func() *model.Pipeline {
+		return &model.Pipeline{
+			ID:      2,
+			Number:  2,
+			Status:  model.StatusError,
+			Event:   model.EventPull,
+			Branch:  "main",
+			Refspec: "feature:main",
+		}
+	}
+
+	fakeRepo := &model.Repo{ID: 1, UserID: 1, FullName: "test/repo", CancelPreviousPipelineEvents: []model.WebhookEvent{}}
+	fakeUser := &model.User{ID: 1, Login: "testuser", Email: "test@example.com", Avatar: "avatar.png", Hash: "hash123"}
+	validConfig := []*forge_types.FileMeta{
+		{Name: ".woodpecker.yml", Data: []byte("when:\n  event: manual\nsteps:\n  test:\n    image: alpine:latest\n    commands:\n      - echo test")},
+	}
+
+	// setupPost wires the full handler mock surface and invokes PostPipeline.
+	// fetchResult is what the config service serves on the restart refetch.
+	setupPost := func(t *testing.T, parent *model.Pipeline, fetchResult []*forge_types.FileMeta) *httptest.ResponseRecorder {
+		mockStore := store_mocks.NewMockStore(t)
+		mockConfigService := config_service_mocks.NewMockService(t)
+		mockSecretService := secret_service_mocks.NewMockService(t)
+		mockRegistryService := registry_service_mocks.NewMockService(t)
+
+		mockForge := forge_mocks.NewMockForge(t)
+		mockForge.On("Name").Return("mock").Maybe()
+		mockForge.On("URL").Return("https://example.com").Maybe()
+		mockForge.On("Netrc", fakeUser, fakeRepo).Return(&model.Netrc{}, nil).Maybe()
+		mockForge.On("Status", mock.Anything, fakeUser, fakeRepo, mock.Anything, mock.Anything).Return(nil).Maybe()
+
+		mockSecretService.On("SecretListPipeline", mock.Anything, fakeRepo, mock.Anything, mock.Anything, mock.Anything).Return([]*model.Secret{}, nil).Maybe()
+		mockRegistryService.On("RegistryListPipeline", mock.Anything, fakeRepo, mock.Anything, mock.Anything).Return([]*model.Registry{}, nil).Maybe()
+
+		mockManager := manager_mocks.NewMockManager(t)
+		mockManager.On("ForgeFromRepo", fakeRepo).Return(mockForge, nil)
+		mockManager.On("ForgeFromUser", fakeUser).Return(mockForge, nil).Maybe()
+		mockManager.On("ConfigServiceFromRepo", fakeRepo).Return(mockConfigService)
+		mockManager.On("SecretServiceFromRepo", fakeRepo).Return(mockSecretService).Maybe()
+		mockManager.On("RegistryServiceFromRepo", fakeRepo).Return(mockRegistryService).Maybe()
+		mockManager.On("EnvironmentService").Return(nil).Maybe()
+		server.Config.Services.Manager = mockManager
+
+		mockQueue := queue_mocks.NewMockQueue(t)
+		mockQueue.On("Push", mock.Anything, mock.Anything).Return(nil).Maybe()
+		mockQueue.On("PushAtOnce", mock.Anything, mock.Anything).Return(nil).Maybe()
+		server.Config.Services.Scheduler = scheduler.NewScheduler(t.Context(), mockStore, mockQueue, memory.New())
+
+		// restart=true refetch: the parent had no persisted config rows.
+		mockConfigService.On("Fetch", mock.Anything, mockForge, fakeUser, fakeRepo, mock.Anything, mock.Anything, true).Return(fetchResult, nil)
+
+		mockStore.On("GetUser", int64(1)).Return(fakeUser, nil)
+		mockStore.On("ConfigsForPipeline", parent.ID).Return([]*model.Config{}, nil)
+		mockStore.On("CreatePipeline", mock.Anything).Return(nil)
+		mockStore.On("GetPipelineLastBefore", fakeRepo, "main", mock.Anything).Return(nil, types.ErrRecordNotExist).Maybe()
+		mockStore.On("GetActivePipelineList", fakeRepo).Return([]*model.Pipeline{}, nil).Maybe()
+		mockStore.On("ConfigPersist", mock.Anything).Return(&model.Config{ID: 1}, nil).Maybe()
+		mockStore.On("ConfigFindIdentical", mock.Anything, mock.Anything).Return(nil, nil).Maybe()
+		mockStore.On("PipelineConfigCreate", mock.Anything).Return(nil).Maybe()
+		mockStore.On("WorkflowsCreate", mock.Anything).Return(nil).Maybe()
+		mockStore.On("UpdatePipeline", mock.Anything).Return(nil).Maybe()
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("store", mockStore)
+		c.Set("repo", fakeRepo)
+		c.Set("user", fakeUser)
+		c.Set("pipeline", parent)
+		c.Request, _ = http.NewRequest(http.MethodPost, "", nil)
+
+		PostPipeline(c)
+		return w
+	}
+
+	// Regression: config-less errored parent + a healthy refetch must restart,
+	// not report "pipeline definition not found". Before the fix, Restart guarded
+	// on the (empty) old config rows and errored here.
+	t.Run("restart of a config-less errored pipeline succeeds when the refetch yields config", func(t *testing.T) {
+		w := setupPost(t, newErroredParent(), validConfig)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var got model.Pipeline
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+		assert.NotEqual(t, model.StatusError, got.Status, "restart should not land in error status")
+		for _, e := range got.Errors {
+			assert.NotEqual(t, "pipeline definition not found", e.Message)
+		}
+	})
+
+	// Guard preserved: no old config AND an empty refetch is a genuine
+	// "definition not found".
+	t.Run("restart still errors when no old config and the refetch is empty", func(t *testing.T) {
+		w := setupPost(t, newErroredParent(), []*forge_types.FileMeta{})
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var got model.Pipeline
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+		assert.Equal(t, model.StatusError, got.Status)
+		require.NotEmpty(t, got.Errors)
+		assert.Equal(t, "pipeline definition not found", got.Errors[0].Message)
 	})
 }
