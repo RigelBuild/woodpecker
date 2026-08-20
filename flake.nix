@@ -14,7 +14,7 @@
         # Fork build version. Must not collide with upstream tags (`v3.16.x`)
         # or upstream dev builds (`next-<sha>`). Bump the `-sealed.N` suffix per
         # fork release.
-        version = "3.16.0-sealed.10";
+        version = "3.16.0-sealed.11";
 
         # The repo requires Go 1.26 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
@@ -38,12 +38,25 @@
         vendorHash = "sha256-hZV7ZLoyhsKyugutlSh6R49g1xyqZvBoBryP8TSrfJc=";
         webuiHash = "sha256-6sWSybiSJj7G1KO2iv81yylmOV6DBVN1D15PFYpilC0=";
 
+        # Re-rooted to a content-addressed copy of this fork's own subtree
+        # (SEA-1860): `self.outPath` is a subpath into the whole-repo store
+        # object, so coercing it (`src = self`) makes the server/agent/webui
+        # depend on the whole-repo store path — a rebuild on every monorepo
+        # commit. `builtins.path` re-copies only this subtree into a
+        # content-addressed path, so a docs-only merge is a no-op. The FOD
+        # hashes (vendorHash/webuiHash) are unaffected — they hash fetched
+        # deps, not the src store-path name.
+        src = builtins.path {
+          path = self.outPath;
+          name = "woodpecker-source";
+        };
+
         # The Vue web UI, built from this fork's web/ so future UI changes are
         # picked up (not reused from upstream).
         woodpecker-webui = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "woodpecker-webui";
           inherit version;
-          src = "${self}/web";
+          src = "${src}/web";
 
           pnpmDeps = pkgs.fetchPnpmDeps {
             inherit (finalAttrs) pname version src;
@@ -73,8 +86,7 @@
 
         woodpecker-server = buildGoModule {
           pname = "woodpecker-server";
-          inherit version ldflags postInstall vendorHash;
-          src = self;
+          inherit version ldflags postInstall vendorHash src;
 
           subPackages = "cmd/server";
           env.CGO_ENABLED = 1;
@@ -90,8 +102,7 @@
 
         woodpecker-agent = buildGoModule {
           pname = "woodpecker-agent";
-          inherit version ldflags postInstall vendorHash;
-          src = self;
+          inherit version ldflags postInstall vendorHash src;
 
           subPackages = "cmd/agent";
           env.CGO_ENABLED = 0;

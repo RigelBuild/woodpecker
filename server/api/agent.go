@@ -138,8 +138,11 @@ func PatchAgent(c *gin.Context) {
 		return
 	}
 
-	// Update allowed fields
-	agent.Name = in.Name
+	// Update allowed fields. Name is only overwritten when provided: a PATCH with
+	// no name (e.g. a cordon toggling only no_schedule) must not null the stored name.
+	if in.Name != "" {
+		agent.Name = in.Name
+	}
 	agent.NoSchedule = in.NoSchedule
 	if agent.NoSchedule {
 		server.Config.Services.Scheduler.KickAgentWorkers(agent.ID)
@@ -341,8 +344,11 @@ func PatchOrgAgent(c *gin.Context) {
 		return
 	}
 
-	// Update allowed fields
-	agent.Name = in.Name
+	// Update allowed fields. Name is only overwritten when provided: a PATCH with
+	// no name (e.g. a cordon toggling only no_schedule) must not null the stored name.
+	if in.Name != "" {
+		agent.Name = in.Name
+	}
 	agent.NoSchedule = in.NoSchedule
 	if agent.NoSchedule {
 		server.Config.Services.Scheduler.KickAgentWorkers(agent.ID)
