@@ -17,6 +17,7 @@ package github
 
 import (
 	"context"
+	"crypto/rsa"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -25,8 +26,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/go-github/v88/github"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
@@ -44,10 +47,14 @@ import (
 type contextKey string
 
 const (
-	defaultURL                 = "https://github.com"      // Default GitHub URL
-	defaultAPI                 = "https://api.github.com/" // Default GitHub API URL
-	defaultPageSize            = 100
-	githubClientKey contextKey = "github_client"
+	defaultURL      = "https://github.com"      // Default GitHub URL
+	defaultAPI      = "https://api.github.com/" // Default GitHub API URL
+	defaultPageSize = 100
+	// Status/check-run reports run on their own budget: statusReportTimeout caps
+	// each one independently of the agent gRPC deadline it is called under, so a
+	// slow GitHub call does not fail with "context deadline exceeded" mid-report.
+	statusReportTimeout            = 30 * time.Second
+	githubClientKey     contextKey = "github_client"
 )
 
 // Opts defines configuration options.
@@ -59,6 +66,8 @@ type Opts struct {
 	MergeRef          bool   // Clone pull requests using the merge ref.
 	OnlyPublic        bool   // Only obtain OAuth tokens with access to public repos.
 	OAuthHost         string // Public url for oauth if different from url.
+	AppID             int64  // GitHub App id (enables Checks API reporting).
+	AppPrivateKey     string // GitHub App private key (PEM).
 }
 
 // New returns a Forge implementation that integrates with a GitHub Cloud or
@@ -74,10 +83,19 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		SkipVerify: opts.SkipVerify,
 		MergeRef:   opts.MergeRef,
 		OnlyPublic: opts.OnlyPublic,
+		appID:      opts.AppID,
 	}
 	if opts.URL != defaultURL {
 		r.url = strings.TrimSuffix(opts.URL, "/")
 		r.API = r.url + "/api/v3/"
+	}
+
+	if opts.AppPrivateKey != "" {
+		key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(opts.AppPrivateKey))
+		if err != nil {
+			return nil, fmt.Errorf("could not parse GitHub App private key: %w", err)
+		}
+		r.appKey = key
 	}
 
 	return r, nil
@@ -93,6 +111,12 @@ type client struct {
 	MergeRef   bool
 	OnlyPublic bool
 	oAuthHost  string
+	appID      int64
+	appKey     *rsa.PrivateKey
+	appTokens  map[string]appToken
+	appTokenMu sync.Mutex
+	checkRuns  map[string]checkRunRef
+	checkRunMu sync.Mutex
 }
 
 // Name returns the string name of this driver.
@@ -502,9 +526,17 @@ func (c *client) newConfig() *oauth2.Config {
 	}
 }
 
-// newClientToken returns the GitHub oauth2 client.
-// It first checks if a client is available in the context, otherwise creates a new one.
+// newClientToken returns a GitHub client authenticated with a user OAuth token.
+// For App-installation tokens use newClientTokenKind with tokenKindApp so the
+// rate-limit metrics attribute usage to the correct quota bucket.
 func (c *client) newClientToken(ctx context.Context, token string) (*github.Client, error) {
+	return c.newClientTokenKind(ctx, token, tokenKindUser)
+}
+
+// newClientTokenKind returns the GitHub oauth2 client for token, tagging its
+// rate-limit observations with tokenKind. It first checks if a client is
+// available in the context (test injection), otherwise creates a new one.
+func (c *client) newClientTokenKind(ctx context.Context, token, tokenKind string) (*github.Client, error) {
 	// Check if a client is already in the context
 	if ctxClient, ok := ctx.Value(githubClientKey).(*github.Client); ok {
 		return ctxClient, nil
@@ -527,8 +559,9 @@ func (c *client) newClientToken(ctx context.Context, token string) (*github.Clie
 		}
 	}
 
-	// Wrap the base transport with User-Agent support
-	tp.Base = httputil.NewUserAgentRoundTripper(baseTransport, "forge-github")
+	// Wrap the base transport with User-Agent support, then observe rate-limit
+	// headers on every response.
+	tp.Base = newRateLimitObserver(httputil.NewUserAgentRoundTripper(baseTransport, "forge-github"), tokenKind)
 
 	return github.NewClient(github.WithURLs(github.Ptr(c.API), nil), github.WithHTTPClient(tc))
 }
@@ -574,6 +607,12 @@ var reDeploy = regexp.MustCompile(`.+/deployments/(\d+)`)
 // Status sends the commit status to the forge.
 // An example would be the GitHub pull request status.
 func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow) error {
+	// Decouple from the caller's (agent gRPC) deadline: status reporting must
+	// finish on its own budget, not race the RPC that triggered it. Values
+	// (e.g. an injected test client) are preserved.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusReportTimeout)
+	defer cancel()
+
 	client, err := c.newClientToken(ctx, user.AccessToken)
 	if err != nil {
 		return err
@@ -588,19 +627,55 @@ func (c *client) Status(ctx context.Context, user *model.User, repo *model.Repo,
 		}
 		id, _ := strconv.Atoi(matches[1])
 
-		_, _, err := client.Repositories.CreateDeploymentStatus(ctx, repo.Owner, repo.Name, int64(id), &github.DeploymentStatusRequest{
-			State:       github.Ptr(convertStatus(pipeline.Status)),
-			Description: github.Ptr(common.GetPipelineStatusDescription(pipeline.Status)),
-			LogURL:      github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
+		_, err := doForgeWrite(ctx, func() (*github.Response, error) {
+			_, resp, e := client.Repositories.CreateDeploymentStatus(ctx, repo.Owner, repo.Name, int64(id), &github.DeploymentStatusRequest{
+				State:       github.Ptr(convertStatus(pipeline.Status)),
+				Description: github.Ptr(common.GetPipelineStatusDescription(pipeline.Status)),
+				LogURL:      github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
+			})
+			return resp, e
 		})
 		return err
 	}
 
-	_, _, err = client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
-		Context:     github.Ptr(common.GetPipelineStatusContext(repo, pipeline, workflow)),
-		State:       github.Ptr(convertStatus(workflow.State)),
-		Description: github.Ptr(common.GetPipelineStatusDescription(workflow.State)),
-		TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, pipeline, workflow)),
+	// Skipped workflows: with the affected-aware fan-out a pipeline can carry
+	// dozens of skipped workflows, each an extra check-run POST. Reporting them
+	// to the forge is opt-in (ReportSkippedToForge) — off by default they are
+	// dropped here, before any forge write, so they add no GitHub check-run noise
+	// and no rate-limit pressure. This is independent of whether they are
+	// persisted: ReportSkippedWorkflows keeps skipped workflows in the DB so the
+	// Woodpecker UI can show them, without implying a forge report. The
+	// pipeline-level aggregate status still rolls them up.
+	if workflow != nil && workflow.State == model.StatusSkipped && !server.Config.Server.ReportSkippedToForge {
+		return nil
+	}
+
+	// Report via the Checks API when a GitHub App is configured: it supports
+	// skipped/neutral conclusions and check-suite grouping that the legacy
+	// commit-status API lacks.
+	if c.appConfigured() {
+		gh, err := c.installationClient(ctx, repo.Owner, repo.Name)
+		if err != nil {
+			return err
+		}
+		return c.createOrUpdateCheckRun(ctx, gh, repo, pipeline, workflow)
+	}
+
+	// The commit-status API has no "skipped" state, so skipped workflows are
+	// only reported via the Checks API above. Reporting them here would surface
+	// as a stuck "pending" status, so skip them.
+	if workflow.State == model.StatusSkipped {
+		return nil
+	}
+
+	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
+		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, pipeline.Commit, github.RepoStatus{
+			Context:     github.Ptr(common.GetPipelineStatusContext(repo, pipeline, workflow)),
+			State:       github.Ptr(convertStatus(workflow.State)),
+			Description: github.Ptr(common.GetPipelineStatusDescription(workflow.State)),
+			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, pipeline, workflow)),
+		})
+		return resp, e
 	})
 	return err
 }

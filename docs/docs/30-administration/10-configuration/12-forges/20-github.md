@@ -16,9 +16,9 @@ WOODPECKER_GITHUB_SECRET=YOUR_GITHUB_CLIENT_SECRET
 You will get these values from GitHub when you register your OAuth application.
 To do so, go to Settings -> Developer Settings -> GitHub Apps -> New Oauth2 App.
 
-:::warning
-Do not use a "GitHub App" instead of an Oauth2 app as the former will not work correctly with Woodpecker right now (because user access tokens are not being refreshed automatically)
-:::
+::::warning
+A GitHub App cannot replace the OAuth2 app for user login, because user access tokens are not refreshed automatically. A GitHub App can, however, be configured _in addition_ to the OAuth2 app to report workflow status via the Checks API — see [GitHub App for the Checks API](#github-app-for-the-checks-api-optional).
+::::
 
 ## App Settings
 
@@ -31,6 +31,23 @@ Do not use a "GitHub App" instead of an Oauth2 app as the former will not work c
 
 After your App has been created, you can generate a client secret.
 Use this one for the `WOODPECKER_GITHUB_SECRET` environment variable.
+
+## GitHub App for the Checks API (optional)
+
+By default Woodpecker reports each workflow's status through GitHub's commit-status API, which only supports the `pending`, `success`, `failure` and `error` states. To instead report workflows as **check-runs** — which also support `skipped` and `neutral` conclusions and are grouped under a check-suite — configure a GitHub App in addition to the OAuth2 app above.
+
+The OAuth2 app is still required for user login; the GitHub App is used only to report status via the [Checks API](https://docs.github.com/en/rest/checks), which is not available to OAuth tokens.
+
+1. Create a GitHub App (Settings -> Developer Settings -> GitHub Apps -> New GitHub App) granting **read & write** access to **Checks**, and generate a private key.
+2. Install the App on the organizations or repositories Woodpecker builds.
+3. Set the following server environment variables:
+
+```ini
+WOODPECKER_GITHUB_APP_ID=YOUR_APP_ID
+WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE=/path/to/private-key.pem
+```
+
+When configured, workflows are reported as check-runs; otherwise Woodpecker keeps using the commit-status API. With the Checks API you can also enable [`WOODPECKER_REPORT_SKIPPED_TO_FORGE`](../10-server.md#report_skipped_to_forge) to surface workflows filtered out by their `when` conditions as grey `skipped` checks. To keep skipped workflows visible in the Woodpecker UI without adding them to the forge check list, enable [`WOODPECKER_REPORT_SKIPPED_WORKFLOWS`](../10-server.md#report_skipped_workflows) (persist) and leave `WOODPECKER_REPORT_SKIPPED_TO_FORGE` off.
 
 ## Configuration
 
@@ -114,3 +131,30 @@ Configure if SSL verification should be skipped.
 - Default: `false`
 
 Configures the GitHub OAuth client to only obtain a token that can manage public repositories.
+
+---
+
+### GITHUB_APP_ID
+
+- Name: `WOODPECKER_GITHUB_APP_ID`
+- Default: none
+
+GitHub App id. When set together with a private key, workflow status is reported via the GitHub Checks API (enabling `skipped` / `neutral` conclusions) instead of the commit-status API.
+
+---
+
+### GITHUB_APP_PRIVATE_KEY
+
+- Name: `WOODPECKER_GITHUB_APP_PRIVATE_KEY`
+- Default: none
+
+GitHub App private key in PEM format, used to authenticate as the App for the Checks API.
+
+---
+
+### GITHUB_APP_PRIVATE_KEY_FILE
+
+- Name: `WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE`
+- Default: none
+
+Read the value for `WOODPECKER_GITHUB_APP_PRIVATE_KEY` from the specified filepath.

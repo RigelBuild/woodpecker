@@ -150,6 +150,38 @@ func TestPatchAgent(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "updated-agent", response.Name)
 	})
+
+	t.Run("should not clobber name when body omits it", func(t *testing.T) {
+		existingAgent := &model.Agent{
+			ID:         1,
+			Name:       "mattserver",
+			OwnerID:    1,
+			NoSchedule: true,
+		}
+
+		mockStore := store_mocks.NewMockStore(t)
+		mockStore.On("AgentFind", int64(1)).Return(existingAgent, nil)
+		mockStore.On("AgentUpdate", mock.AnythingOfType("*model.Agent")).Return(nil)
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("store", mockStore)
+		c.Params = gin.Params{{Key: "agent_id", Value: "1"}}
+		c.Request, _ = http.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"no_schedule":false}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		PatchAgent(c)
+		c.Writer.WriteHeaderNow()
+
+		mockStore.AssertCalled(t, "AgentUpdate", mock.AnythingOfType("*model.Agent"))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var response model.Agent
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		assert.NoError(t, err)
+		assert.Equal(t, "mattserver", response.Name)
+		assert.False(t, response.NoSchedule)
+	})
 }
 
 func TestPostAgent(t *testing.T) {
@@ -269,5 +301,42 @@ func TestPostOrgAgent(t *testing.T) {
 
 		// Ensure an agent was created
 		mockStore.AssertCalled(t, "AgentCreate", mock.AnythingOfType("*model.Agent"))
+	})
+}
+
+func TestPatchOrgAgent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("should not clobber name when body omits it", func(t *testing.T) {
+		existingAgent := &model.Agent{
+			ID:         1,
+			Name:       "org-agent",
+			OrgID:      7,
+			NoSchedule: true,
+		}
+
+		mockStore := store_mocks.NewMockStore(t)
+		mockStore.On("AgentFind", int64(1)).Return(existingAgent, nil)
+		mockStore.On("AgentUpdate", mock.AnythingOfType("*model.Agent")).Return(nil)
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("store", mockStore)
+		c.Set("org", &model.Org{ID: 7})
+		c.Params = gin.Params{{Key: "agent_id", Value: "1"}}
+		c.Request, _ = http.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"no_schedule":false}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		PatchOrgAgent(c)
+		c.Writer.WriteHeaderNow()
+
+		mockStore.AssertCalled(t, "AgentUpdate", mock.AnythingOfType("*model.Agent"))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var response model.Agent
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		assert.NoError(t, err)
+		assert.Equal(t, "org-agent", response.Name)
+		assert.False(t, response.NoSchedule)
 	})
 }

@@ -352,6 +352,12 @@ var flags = append([]cli.Flag{
 		Usage:   "Hosts that are allowed to be contacted by extensions",
 		Value:   hostmatcher.MatchBuiltinExternal,
 	},
+	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_EXTENSIONS_TIMEOUT"),
+		Name:    "extensions-timeout",
+		Usage:   "how long before timeout when contacting extension endpoints (config/registry/secret)",
+		Value:   time.Second * 10,
+	},
 	&cli.StringFlag{
 		Sources: cli.EnvVars("WOODPECKER_DATABASE_DRIVER"),
 		Name:    "db-driver",
@@ -394,6 +400,36 @@ var flags = append([]cli.Flag{
 		Name:    "status-context-format",
 		Usage:   "status context format",
 		Value:   "{{ .context }}/{{ .event }}/{{ .workflow }}{{if not (eq .axis_id 0)}}/{{.axis_id}}{{end}}",
+	},
+	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_AGGREGATE"),
+		Name:    "status-aggregate",
+		Usage:   "report a single pipeline-level aggregate status (rolls up all workflows) usable as a required branch-protection check",
+		Value:   false,
+	},
+	&cli.StringFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_AGGREGATE_FORMAT"),
+		Name:    "status-aggregate-format",
+		Usage:   "format for the aggregate status context; has no per-workflow component so it stays stable across an affected-aware fan-out",
+		Value:   "{{ .context }} ({{ .event }})",
+	},
+	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_PER_WORKFLOW"),
+		Name:    "status-per-workflow",
+		Usage:   "report a separate commit status / check-run per workflow. On an affected-aware fan-out a pipeline can carry dozens of workflows, each a forge write; turning this off reports only the pipeline-level aggregate (see status-aggregate) and avoids the forge's rate limit. Default on for upstream compatibility.",
+		Value:   true,
+	},
+	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_REPORT_SKIPPED_WORKFLOWS"),
+		Name:    "report-skipped-workflows",
+		Usage:   "report workflows filtered out by their `when` conditions as skipped checks (requires a forge that supports skipped states, e.g. the GitHub Checks API)",
+		Value:   false,
+	},
+	&cli.BoolFlag{
+		Sources: cli.EnvVars("WOODPECKER_REPORT_SKIPPED_TO_FORGE"),
+		Name:    "report-skipped-to-forge",
+		Usage:   "report skipped workflows to the forge as check-runs (requires a forge that supports skipped states, e.g. the GitHub Checks API). Independent of report-skipped-workflows, which only controls whether skipped workflows are persisted and shown in the Woodpecker UI.",
+		Value:   false,
 	},
 	&cli.BoolFlag{
 		Sources: cli.EnvVars("WOODPECKER_MIGRATIONS_ALLOW_LONG"),
@@ -569,6 +605,22 @@ var flags = append([]cli.Flag{
 		Name:    "github-public-only",
 		Usage:   "github tokens should only get access to public repos",
 		Value:   false,
+	},
+	&cli.StringFlag{
+		Sources: cli.EnvVars("WOODPECKER_GITHUB_APP_ID"),
+		Name:    "github-app-id",
+		Usage:   "github app id; enables reporting via the GitHub Checks API (skipped/neutral states)",
+	},
+	&cli.StringFlag{
+		Sources: cli.NewValueSourceChain(
+			cli.File(getFirstNonEmptyEnvVar("WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE")),
+			cli.EnvVar("WOODPECKER_GITHUB_APP_PRIVATE_KEY"),
+		),
+		Name:  "github-app-private-key",
+		Usage: "github app private key in PEM format (or use WOODPECKER_GITHUB_APP_PRIVATE_KEY_FILE)",
+		Config: cli.StringConfig{
+			TrimSpace: true,
+		},
 	},
 	//
 	// Gitea

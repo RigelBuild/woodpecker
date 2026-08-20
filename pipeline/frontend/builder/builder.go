@@ -47,6 +47,9 @@ type PipelineBuilder struct {
 	PrivilegedPlugins   []string
 	CompilerOptions     []compiler.Option
 	GetWorkflowMetadata func(workflow *Workflow) metadata.Metadata
+	// ReportSkipped keeps workflows filtered out by their `when` conditions as
+	// skipped items instead of dropping them.
+	ReportSkipped bool
 }
 
 func (b *PipelineBuilder) Build() (items []*Item, errorsAndWarnings error) {
@@ -93,7 +96,43 @@ func (b *PipelineBuilder) Build() (items []*Item, errorsAndWarnings error) {
 
 	items = filterMissingDependencies(items)
 
+	errorsAndWarnings = multierr.Append(errorsAndWarnings, warnDuplicateWorkflowNames(items))
+
 	return items, errorsAndWarnings
+}
+
+// warnDuplicateWorkflowNames emits a non-blocking warning when more than one
+// workflow resolves to the same name and matrix axis. Duplicate names make
+// depends_on ambiguous and let workflows overwrite each other's forge status.
+// Matrix axes of a single workflow share a name but differ by axis, so they
+// are not reported.
+func warnDuplicateWorkflowNames(items []*Item) error {
+	type nameAxis struct {
+		name   string
+		axisID int
+	}
+	counts := make(map[nameAxis]int, len(items))
+	for _, item := range items {
+		if item.Workflow.Name == "" {
+			continue
+		}
+		counts[nameAxis{item.Workflow.Name, item.Workflow.AxisID}]++
+	}
+
+	var err error
+	reported := make(map[string]bool)
+	for _, item := range items {
+		if counts[nameAxis{item.Workflow.Name, item.Workflow.AxisID}] < 2 || reported[item.Workflow.Name] {
+			continue
+		}
+		reported[item.Workflow.Name] = true
+		err = multierr.Append(err, &pipeline_errors.PipelineError{
+			Type:      pipeline_errors.PipelineErrorTypeLinter,
+			Message:   fmt.Sprintf("workflow name %q is not unique; each workflow should have a unique name", item.Workflow.Name),
+			IsWarning: true,
+		})
+	}
+	return err
 }
 
 func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axis, data string) (item *Item, errorsAndWarnings error) {
@@ -139,11 +178,22 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 		return nil, errorsAndWarnings
 	}
 
+	// An explicit top-level `name` lets a workflow set its display name
+	// (status context, web UI, CI_WORKFLOW_NAME, depends_on) independently
+	// of its file name.
+	if parsed.Name != "" {
+		workflow.Name = parsed.Name
+		workflowMetadata.Workflow.Name = parsed.Name
+	}
+
 	// checking if filtered.
 	if match, err := parsed.When.Match(workflowMetadata, true, environ); !match && err == nil {
 		log.Debug().Str("pipeline", workflow.Name).Msg(
 			"marked as skipped, does not match metadata",
 		)
+		if b.ReportSkipped {
+			return &Item{Workflow: workflow, Skipped: true}, errorsAndWarnings
+		}
 		return nil, nil
 	} else if err != nil {
 		log.Debug().Str("pipeline", workflow.Name).Msg(

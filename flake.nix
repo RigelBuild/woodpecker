@@ -5,13 +5,117 @@
   };
 
   outputs =
-    { nixpkgs, flake-utils, ... }:
+    { self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+
+        # Fork build version. Must not collide with upstream tags (`v3.16.x`)
+        # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
+        # fork release.
+        version = "3.16.0-rigel.1";
+
+        # The repo requires Go 1.26 (go.mod toolchain); pin it so the sandboxed
+        # build never tries to download a toolchain.
+        buildGoModule = pkgs.buildGoModule.override { go = pkgs.go_1_26; };
+
+        ldflags = [
+          "-s"
+          "-w"
+          "-X go.woodpecker-ci.org/woodpecker/v3/version.Version=${version}"
+        ];
+
+        # Match the upstream/nixpkgs binary layout: bin/woodpecker-<cmd>.
+        postInstall = ''
+          for f in "$out"/bin/*; do
+            mv -- "$f" "$(dirname "$f")/woodpecker-$(basename "$f")"
+          done
+        '';
+
+        # Locked against this fork's go.sum / web pnpm-lock. To refresh: set to
+        # pkgs.lib.fakeHash, build, and paste the hash nix reports.
+        vendorHash = "sha256-hZV7ZLoyhsKyugutlSh6R49g1xyqZvBoBryP8TSrfJc=";
+        webuiHash = "sha256-6sWSybiSJj7G1KO2iv81yylmOV6DBVN1D15PFYpilC0=";
+
+        # Re-rooted to a content-addressed copy of this fork's own subtree
+        # (SEA-1860): `self.outPath` is a subpath into the whole-repo store
+        # object, so coercing it (`src = self`) makes the server/agent/webui
+        # depend on the whole-repo store path — a rebuild on every monorepo
+        # commit. `builtins.path` re-copies only this subtree into a
+        # content-addressed path, so a docs-only merge is a no-op. The FOD
+        # hashes (vendorHash/webuiHash) are unaffected — they hash fetched
+        # deps, not the src store-path name.
+        src = builtins.path {
+          path = self.outPath;
+          name = "woodpecker-source";
+        };
+
+        # The Vue web UI, built from this fork's web/ so future UI changes are
+        # picked up (not reused from upstream).
+        woodpecker-webui = pkgs.stdenv.mkDerivation (finalAttrs: {
+          pname = "woodpecker-webui";
+          inherit version;
+          src = "${src}/web";
+
+          pnpmDeps = pkgs.fetchPnpmDeps {
+            inherit (finalAttrs) pname version src;
+            pnpm = pkgs.pnpm_10;
+            fetcherVersion = 3;
+            hash = webuiHash;
+          };
+
+          nativeBuildInputs = [
+            pkgs.nodejs
+            pkgs.pnpmConfigHook
+            pkgs.pnpm_10
+          ];
+
+          buildPhase = ''
+            runHook preBuild
+            pnpm build
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            cp -r dist $out
+            runHook postInstall
+          '';
+        });
+
+        woodpecker-server = buildGoModule {
+          pname = "woodpecker-server";
+          inherit version ldflags postInstall vendorHash src;
+
+          subPackages = "cmd/server";
+          env.CGO_ENABLED = 1;
+
+          # The server embeds the web UI (//go:embed all:dist/*); stage the
+          # built UI before the Go build.
+          postPatch = ''
+            cp -r ${woodpecker-webui} web/dist
+          '';
+
+          meta.mainProgram = "woodpecker-server";
+        };
+
+        woodpecker-agent = buildGoModule {
+          pname = "woodpecker-agent";
+          inherit version ldflags postInstall vendorHash src;
+
+          subPackages = "cmd/agent";
+          env.CGO_ENABLED = 0;
+
+          meta.mainProgram = "woodpecker-agent";
+        };
       in
       {
+        packages = {
+          inherit woodpecker-server woodpecker-agent woodpecker-webui;
+          default = woodpecker-server;
+        };
+
         devShells.default =
           with pkgs;
           let

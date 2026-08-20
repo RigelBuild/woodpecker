@@ -19,16 +19,31 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
-func updatePipelineStatus(ctx context.Context, forge forge.Forge, pipeline *model.Pipeline, repo *model.Repo, user *model.User) {
-	for _, workflow := range pipeline.Workflows {
-		err := forge.Status(ctx, user, repo, pipeline, workflow)
-		if err != nil {
-			log.Error().Err(err).Msgf("error setting commit status for %s/%d", repo.FullName, pipeline.Number)
-			return
+func updatePipelineStatus(ctx context.Context, _forge forge.Forge, pipeline *model.Pipeline, repo *model.Repo, user *model.User) {
+	// Per-workflow status is opt-out (StatusPerWorkflow, default on). On an
+	// affected-aware fan-out a pipeline can carry dozens of workflows, each an
+	// extra forge write that pressures the forge's rate limit; disabling it
+	// leaves only the pipeline-level aggregate below (the required check).
+	if server.Config.Server.StatusPerWorkflow {
+		for _, workflow := range pipeline.Workflows {
+			if err := _forge.Status(ctx, user, repo, pipeline, workflow); err != nil {
+				// A per-workflow status failure must not abort the loop: the
+				// pipeline-level aggregate below is the required branch-protection
+				// check, so it has to run even if one workflow's report failed
+				// (otherwise a single throttled POST leaves the check stuck pending).
+				log.Error().Err(err).Msgf("error setting commit status for %s/%d", repo.FullName, pipeline.Number)
+			}
+		}
+	}
+
+	if server.Config.Server.StatusAggregate {
+		if err := forge.ReportAggregateStatus(ctx, _forge, user, repo, pipeline); err != nil {
+			log.Error().Err(err).Msgf("error setting aggregate status for %s/%d", repo.FullName, pipeline.Number)
 		}
 	}
 }

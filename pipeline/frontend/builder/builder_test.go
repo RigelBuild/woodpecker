@@ -16,6 +16,7 @@
 package builder
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -271,6 +272,184 @@ steps:
 	pipelineNames := []string{items[0].Workflow.Name, items[1].Workflow.Name}
 	assert.True(t, ContainsItemWithName("lint", items) && ContainsItemWithName("test", items),
 		"Pipeline name should be 'lint' and 'test' but are '%v'", pipelineNames)
+}
+
+func TestNamedWorkflow(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{
+		pipelineEvent: "push",
+	}
+
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{
+			{Name: ".woodpecker/deploy.yml", Data: []byte(`
+name: Infra / Deploy
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+			{Name: ".woodpecker/lint.yml", Data: []byte(`
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+			{Name: ".woodpecker/release.yml", Data: []byte(`
+name: Release
+when:
+  event: push
+depends_on:
+  - Infra / Deploy
+steps:
+  - name: build
+    image: scratch
+`)},
+		},
+	}
+
+	items, err := b.Build()
+	assert.NoError(t, err)
+	assert.Len(t, items, 3, "Should have generated 3 workflows")
+
+	// An explicit `name:` overrides the file-derived workflow name...
+	assert.True(t, ContainsItemWithName("Infra / Deploy", items),
+		"explicit workflow name should override the filename")
+	// ...while a workflow without `name:` falls back to the filename.
+	assert.True(t, ContainsItemWithName("lint", items),
+		"workflow without an explicit name should fall back to the filename")
+
+	// depends_on resolves against the explicit name, not the filename.
+	var release *Item
+	for _, item := range items {
+		if item.Workflow.Name == "Release" {
+			release = item
+		}
+	}
+	assert.NotNil(t, release, "named 'Release' workflow should be present")
+	if release != nil {
+		assert.Equal(t, constraint.DependsOn{{Name: "Infra / Deploy"}}, release.DependsOn,
+			"depends_on should resolve against the explicit workflow name")
+	}
+}
+
+func TestDuplicateWorkflowNameWarning(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{
+		pipelineEvent: "push",
+	}
+
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{
+			{Name: ".woodpecker/a.yml", Data: []byte(`
+name: Checks
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+			{Name: ".woodpecker/b.yml", Data: []byte(`
+name: Checks
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+		},
+	}
+
+	items, err := b.Build()
+	assert.Len(t, items, 2, "both workflows should still be built")
+	assert.Error(t, err, "a duplicate workflow name should produce a warning")
+	assert.False(t, errors.HasBlockingErrors(err), "a duplicate name is a warning, not a blocking error")
+
+	var warnings []string
+	for _, e := range errors.GetPipelineErrors(err) {
+		if e.IsWarning {
+			warnings = append(warnings, e.Message)
+		}
+	}
+	assert.Len(t, warnings, 1, "the duplicated name should be reported once")
+	assert.Contains(t, strings.Join(warnings, "\n"), `"Checks"`)
+}
+
+func TestMatrixWorkflowNameNoDuplicateWarning(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{
+		pipelineEvent: "push",
+	}
+
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{
+			{Name: ".woodpecker/test.yml", Data: []byte(`
+when:
+  event: push
+matrix:
+  GO_VERSION:
+    - "1.21"
+    - "1.22"
+steps:
+  - name: build
+    image: scratch
+`)},
+		},
+	}
+
+	items, err := b.Build()
+	assert.Len(t, items, 2, "matrix should expand to one workflow per axis")
+	assert.NoError(t, err, "matrix axes share a name but differ by axis and must not warn")
+}
+
+func TestNamedWorkflowSetsEnv(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{
+		pipelineEvent: "push",
+	}
+
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{
+			{Name: ".woodpecker/deploy.yml", Data: []byte(`
+name: Infra / Deploy
+when:
+  event: push
+skip_clone: true
+steps:
+  - name: build
+    image: scratch
+`)},
+		},
+	}
+
+	items, err := b.Build()
+	assert.NoError(t, err)
+	assert.Len(t, items, 1)
+
+	// The custom name is propagated to the step environment as CI_WORKFLOW_NAME.
+	var found bool
+	for _, stage := range items[0].Config.Stages {
+		for _, step := range stage.Steps {
+			assert.Equal(t, "Infra / Deploy", step.Environment["CI_WORKFLOW_NAME"],
+				"custom workflow name should be exposed as CI_WORKFLOW_NAME")
+			found = true
+		}
+	}
+	assert.True(t, found, "expected at least one compiled step")
 }
 
 func TestBranchFilter(t *testing.T) {
@@ -901,4 +1080,62 @@ func (t *testMetadata) GetWorkflowMetadata(w *Workflow) metadata.Metadata {
 			},
 		},
 	}
+}
+
+func TestReportSkippedWorkflows(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{pipelineEvent: "push"}
+	yamls := []*YamlFile{
+		{Name: ".woodpecker/run.yml", Data: []byte(`
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+		{Name: ".woodpecker/skip.yml", Data: []byte(`
+when:
+  event: tag
+steps:
+  - name: build
+    image: scratch
+`)},
+	}
+
+	t.Run("kept as skipped when enabled", func(t *testing.T) {
+		b := PipelineBuilder{
+			GetWorkflowMetadata: m.GetWorkflowMetadata,
+			RepoTrusted:         &metadata.TrustedConfiguration{},
+			ReportSkipped:       true,
+			Yamls:               yamls,
+		}
+		items, err := b.Build()
+		assert.NoError(t, err)
+		assert.Len(t, items, 2, "filtered workflow should be kept as a skipped item")
+
+		var skipped *Item
+		for _, it := range items {
+			if it.Workflow.Name == "skip" {
+				skipped = it
+			}
+		}
+		assert.NotNil(t, skipped, "skip workflow should be present")
+		if skipped != nil {
+			assert.True(t, skipped.Skipped, "filtered workflow should be flagged skipped")
+			assert.Nil(t, skipped.Config, "skipped workflow should have no compiled config")
+		}
+	})
+
+	t.Run("dropped when disabled", func(t *testing.T) {
+		b := PipelineBuilder{
+			GetWorkflowMetadata: m.GetWorkflowMetadata,
+			RepoTrusted:         &metadata.TrustedConfiguration{},
+			Yamls:               yamls,
+		}
+		items, err := b.Build()
+		assert.NoError(t, err)
+		assert.Len(t, items, 1, "filtered workflow should be dropped by default")
+		assert.Equal(t, "run", items[0].Workflow.Name)
+	})
 }

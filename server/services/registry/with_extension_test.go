@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -142,7 +143,7 @@ func TestWithExtensionRegistryListPipeline(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(fixtureHandler))
 	defer ts.Close()
 
-	client, err := utils.NewHTTPClient(privEd25519Key, "loopback")
+	client, err := utils.NewHTTPClient(privEd25519Key, "loopback", 10*time.Second)
 	require.NoError(t, err)
 
 	httpExtension := NewHTTP(ts.URL, client, true)

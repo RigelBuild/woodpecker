@@ -315,7 +315,7 @@ func (q *fifo) assignToWorker() (*list.Element, *worker) {
 	var bestWorker *worker
 	var bestScore int
 
-	for element := q.pending.Front(); element != nil; element = element.Next() {
+	for _, element := range q.pendingByCreation() {
 		task, _ := element.Value.(*model.Task)
 		log.Debug().Msgf("queue: trying to assign task: %v with deps %v", task.ID, task.Dependencies)
 
@@ -340,6 +340,37 @@ func (q *fifo) assignToWorker() (*list.Element, *worker) {
 	}
 
 	return nil, nil
+}
+
+// pendingByCreation returns the pending tasks' list elements ordered by
+// taskOrderLess (creation time, then workflow name). Dispatch walks this order
+// so a workflow whose dependencies have cleared keeps its creation-order
+// priority instead of being overtaken by tasks from pipelines created later,
+// regardless of the order tasks were appended to the pending list. The sort is
+// stable, so elements the comparator treats as equal keep their relative order.
+//
+// This orders the post-filterWaiting pending set (assignToWorker runs right
+// after filterWaiting on each process tick), where pending never simultaneously
+// holds a task and a task that depends on it, so reordering cannot dispatch a
+// dependent before its dependency. Expects the queue to be locked by the caller.
+func (q *fifo) pendingByCreation() []*list.Element {
+	elements := make([]*list.Element, 0, q.pending.Len())
+	for element := q.pending.Front(); element != nil; element = element.Next() {
+		elements = append(elements, element)
+	}
+	slices.SortStableFunc(elements, func(a, b *list.Element) int {
+		taskA, _ := a.Value.(*model.Task)
+		taskB, _ := b.Value.(*model.Task)
+		switch {
+		case taskOrderLess(taskA, taskB):
+			return -1
+		case taskOrderLess(taskB, taskA):
+			return 1
+		default:
+			return 0
+		}
+	})
+	return elements
 }
 
 // canRunConcurrent reports whether the given task may currently start without

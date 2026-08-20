@@ -371,6 +371,17 @@ As an alternative, the token can also be read from a file:
 List of Prometheus metrics specific to Woodpecker:
 
 ```yaml
+# HELP woodpecker_github_ratelimit_remaining Remaining GitHub API requests in the current window, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_remaining gauge
+woodpecker_github_ratelimit_remaining{resource="core",token_kind="user"} 4832
+woodpecker_github_ratelimit_remaining{resource="core",token_kind="app"} 12103
+# HELP woodpecker_github_ratelimit_limit Total GitHub API request quota for the current window, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_limit gauge
+woodpecker_github_ratelimit_limit{resource="core",token_kind="user"} 5000
+woodpecker_github_ratelimit_limit{resource="core",token_kind="app"} 12500
+# HELP woodpecker_github_ratelimit_reset_timestamp_seconds Unix time at which the GitHub API quota window resets, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_reset_timestamp_seconds gauge
+woodpecker_github_ratelimit_reset_timestamp_seconds{resource="core",token_kind="user"} 1751330400
 # HELP woodpecker_pipeline_count Pipeline count.
 # TYPE woodpecker_pipeline_count counter
 woodpecker_pipeline_count{branch="main",pipeline="total",repo="woodpecker-ci/woodpecker",status="success"} 3
@@ -1010,6 +1021,42 @@ Supported variables:
 - `workflow`: the workflow's name
 - `owner`: the repo's owner
 - `repo`: the repo's name
+
+---
+
+### STATUS_AGGREGATE
+
+- Name: `WOODPECKER_STATUS_AGGREGATE`
+- Default: `false`
+
+Report an additional single pipeline-level status that rolls up every workflow's state (pending while any run, success only when all pass). Because it has no per-workflow component, its context stays stable across an affected-aware fan-out, so it can be used as a required branch-protection check that only goes green when the whole pipeline is green. Uses the commit-status API (no GitHub App required).
+
+---
+
+### STATUS_AGGREGATE_FORMAT
+
+- Name: `WOODPECKER_STATUS_AGGREGATE_FORMAT`
+- Default: `{{ .context }} ({{ .event }})`
+
+Template for the aggregate status context. Supported variables: `context`, `event`, `owner`, `repo` (no `workflow`/`axis_id`, so the context is stable across the fan-out).
+
+---
+
+### REPORT_SKIPPED_WORKFLOWS
+
+- Name: `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`
+- Default: `false`
+
+Persist workflows filtered out by their `when` conditions as skipped instead of dropping them, so they remain visible in the Woodpecker UI. Skipped workflows are only kept when at least one workflow in the pipeline runs. This controls persistence only; it does not report them to the forge — see `WOODPECKER_REPORT_SKIPPED_TO_FORGE`.
+
+---
+
+### REPORT_SKIPPED_TO_FORGE
+
+- Name: `WOODPECKER_REPORT_SKIPPED_TO_FORGE`
+- Default: `false`
+
+Report skipped workflows to the forge as skipped checks. Requires a forge that supports a skipped state (the GitHub Checks API; see `WOODPECKER_GITHUB_APP_ID`). Independent of `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`: persistence (UI visibility) and forge reporting are separate, so you can show skipped workflows in the UI while keeping them off the forge check list.
 
 ---
 
