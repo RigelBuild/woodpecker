@@ -12,9 +12,9 @@
         pkgs = nixpkgs.legacyPackages.${system};
 
         # Fork build version. Must not collide with upstream tags (`v3.16.x`)
-        # or upstream dev builds (`next-<sha>`). Bump the `-sealed.N` suffix per
+        # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
         # fork release.
-        version = "3.16.0-sealed.11";
+        version = "3.16.0-rigel.1";
 
         # The repo requires Go 1.26 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
