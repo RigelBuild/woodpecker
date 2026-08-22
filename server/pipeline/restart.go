@@ -85,7 +85,7 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		if uErr != nil {
 			log.Debug().Err(uErr).Msg("failure to update pipeline status")
 		} else {
-			updatePipelineStatus(ctx, forge, newPipeline, repo, user)
+			updatePipelineStatus(ctx, forge, store, newPipeline, repo, user)
 		}
 		return newPipeline, nil
 	}
@@ -116,7 +116,7 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		if newPipeline, uErr := UpdateToStatusError(store, *newPipeline, parseErr); uErr != nil {
 			log.Error().Err(uErr).Msgf("error setting error status of pipeline for %s#%d", repo.FullName, newPipeline.Number)
 		} else {
-			updatePipelineStatus(ctx, forge, newPipeline, repo, user)
+			updatePipelineStatus(ctx, forge, store, newPipeline, repo, user)
 		}
 		msg := fmt.Sprintf("failure to parse pipeline config for %s", repo.FullName)
 		log.Error().Err(parseErr).Msg(msg)
@@ -128,7 +128,7 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		return nil, errors.New(msg)
 	}
 
-	publishPipeline(ctx, forge, newPipeline, repo, user)
+	publishPipeline(ctx, forge, store, newPipeline, repo, user)
 
 	newPipeline, err = start(ctx, forge, store, newPipeline, user, repo, pipelineItems)
 	if err != nil {

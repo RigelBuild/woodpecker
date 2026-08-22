@@ -249,6 +249,8 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Server.StatusContextFormat = c.String("status-context-format")
 	server.Config.Server.StatusAggregate = c.Bool("status-aggregate")
 	server.Config.Server.StatusAggregateFormat = c.String("status-aggregate-format")
+	server.Config.Server.StatusMetaWorkflows = c.StringSlice("status-meta-workflows")
+	server.Config.Server.StatusMetaContext = c.String("status-meta-context")
 	server.Config.Server.StatusPerWorkflow = c.Bool("status-per-workflow")
 	server.Config.Server.ReportSkippedWorkflows = c.Bool("report-skipped-workflows")
 	server.Config.Server.ReportSkippedToForge = c.Bool("report-skipped-to-forge")

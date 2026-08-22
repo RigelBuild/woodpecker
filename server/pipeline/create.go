@@ -130,7 +130,7 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 		return nil, errors.New(msg)
 	}
 
-	publishPipeline(ctx, _forge, pipeline, repo, repoUser)
+	publishPipeline(ctx, _forge, _store, pipeline, repo, repoUser)
 
 	if pipeline.Status == model.StatusBlocked {
 		return pipeline, nil
@@ -158,7 +158,7 @@ func updatePipelineWithErr(ctx context.Context, _forge forge.Forge, _store store
 	// update value in ref
 	*pipeline = *_pipeline
 
-	publishPipeline(ctx, _forge, pipeline, repo, repoUser)
+	publishPipeline(ctx, _forge, _store, pipeline, repo, repoUser)
 
 	return nil
 }
@@ -171,7 +171,7 @@ func updatePipelinePending(ctx context.Context, _forge forge.Forge, _store store
 	// update value in ref
 	*pipeline = *_pipeline
 
-	publishPipeline(ctx, _forge, pipeline, repo, repoUser)
+	publishPipeline(ctx, _forge, _store, pipeline, repo, repoUser)
 
 	return nil
 }

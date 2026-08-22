@@ -83,6 +83,32 @@ func GetPipelineAggregateStatusContext(repo *model.Repo, pipeline *model.Pipelin
 	return ctx.String()
 }
 
+// GetPipelineMetaStatusContext returns the context for the selective
+// meta-aggregate status. Unlike GetPipelineAggregateStatusContext it renders
+// StatusMetaContext with NO event variable, so the context string is
+// byte-identical across a pull_request and a pull_request_metadata pipeline —
+// that identity is the whole point: it lets a metadata-only pipeline re-post the
+// same required context without ever masking the code aggregate.
+func GetPipelineMetaStatusContext(repo *model.Repo, _ *model.Pipeline) string {
+	tmpl, err := template.New("meta-context").Parse(server.Config.Server.StatusMetaContext)
+	if err != nil {
+		log.Error().Err(err).Msg("could not create meta status from template")
+		return ""
+	}
+	var ctx bytes.Buffer
+	err = tmpl.Execute(&ctx, map[string]any{
+		"context": server.Config.Server.StatusContext,
+		"owner":   repo.Owner,
+		"repo":    repo.Name,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("could not create meta status context")
+		return ""
+	}
+
+	return ctx.String()
+}
+
 // GetPipelineStatusDescription is a helper function that generates a description
 // message for the current pipeline status.
 func GetPipelineStatusDescription(status model.StatusValue) string {
