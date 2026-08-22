@@ -33,21 +33,3 @@ steps:
     when:
       - event: pull_request
         evaluate: 'CI_COMMIT_PULL_REQUEST_LABELS contains "feature"'
-
-  - name: agentscan
-    image: docker.io/woodpeckerci/plugin-agentscan:latest
-    pull: true
-    depends_on: []
-    settings:
-      github_token:
-        from_secret: GITHUB_TOKEN_SURGE
-      allowlist:
-        - woodpecker-bot
-        - 'renovate[bot]'
-        - 6543
-        - anbraten
-        - lafriks
-        - qwerty287
-        - xoxys
-    when:
-      - event: pull_request
