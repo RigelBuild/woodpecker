@@ -249,7 +249,7 @@ func ReportMetaStatus(ctx context.Context, f Forge, s store.Store, u *model.User
 	// (2) Self-load the workflow tree when the caller has not loaded it (e.g. the
 	// cancel path), so filtering never no-ops on a nil tree and strands the check.
 	workflows := b.Workflows
-	if workflows == nil {
+	if len(workflows) == 0 {
 		workflows, err = s.WorkflowGetTree(b)
 		if err != nil {
 			return err
@@ -273,6 +273,13 @@ func hasLaterMetaPipeline(s store.Store, r *model.Repo, b *model.Pipeline) (bool
 		return false, err
 	}
 	for _, p := range pipelines {
+		// A newer pipeline that errored before its workflows were persisted (e.g. a
+		// config-fetch failure) never posts a meta verdict, so it must not suppress
+		// this pipeline's terminal report -- otherwise the required CI (meta) check
+		// is left stranded. Only defer to a newer pipeline that will actually post.
+		if p.Status == model.StatusError {
+			continue
+		}
 		if p.Commit == b.Commit && p.Number > b.Number {
 			return true, nil
 		}

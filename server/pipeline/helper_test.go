@@ -29,6 +29,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/pubsub/memory"
 	queue_mocks "go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
+	manager_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/mocks"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
 
@@ -269,15 +270,16 @@ func TestUpdatePipelineStatusAllReportingDisabledPostsNothing(t *testing.T) {
 }
 
 // metaGatePipeline returns a pull_request pipeline carrying one meta gate
-// (spec-impact) plus a code workflow, on a known commit + PR ref, so the meta
-// tests below share one shape. The number arg lets a test place it
-// earlier/later in the two-writer ordering.
-func metaGatePipeline(number int64, event model.WebhookEvent, gateState model.StatusValue) *model.Pipeline {
+// (spec-impact) plus a code workflow, on the given commit + a known PR ref, so
+// the meta tests below share one shape. The number arg lets a test place it
+// earlier/later in the two-writer ordering, and the commit arg lets a test vary
+// the head commit to exercise the commit-scoping discriminator.
+func metaGatePipeline(number int64, event model.WebhookEvent, gateState model.StatusValue, commit string) *model.Pipeline {
 	return &model.Pipeline{
 		Number: number,
 		Event:  event,
 		Status: model.StatusSuccess,
-		Commit: "abc123",
+		Commit: commit,
 		Ref:    "refs/pull/7/head",
 		Workflows: []*model.Workflow{
 			{ID: 1, Name: "build", State: model.StatusSuccess},
@@ -300,10 +302,10 @@ func TestUpdatePipelineStatusMetaFiresBesideAggregate(t *testing.T) {
 	// Freshness query: this pipeline is the only meta-carrying one for the commit,
 	// so nothing is newer and the report proceeds.
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
-		Return([]*model.Pipeline{metaGatePipeline(1, model.EventPull, model.StatusSuccess)}, nil)
+		Return([]*model.Pipeline{metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")}, nil)
 
 	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
-	pipeline := metaGatePipeline(1, model.EventPull, model.StatusSuccess)
+	pipeline := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")
 	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
 	user := &model.User{AccessToken: "x"}
 
@@ -325,12 +327,16 @@ func TestUpdatePipelineStatusMetaFiresBesideAggregate(t *testing.T) {
 func TestReportMetaStatusSkipsWhenLaterMetaPipelineExists(t *testing.T) {
 	setStatusMetaWorkflows(t, []string{"spec-impact"})
 
-	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess)          // opened green
-	freshP2 := metaGatePipeline(2, model.EventPullMetadata, model.StatusFailure) // edit-bad, red
+	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")          // opened green
+	freshP2 := metaGatePipeline(2, model.EventPullMetadata, model.StatusFailure, "abc123") // edit-bad, red
 
 	s := store_mocks.NewMockStore(t)
-	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
-		Return([]*model.Pipeline{slowP1, freshP2}, nil)
+	// Pin the query shape: the freshness scan must be event-filtered to the two
+	// meta-carrying PR events and ref-scoped to this pipeline's ref.
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.MatchedBy(func(filter *model.PipelineFilter) bool {
+		return assert.ObjectsAreEqual([]model.WebhookEvent{model.EventPull, model.EventPullMetadata}, filter.Events) &&
+			filter.RefContains == slowP1.Ref
+	})).Return([]*model.Pipeline{slowP1, freshP2}, nil)
 
 	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
 	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
@@ -349,8 +355,8 @@ func TestReportMetaStatusSkipsWhenLaterMetaPipelineExists(t *testing.T) {
 func TestReportMetaStatusPostsWhenNewest(t *testing.T) {
 	setStatusMetaWorkflows(t, []string{"spec-impact"})
 
-	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess)
-	freshP2 := metaGatePipeline(2, model.EventPullMetadata, model.StatusFailure)
+	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")
+	freshP2 := metaGatePipeline(2, model.EventPullMetadata, model.StatusFailure, "abc123")
 
 	s := store_mocks.NewMockStore(t)
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
@@ -364,6 +370,65 @@ func TestReportMetaStatusPostsWhenNewest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, f.metaCalls, "the newest meta-carrying pipeline must post its verdict")
 	require.Len(t, f.metaWorkflows, 2, "the newest pipeline's own workflows must be handed to the meta report")
+}
+
+// TestReportMetaStatusPostsWhenLaterPipelineIsDifferentCommit pins the
+// commit-scoping discriminator (p.Commit == b.Commit) in hasLaterMetaPipeline: a
+// HIGHER-Number meta pipeline for a DIFFERENT commit (a different PR head) must
+// NOT be treated as "later" for this commit, so this pipeline still posts. This
+// kills a mutation that drops the commit check and would let any newer PR
+// pipeline anywhere suppress this commit's verdict.
+func TestReportMetaStatusPostsWhenLaterPipelineIsDifferentCommit(t *testing.T) {
+	setStatusMetaWorkflows(t, []string{"spec-impact"})
+
+	mine := metaGatePipeline(1, model.EventPull, model.StatusFailure, "abc123")
+	otherCommit := metaGatePipeline(2, model.EventPullMetadata, model.StatusSuccess, "def456")
+
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{mine, otherCommit}, nil)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x"}
+
+	err := forge.ReportMetaStatus(context.Background(), f, s, user, repo, mine)
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.metaCalls,
+		"a higher-Number pipeline for a DIFFERENT commit must not suppress this commit's verdict")
+}
+
+// TestReportMetaStatusPostsWhenLaterMetaPipelineErrored is the M1 correctness
+// guard: a NEWER same-commit pipeline that died at config-fetch is persisted in
+// StatusError with ZERO workflows and never posts a CI (meta) verdict. It must
+// NOT suppress this older pipeline's terminal post — otherwise the required
+// CI (meta) check is stranded pending forever. So this pipeline STILL posts.
+func TestReportMetaStatusPostsWhenLaterMetaPipelineErrored(t *testing.T) {
+	setStatusMetaWorkflows(t, []string{"spec-impact"})
+
+	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")
+	// P2: newer, same commit, but errored before workflows were persisted.
+	erroredP2 := &model.Pipeline{
+		Number:    2,
+		Event:     model.EventPullMetadata,
+		Status:    model.StatusError,
+		Commit:    "abc123",
+		Ref:       "refs/pull/7/head",
+		Workflows: nil,
+	}
+
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{slowP1, erroredP2}, nil)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x"}
+
+	err := forge.ReportMetaStatus(context.Background(), f, s, user, repo, slowP1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.metaCalls,
+		"a newer pipeline that errored before posting a verdict must not suppress this terminal report")
 }
 
 // TestCancelPostsTerminalMetaWithNilWorkflows is the Q2 terminal-never-pending
@@ -422,4 +487,76 @@ func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
 	require.NotEmpty(t, f.metaWorkflows, "ReportMetaStatus must self-load the tree rather than no-op on nil Workflows")
 	assert.Equal(t, model.StatusSuccess, PipelineStatus(f.metaWorkflows),
 		"the meta rollup must be TERMINAL (an all-skipped gate set rolls up to success), never left pending")
+}
+
+// TestDeclinePostsTerminalMeta is the decline-path counterpart of the cancel
+// guard: a DECLINED pipeline whose meta gate is in the tree must post a TERMINAL
+// CI (meta) and never leave it pending. The decline path loads the tree
+// (decline.go:47) BEFORE updatePipelineStatus (decline.go:65) and sets every
+// workflow to declined, so the meta rollup is declined -- a terminal state. This
+// guards against a future refactor that moves the tree-load after
+// updatePipelineStatus, which would hand ReportMetaStatus an empty tree and
+// strand the check.
+func TestDeclinePostsTerminalMeta(t *testing.T) {
+	setStatusMetaWorkflows(t, []string{"spec-impact"})
+
+	s := store_mocks.NewMockStore(t)
+	s.EXPECT().WorkflowGetTree(mock.Anything).Return([]*model.Workflow{
+		{ID: 2, Name: "spec-impact", State: model.StatusBlocked},
+	}, nil)
+	s.On("WorkflowUpdate", mock.Anything).Return(nil)
+	s.On("UpdatePipeline", mock.Anything).Return(nil)
+	// Freshness: this pipeline is the only meta-carrying one for the commit.
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{{Number: 5, Event: model.EventPull, Commit: "abc123"}}, nil)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+	mgr := manager_mocks.NewMockManager(t)
+	mgr.On("ForgeFromRepo", mock.Anything).Return(f, nil)
+	origManager := server.Config.Services.Manager
+	server.Config.Services.Manager = mgr
+	t.Cleanup(func() { server.Config.Services.Manager = origManager })
+
+	q := queue_mocks.NewMockQueue(t)
+	origScheduler := server.Config.Services.Scheduler
+	server.Config.Services.Scheduler = scheduler.NewScheduler(context.Background(), s, q, memory.New())
+	t.Cleanup(func() { server.Config.Services.Scheduler = origScheduler })
+
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x", Login: "reviewer"}
+	pipeline := &model.Pipeline{
+		Number: 5,
+		Event:  model.EventPull,
+		Status: model.StatusBlocked,
+		Commit: "abc123",
+		Ref:    "refs/pull/7/head",
+	}
+
+	_, err := Decline(context.Background(), s, pipeline, user, repo)
+	require.NoError(t, err)
+	require.Equal(t, 1, f.metaCalls,
+		"a declined pipeline must still post CI (meta) with its tree loaded before the status update")
+	require.NotEmpty(t, f.metaWorkflows, "ReportMetaStatus must receive the declined tree, not an empty one")
+	assert.Equal(t, model.StatusDeclined, PipelineStatus(f.metaWorkflows),
+		"the meta rollup must be TERMINAL (declined), never left pending")
+}
+
+// TestReportMetaStatusSkipsNonPullEvents pins the event-scope guard
+// (forge.go: only EventPull / EventPullMetadata carry meta gates): a push
+// pipeline must trigger NEITHER the freshness query NOR a meta post. The
+// MockStore has no GetPipelineList expectation, so any freshness query would
+// panic, and metaCalls must stay zero.
+func TestReportMetaStatusSkipsNonPullEvents(t *testing.T) {
+	setStatusMetaWorkflows(t, []string{"spec-impact"})
+
+	s := store_mocks.NewMockStore(t)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x"}
+	pipeline := metaGatePipeline(1, model.EventPush, model.StatusSuccess, "abc123")
+
+	err := forge.ReportMetaStatus(context.Background(), f, s, user, repo, pipeline)
+	require.NoError(t, err)
+	assert.Zero(t, f.metaCalls, "a non-PR event must not post CI (meta)")
 }
