@@ -206,3 +206,160 @@ func TestStatusAggregateDeployEventIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, calls.Load(), "deploy events must not post an aggregate status")
 }
+
+// statusMetaFixture wires the meta-aggregate harness, mirroring
+// statusAggregateFixture: it sets the selective meta config (StatusContext "CI",
+// StatusMetaContext "{{ .context }} (meta)", and the two meta gate names), mocks
+// the commit-status POST, and returns the client/ctx/repo/user so each test can
+// call StatusMeta directly. It does NOT set a pipeline (each meta test builds its
+// own event + workflow set).
+func statusMetaFixture(t *testing.T, handler http.HandlerFunc) (*client, context.Context, *model.Repo, *model.User) {
+	t.Helper()
+
+	origCtx := server.Config.Server.StatusContext
+	origMeta := server.Config.Server.StatusMetaContext
+	origWorkflows := server.Config.Server.StatusMetaWorkflows
+	server.Config.Server.StatusContext = "CI"
+	server.Config.Server.StatusMetaContext = "{{ .context }} (meta)"
+	server.Config.Server.StatusMetaWorkflows = []string{"spec-impact", "pr-title-issue-ref"}
+	t.Cleanup(func() {
+		server.Config.Server.StatusContext = origCtx
+		server.Config.Server.StatusMetaContext = origMeta
+		server.Config.Server.StatusMetaWorkflows = origWorkflows
+	})
+
+	mockedHTTPClient := github_mock.NewMockedHTTPClient(
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostReposStatusesByOwnerByRepoBySha,
+			handler,
+		),
+	)
+	gh, err := github.NewClient(github.WithHTTPClient(mockedHTTPClient))
+	require.NoError(t, err)
+	ctx := context.WithValue(context.Background(), githubClientKey, gh)
+
+	c := &client{API: defaultAPI, url: defaultURL}
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	user := &model.User{AccessToken: "x"}
+	return c, ctx, repo, user
+}
+
+// TestStatusMetaPostsFilteredRollup verifies the core meta contract: a
+// pull_request pipeline carrying a mix of code and meta workflows posts ONE
+// status under the event-independent CI (meta) context, whose state rolls up
+// ONLY the matching meta gates. Here both meta gates are green while a code
+// workflow is (irrelevantly) present, so the meta verdict is success.
+func TestStatusMetaPostsFilteredRollup(t *testing.T) {
+	var posted github.RepoStatus
+	var calls int
+	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
+	workflows := []*model.Workflow{
+		{Name: "build", State: model.StatusSuccess},
+		{Name: "spec-impact", State: model.StatusSuccess},
+		{Name: "pr-title-issue-ref", State: model.StatusSuccess},
+	}
+
+	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "exactly one meta status must be posted")
+	assert.Equal(t, "CI (meta)", posted.GetContext())
+	assert.Equal(t, statusSuccess, posted.GetState())
+}
+
+// TestStatusMetaContextIdenticalAcrossEvents is the identity guarantee that lets
+// a pull_request_metadata pipeline re-post the SAME required context a
+// pull_request pipeline posted: the meta context has no event component, so it is
+// byte-identical across the two events. If it were not, the metadata pipeline
+// would post to a different context and never mask/refresh the gate.
+func TestStatusMetaContextIdenticalAcrossEvents(t *testing.T) {
+	capture := func(event model.WebhookEvent) string {
+		var posted github.RepoStatus
+		c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&posted)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		})
+		pipeline := &model.Pipeline{Commit: "abc123", Event: event, Status: model.StatusSuccess}
+		workflows := []*model.Workflow{{Name: "spec-impact", State: model.StatusSuccess}}
+		require.NoError(t, c.StatusMeta(ctx, user, repo, pipeline, workflows))
+		return posted.GetContext()
+	}
+
+	pull := capture(model.EventPull)
+	metadata := capture(model.EventPullMetadata)
+	assert.Equal(t, "CI (meta)", pull)
+	assert.Equal(t, pull, metadata, "the meta context must be identical across pull_request and pull_request_metadata")
+}
+
+// TestStatusMetaNoMatchingWorkflowPostsNothing pins the no-op: a pipeline whose
+// workflows include no configured meta gate must post nothing (the context is
+// only ever driven by pipelines that actually carry a gate).
+func TestStatusMetaNoMatchingWorkflowPostsNothing(t *testing.T) {
+	var calls int
+	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
+	workflows := []*model.Workflow{
+		{Name: "build", State: model.StatusSuccess},
+		{Name: "test", State: model.StatusSuccess},
+	}
+
+	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Zero(t, calls, "a pipeline carrying no meta gate must post nothing")
+}
+
+// TestStatusMetaEmptyConfigPostsNothing pins that with StatusMetaWorkflows empty
+// (feature OFF), even a pipeline whose workflows would otherwise match posts
+// nothing — nothing is a configured gate, so nothing rolls up.
+func TestStatusMetaEmptyConfigPostsNothing(t *testing.T) {
+	var calls int
+	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	server.Config.Server.StatusMetaWorkflows = nil
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
+	workflows := []*model.Workflow{{Name: "spec-impact", State: model.StatusSuccess}}
+
+	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Zero(t, calls, "an empty StatusMetaWorkflows disables the feature: post nothing")
+}
+
+// TestStatusMetaRollsUpOnlyMetaGates is the isolation guarantee: a FAILING meta
+// gate with GREEN code workflows must make the meta context red — the meta
+// verdict depends ONLY on the gates, never on the code workflows. The pipeline's
+// own overall Status is left green to prove StatusMeta rolls up the filtered set,
+// not pipeline.Status (which is what StatusAggregate / CI (pr) uses, untouched).
+func TestStatusMetaRollsUpOnlyMetaGates(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	// Pipeline overall is success (what CI (pr) would report), but a meta gate failed.
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
+	workflows := []*model.Workflow{
+		{Name: "build", State: model.StatusSuccess},
+		{Name: "spec-impact", State: model.StatusFailure},
+		{Name: "pr-title-issue-ref", State: model.StatusSuccess},
+	}
+
+	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, "CI (meta)", posted.GetContext())
+	assert.Equal(t, statusFailure, posted.GetState(),
+		"a failing meta gate must red the meta context even when code workflows and the overall pipeline are green")
+}

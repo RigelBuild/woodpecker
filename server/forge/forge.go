@@ -26,6 +26,7 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
 // Forge defines the interface for integrating with Git hosting platforms.
@@ -193,4 +194,95 @@ func ReportAggregateStatus(ctx context.Context, f Forge, u *model.User, r *model
 		return reporter.StatusAggregate(ctx, u, r, b)
 	}
 	return nil
+}
+
+// MetaStatusReporter is an optional Forge capability: report a SECOND, selective
+// aggregate status that rolls up ONLY the configured meta-gate workflows under a
+// stable, event-independent context. It is a sibling of AggregateStatusReporter,
+// so a cheap metadata-only pipeline can re-post the meta verdict without ever
+// masking the code aggregate.
+type MetaStatusReporter interface {
+	StatusMeta(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, workflows []*model.Workflow) error
+}
+
+// ReportMetaStatus reports the selective meta-aggregate status when the forge
+// supports it; it is a no-op for forges that don't. It centralizes three
+// concerns so every updatePipelineStatus caller inherits them without a
+// per-call-site audit:
+//
+//  1. Event scope — only pull_request and pull_request_metadata pipelines carry
+//     the meta gates, so only they report the meta status.
+//  2. Workflow self-load — the meta poster filters workflows, so it needs the
+//     tree; unlike the code aggregate it cannot tolerate a nil pipeline.Workflows.
+//     updatePipelineStatus runs at cancel.go BEFORE the tree is loaded, so this
+//     loads it itself rather than trusting caller load order — otherwise a
+//     canceled pipeline no-ops the post and strands the required check pending.
+//  3. Freshness — CI (meta) has two writers by design (the pull_request pipeline
+//     and every pull_request_metadata pipeline for the same commit) and nothing
+//     orders their completion. To stop a slow older pipeline from re-posting its
+//     stale verdict over a fresher one (in the worst case BYPASSING the gate:
+//     open-green → edit-bad → the slow pull pipeline re-greens), skip when the
+//     store already holds a LATER meta-carrying pipeline (higher Number) for the
+//     same commit + PR. Meta-carrying is the EVENT, so this needs only the
+//     pipeline rows (event + ref-scoped), never a per-candidate workflow-tree scan.
+func ReportMetaStatus(ctx context.Context, f Forge, s store.Store, u *model.User, r *model.Repo, b *model.Pipeline) error {
+	reporter, ok := f.(MetaStatusReporter)
+	if !ok {
+		return nil
+	}
+
+	// (1) Event scope: only PR-family pipelines carry the meta gates.
+	if b.Event != model.EventPull && b.Event != model.EventPullMetadata {
+		return nil
+	}
+
+	// (3) Freshness: skip if a later meta-carrying pipeline exists for this
+	// commit + PR, so only the newest meta-bearing pipeline's verdict survives.
+	newer, err := hasLaterMetaPipeline(s, r, b)
+	if err != nil {
+		return err
+	}
+	if newer {
+		return nil
+	}
+
+	// (2) Self-load the workflow tree when the caller has not loaded it (e.g. the
+	// cancel path), so filtering never no-ops on a nil tree and strands the check.
+	workflows := b.Workflows
+	if len(workflows) == 0 {
+		workflows, err = s.WorkflowGetTree(b)
+		if err != nil {
+			return err
+		}
+	}
+
+	return reporter.StatusMeta(ctx, u, r, b, workflows)
+}
+
+// hasLaterMetaPipeline reports whether the store holds a meta-carrying pipeline
+// (a pull_request or pull_request_metadata event) for the same commit + PR with a
+// higher pipeline Number than b. It reads only pipeline rows: the query is
+// event-filtered and ref-scoped (the PR ref), and the head commit is matched in
+// memory — no candidate's workflow tree is ever loaded.
+func hasLaterMetaPipeline(s store.Store, r *model.Repo, b *model.Pipeline) (bool, error) {
+	pipelines, err := s.GetPipelineList(r, &model.ListOptions{All: true}, &model.PipelineFilter{
+		Events:      []model.WebhookEvent{model.EventPull, model.EventPullMetadata},
+		RefContains: b.Ref,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, p := range pipelines {
+		// A newer pipeline that errored before its workflows were persisted (e.g. a
+		// config-fetch failure) never posts a meta verdict, so it must not suppress
+		// this pipeline's terminal report -- otherwise the required CI (meta) check
+		// is left stranded. Only defer to a newer pipeline that will actually post.
+		if p.Status == model.StatusError {
+			continue
+		}
+		if p.Commit == b.Commit && p.Number > b.Number {
+			return true, nil
+		}
+	}
+	return false, nil
 }

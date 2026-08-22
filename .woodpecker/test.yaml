@@ -131,26 +131,6 @@ steps:
       - make test-server-datastore
     when: *when
 
-  codecov:
-    depends_on:
-      - test
-      - sqlite
-    pull: true
-    image: docker.io/woodpeckerci/plugin-codecov:2.3.1
-    settings:
-      files:
-        - agent-coverage.out
-        - cli-coverage.out
-        - coverage.out
-        - server-coverage.out
-        - datastore-coverage.out
-        - e2e-coverage.out
-      token:
-        from_secret: codecov_token
-    when:
-      - path: *when_path
-    failure: ignore
-
 services:
   postgres:
     image: docker.io/postgres:18

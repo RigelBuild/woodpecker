@@ -413,6 +413,17 @@ var flags = append([]cli.Flag{
 		Usage:   "format for the aggregate status context; has no per-workflow component so it stays stable across an affected-aware fan-out",
 		Value:   "{{ .context }} ({{ .event }})",
 	},
+	&cli.StringSliceFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_META_WORKFLOWS"),
+		Name:    "status-meta-workflows",
+		Usage:   "names of the workflows rolled up into the selective meta-aggregate status (empty disables the feature). Unlike status-aggregate, this rolls up ONLY the named workflows, so a metadata-only pipeline can re-post the same required context without touching the code aggregate.",
+	},
+	&cli.StringFlag{
+		Sources: cli.EnvVars("WOODPECKER_STATUS_META_CONTEXT"),
+		Name:    "status-meta-context",
+		Usage:   "format for the selective meta-aggregate status context; has no event component so it is byte-identical across pull_request and pull_request_metadata pipelines",
+		Value:   "{{ .context }} (meta)",
+	},
 	&cli.BoolFlag{
 		Sources: cli.EnvVars("WOODPECKER_STATUS_PER_WORKFLOW"),
 		Name:    "status-per-workflow",

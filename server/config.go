@@ -49,6 +49,8 @@ var Config = struct {
 		StatusContextFormat    string
 		StatusAggregate        bool
 		StatusAggregateFormat  string
+		StatusMetaWorkflows    []string
+		StatusMetaContext      string
 		ReportSkippedWorkflows bool
 		ReportSkippedToForge   bool
 		StatusPerWorkflow      bool

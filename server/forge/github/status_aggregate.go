@@ -19,8 +19,10 @@ import (
 
 	"github.com/google/go-github/v88/github"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 )
 
 // StatusAggregate reports the pipeline's overall (rolled-up) state as a single
@@ -53,6 +55,60 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 			State:       github.Ptr(convertStatus(pipeline.Status)),
 			Description: github.Ptr(common.GetPipelineStatusDescription(pipeline.Status)),
 			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, pipeline, nil)),
+		})
+		return resp, e
+	})
+	return err
+}
+
+// StatusMeta reports a SECOND, selective aggregate status that rolls up ONLY the
+// workflows named in StatusMetaWorkflows (the "meta gates"), under a stable,
+// event-independent context (GetPipelineMetaStatusContext). It is a sibling of
+// StatusAggregate, not a replacement: the code aggregate (CI (pr)) keeps rolling
+// up every workflow, while this meta context can be re-posted by a cheap
+// metadata-only pipeline without ever masking the code verdict.
+//
+// It no-ops (posts nothing) when none of the pipeline's workflows are configured
+// meta gates, so a pipeline that carries no meta gate never touches the context.
+func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.Repo, p *model.Pipeline, workflows []*model.Workflow) error {
+	// Filter to the configured meta gates. Matching nothing means this pipeline
+	// carries no meta gate, so there is nothing to report.
+	metaNames := make(map[string]struct{}, len(server.Config.Server.StatusMetaWorkflows))
+	for _, name := range server.Config.Server.StatusMetaWorkflows {
+		metaNames[name] = struct{}{}
+	}
+	matched := make([]*model.Workflow, 0, len(workflows))
+	for _, workflow := range workflows {
+		if _, ok := metaNames[workflow.Name]; ok {
+			matched = append(matched, workflow)
+		}
+	}
+	if len(matched) == 0 {
+		return nil
+	}
+
+	// Roll up ONLY the matched workflows, reusing the same state-merge the code
+	// aggregate uses over its full set. This is the meta verdict.
+	metaStatus := pipeline.PipelineStatus(matched)
+
+	// Decouple from the caller's (agent gRPC) deadline and bound the report on
+	// its own budget, exactly like StatusAggregate: the meta status is a required
+	// branch-protection check, so a slow or rate-limited POST must fail fast with
+	// backoff rather than hang and leave the check stuck "pending" forever.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusReportTimeout)
+	defer cancel()
+
+	client, err := c.newClientToken(ctx, user.AccessToken)
+	if err != nil {
+		return err
+	}
+
+	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
+		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
+			Context:     github.Ptr(common.GetPipelineMetaStatusContext(repo, p)),
+			State:       github.Ptr(convertStatus(metaStatus)),
+			Description: github.Ptr(common.GetPipelineStatusDescription(metaStatus)),
+			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, p, nil)),
 		})
 		return resp, e
 	})
