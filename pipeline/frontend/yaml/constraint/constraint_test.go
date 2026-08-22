@@ -199,6 +199,36 @@ func TestConstraints(t *testing.T) {
 	}
 }
 
+func TestIncludesEvent(t *testing.T) {
+	const metaEvent = "pull_request_metadata"
+	testdata := []struct {
+		desc string
+		conf string
+		want bool
+	}{
+		{desc: "empty When matches every event", conf: "", want: true},
+		{desc: "event lists the queried event", conf: "{event: [pull_request_metadata]}", want: true},
+		{desc: "event lists only a different event", conf: "{event: [pull_request]}", want: false},
+		{desc: "constraint with no event filter matches every event", conf: "{branch: main}", want: true},
+		{
+			// IncludesEvent is structural: it judges the `event` clause ALONE, a
+			// superset of would-Match. A path filter would make Match false for a
+			// metadata event (no changed files), but the event IS listed, so
+			// IncludesEvent is deliberately true.
+			desc: "mixed sub-constraint with path still includes the event (superset direction)",
+			conf: "{event: [pull_request, pull_request_metadata], path: ['docs/**']}",
+			want: true,
+		},
+	}
+	for _, test := range testdata {
+		t.Run(test.desc, func(t *testing.T) {
+			c := parseConstraints(t, test.conf)
+			assert.Equal(t, test.want, c.IncludesEvent(metaEvent),
+				"IncludesEvent is wrong for when: '%s'", test.conf)
+		})
+	}
+}
+
 func parseConstraints(t *testing.T, s string) *When {
 	t.Helper()
 	c := &When{}

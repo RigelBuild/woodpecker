@@ -102,15 +102,15 @@ func setStatusPerWorkflow(t *testing.T, v bool) {
 	t.Cleanup(func() { server.Config.Server.StatusPerWorkflow = orig })
 }
 
-// setStatusMetaWorkflows sets the process-global StatusMetaWorkflows list for the
-// duration of a test, restoring the previous value on cleanup. A non-empty list
-// is what gates the meta report in updatePipelineStatus, so a test exercising
-// the meta post must set it explicitly.
-func setStatusMetaWorkflows(t *testing.T, v []string) {
+// setStatusMeta toggles the process-global StatusMeta flag for the duration of a
+// test, restoring the previous value on cleanup. The flag is what gates the meta
+// report in updatePipelineStatus, so a test exercising the meta post must set it
+// explicitly.
+func setStatusMeta(t *testing.T, v bool) {
 	t.Helper()
-	orig := server.Config.Server.StatusMetaWorkflows
-	server.Config.Server.StatusMetaWorkflows = v
-	t.Cleanup(func() { server.Config.Server.StatusMetaWorkflows = orig })
+	orig := server.Config.Server.StatusMeta
+	server.Config.Server.StatusMeta = v
+	t.Cleanup(func() { server.Config.Server.StatusMeta = orig })
 }
 
 func threeWorkflowPipeline() (*model.Pipeline, *model.Repo, *model.User) {
@@ -269,6 +269,27 @@ func TestUpdatePipelineStatusAllReportingDisabledPostsNothing(t *testing.T) {
 		"the aggregate must not be posted when StatusAggregate is disabled")
 }
 
+// TestUpdatePipelineStatusMetaFlagOffPostsNothing re-states the former
+// TestStatusMetaEmptyConfigPostsNothing as the intrinsic flag-OFF contract: with
+// StatusMeta disabled, even a pipeline that carries a real meta gate
+// (OnMetadataEdit=true) triggers no meta report. The server flag is the master
+// switch; gate membership alone never posts.
+func TestUpdatePipelineStatusMetaFlagOffPostsNothing(t *testing.T) {
+	setStatusPerWorkflow(t, false)
+	setStatusAggregate(t, false)
+	setStatusMeta(t, false)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+	pipeline := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x"}
+
+	updatePipelineStatus(context.Background(), f, store_mocks.NewMockStore(t), pipeline, repo, user)
+
+	assert.Zero(t, f.metaCalls,
+		"StatusMeta disabled must post no meta status even when a real meta gate is present")
+}
+
 // metaGatePipeline returns a pull_request pipeline carrying one meta gate
 // (spec-impact) plus a code workflow, on the given commit + a known PR ref, so
 // the meta tests below share one shape. The number arg lets a test place it
@@ -283,7 +304,7 @@ func metaGatePipeline(number int64, event model.WebhookEvent, gateState model.St
 		Ref:    "refs/pull/7/head",
 		Workflows: []*model.Workflow{
 			{ID: 1, Name: "build", State: model.StatusSuccess},
-			{ID: 2, Name: "spec-impact", State: gateState},
+			{ID: 2, Name: "spec-impact", State: gateState, OnMetadataEdit: true},
 		},
 	}
 }
@@ -296,7 +317,7 @@ func metaGatePipeline(number int64, event model.WebhookEvent, gateState model.St
 func TestUpdatePipelineStatusMetaFiresBesideAggregate(t *testing.T) {
 	setStatusPerWorkflow(t, true)
 	setStatusAggregate(t, true)
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	s := store_mocks.NewMockStore(t)
 	// Freshness query: this pipeline is the only meta-carrying one for the commit,
@@ -325,7 +346,7 @@ func TestUpdatePipelineStatusMetaFiresBesideAggregate(t *testing.T) {
 // pipeline (P2, higher Number) for the same commit + PR, P1's terminal meta post
 // is SKIPPED (no StatusMeta call).
 func TestReportMetaStatusSkipsWhenLaterMetaPipelineExists(t *testing.T) {
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")          // opened green
 	freshP2 := metaGatePipeline(2, model.EventPullMetadata, model.StatusFailure, "abc123") // edit-bad, red
@@ -353,7 +374,7 @@ func TestReportMetaStatusSkipsWhenLaterMetaPipelineExists(t *testing.T) {
 // store) DOES post — so the freshness guard suppresses only stale writers, never
 // the current verdict.
 func TestReportMetaStatusPostsWhenNewest(t *testing.T) {
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")
 	freshP2 := metaGatePipeline(2, model.EventPullMetadata, model.StatusFailure, "abc123")
@@ -379,7 +400,7 @@ func TestReportMetaStatusPostsWhenNewest(t *testing.T) {
 // kills a mutation that drops the commit check and would let any newer PR
 // pipeline anywhere suppress this commit's verdict.
 func TestReportMetaStatusPostsWhenLaterPipelineIsDifferentCommit(t *testing.T) {
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	mine := metaGatePipeline(1, model.EventPull, model.StatusFailure, "abc123")
 	otherCommit := metaGatePipeline(2, model.EventPullMetadata, model.StatusSuccess, "def456")
@@ -404,7 +425,7 @@ func TestReportMetaStatusPostsWhenLaterPipelineIsDifferentCommit(t *testing.T) {
 // NOT suppress this older pipeline's terminal post — otherwise the required
 // CI (meta) check is stranded pending forever. So this pipeline STILL posts.
 func TestReportMetaStatusPostsWhenLaterMetaPipelineErrored(t *testing.T) {
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	slowP1 := metaGatePipeline(1, model.EventPull, model.StatusSuccess, "abc123")
 	// P2: newer, same commit, but errored before workflows were persisted.
@@ -440,7 +461,7 @@ func TestReportMetaStatusPostsWhenLaterMetaPipelineErrored(t *testing.T) {
 // was skipped by the cancel, and an all-skipped meta set rolls up to success —
 // terminal, not pending.
 func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	s := store_mocks.NewMockStore(t)
 	// The gate is pending on the first tree read (so Cancel skips it), then
@@ -453,7 +474,7 @@ func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
 		if treeCalls > 1 {
 			state = model.StatusSkipped
 		}
-		return []*model.Workflow{{ID: 2, Name: "spec-impact", State: state}}, nil
+		return []*model.Workflow{{ID: 2, Name: "spec-impact", State: state, OnMetadataEdit: true}}, nil
 	})
 	s.On("WorkflowUpdate", mock.Anything).Return(nil)
 	s.On("UpdatePipeline", mock.Anything).Return(nil)
@@ -498,11 +519,11 @@ func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
 // updatePipelineStatus, which would hand ReportMetaStatus an empty tree and
 // strand the check.
 func TestDeclinePostsTerminalMeta(t *testing.T) {
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	s := store_mocks.NewMockStore(t)
 	s.EXPECT().WorkflowGetTree(mock.Anything).Return([]*model.Workflow{
-		{ID: 2, Name: "spec-impact", State: model.StatusBlocked},
+		{ID: 2, Name: "spec-impact", State: model.StatusBlocked, OnMetadataEdit: true},
 	}, nil)
 	s.On("WorkflowUpdate", mock.Anything).Return(nil)
 	s.On("UpdatePipeline", mock.Anything).Return(nil)
@@ -547,7 +568,7 @@ func TestDeclinePostsTerminalMeta(t *testing.T) {
 // MockStore has no GetPipelineList expectation, so any freshness query would
 // panic, and metaCalls must stay zero.
 func TestReportMetaStatusSkipsNonPullEvents(t *testing.T) {
-	setStatusMetaWorkflows(t, []string{"spec-impact"})
+	setStatusMeta(t, true)
 
 	s := store_mocks.NewMockStore(t)
 

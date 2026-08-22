@@ -1139,3 +1139,51 @@ steps:
 		assert.Equal(t, "run", items[0].Workflow.Name)
 	})
 }
+
+// TestOnMetadataEditPopulated is the crux persistence guard: at a pull_request
+// (open) event, a workflow that ALSO listens on pull_request_metadata runs
+// alongside a code-only workflow, and the meta-gate signal must be computed and
+// persisted on the item at build time — metadata events never fire at open, so
+// the signal cannot be recomputed from the (gone) parsed `when` at report time.
+func TestOnMetadataEditPopulated(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{pipelineEvent: metadata.EventPull}
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{
+			{Name: "gate", Data: []byte(`
+when:
+  event: [pull_request, pull_request_metadata]
+steps:
+  - name: build
+    image: scratch
+`)},
+			{Name: "code", Data: []byte(`
+when:
+  event: [pull_request]
+steps:
+  - name: build
+    image: scratch
+`)},
+			{Name: "always", Data: []byte(`
+steps:
+  - name: build
+    image: scratch
+`)},
+		},
+	}
+
+	items, err := b.Build()
+	assert.False(t, errors.HasBlockingErrors(err), "the empty-`when` bad_habit warning is non-blocking")
+	assert.Len(t, items, 3)
+
+	byName := make(map[string]*Item, len(items))
+	for _, it := range items {
+		byName[it.Workflow.Name] = it
+	}
+	assert.True(t, byName["gate"].OnMetadataEdit, "a workflow listening on pull_request_metadata is a meta gate")
+	assert.False(t, byName["code"].OnMetadataEdit, "a workflow listening only on pull_request is not a meta gate")
+	assert.True(t, byName["always"].OnMetadataEdit, "an empty `when` matches every event, so it is a meta gate")
+}

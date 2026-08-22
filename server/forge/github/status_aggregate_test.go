@@ -208,24 +208,22 @@ func TestStatusAggregateDeployEventIsNoOp(t *testing.T) {
 }
 
 // statusMetaFixture wires the meta-aggregate harness, mirroring
-// statusAggregateFixture: it sets the selective meta config (StatusContext "CI",
-// StatusMetaContext "{{ .context }} (meta)", and the two meta gate names), mocks
-// the commit-status POST, and returns the client/ctx/repo/user so each test can
-// call StatusMeta directly. It does NOT set a pipeline (each meta test builds its
-// own event + workflow set).
+// statusAggregateFixture: it sets the meta config (StatusContext "CI",
+// StatusMetaContext "{{ .context }} (meta)"), mocks the commit-status POST, and
+// returns the client/ctx/repo/user so each test can call StatusMeta directly. It
+// does NOT set a pipeline (each meta test builds its own event + workflow set).
+// Which workflows are meta gates is now intrinsic (Workflow.OnMetadataEdit), so
+// the fixture no longer configures a name list.
 func statusMetaFixture(t *testing.T, handler http.HandlerFunc) (*client, context.Context, *model.Repo, *model.User) {
 	t.Helper()
 
 	origCtx := server.Config.Server.StatusContext
 	origMeta := server.Config.Server.StatusMetaContext
-	origWorkflows := server.Config.Server.StatusMetaWorkflows
 	server.Config.Server.StatusContext = "CI"
 	server.Config.Server.StatusMetaContext = "{{ .context }} (meta)"
-	server.Config.Server.StatusMetaWorkflows = []string{"spec-impact", "pr-title-issue-ref"}
 	t.Cleanup(func() {
 		server.Config.Server.StatusContext = origCtx
 		server.Config.Server.StatusMetaContext = origMeta
-		server.Config.Server.StatusMetaWorkflows = origWorkflows
 	})
 
 	mockedHTTPClient := github_mock.NewMockedHTTPClient(
@@ -261,8 +259,8 @@ func TestStatusMetaPostsFilteredRollup(t *testing.T) {
 	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
 	workflows := []*model.Workflow{
 		{Name: "build", State: model.StatusSuccess},
-		{Name: "spec-impact", State: model.StatusSuccess},
-		{Name: "pr-title-issue-ref", State: model.StatusSuccess},
+		{Name: "spec-impact", State: model.StatusSuccess, OnMetadataEdit: true},
+		{Name: "pr-title-issue-ref", State: model.StatusSuccess, OnMetadataEdit: true},
 	}
 
 	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
@@ -286,7 +284,7 @@ func TestStatusMetaContextIdenticalAcrossEvents(t *testing.T) {
 			_, _ = w.Write([]byte(`{}`))
 		})
 		pipeline := &model.Pipeline{Commit: "abc123", Event: event, Status: model.StatusSuccess}
-		workflows := []*model.Workflow{{Name: "spec-impact", State: model.StatusSuccess}}
+		workflows := []*model.Workflow{{Name: "spec-impact", State: model.StatusSuccess, OnMetadataEdit: true}}
 		require.NoError(t, c.StatusMeta(ctx, user, repo, pipeline, workflows))
 		return posted.GetContext()
 	}
@@ -318,23 +316,27 @@ func TestStatusMetaNoMatchingWorkflowPostsNothing(t *testing.T) {
 	assert.Zero(t, calls, "a pipeline carrying no meta gate must post nothing")
 }
 
-// TestStatusMetaEmptyConfigPostsNothing pins that with StatusMetaWorkflows empty
-// (feature OFF), even a pipeline whose workflows would otherwise match posts
-// nothing — nothing is a configured gate, so nothing rolls up.
-func TestStatusMetaEmptyConfigPostsNothing(t *testing.T) {
+// TestStatusMetaNoGatePostsNothing pins the intrinsic feature-off corner: a
+// pipeline whose workflows are all non-gates (OnMetadataEdit=false) posts
+// nothing, even when a workflow's NAME would once have matched a configured
+// name list. Gate membership is now the intrinsic column, not a
+// name, so a workflow that does not listen on pull_request_metadata never rolls
+// up. (The server-level StatusMeta flag that disables the feature outright is
+// exercised in server/pipeline/helper_test.go.)
+func TestStatusMetaNoGatePostsNothing(t *testing.T) {
 	var calls int
 	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{}`))
 	})
-	server.Config.Server.StatusMetaWorkflows = nil
 	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
-	workflows := []*model.Workflow{{Name: "spec-impact", State: model.StatusSuccess}}
+	// spec-impact would have matched the old name list, but it is not a gate.
+	workflows := []*model.Workflow{{Name: "spec-impact", State: model.StatusSuccess, OnMetadataEdit: false}}
 
 	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
 	require.NoError(t, err)
-	assert.Zero(t, calls, "an empty StatusMetaWorkflows disables the feature: post nothing")
+	assert.Zero(t, calls, "a workflow that is not a meta gate must post nothing regardless of its name")
 }
 
 // TestStatusMetaRollsUpOnlyMetaGates is the isolation guarantee: a FAILING meta
@@ -353,8 +355,8 @@ func TestStatusMetaRollsUpOnlyMetaGates(t *testing.T) {
 	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
 	workflows := []*model.Workflow{
 		{Name: "build", State: model.StatusSuccess},
-		{Name: "spec-impact", State: model.StatusFailure},
-		{Name: "pr-title-issue-ref", State: model.StatusSuccess},
+		{Name: "spec-impact", State: model.StatusFailure, OnMetadataEdit: true},
+		{Name: "pr-title-issue-ref", State: model.StatusSuccess, OnMetadataEdit: true},
 	}
 
 	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)

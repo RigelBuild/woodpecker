@@ -272,13 +272,14 @@ func workflowsFromPipelineBuilder(pipeline *model.Pipeline, pipelineItems []*bui
 
 	for _, item := range pipelineItems {
 		workflow := &model.Workflow{
-			ID:         item.Workflow.ID,
-			Name:       item.Workflow.Name,
-			PID:        item.Workflow.PID,
-			PipelineID: pipeline.ID,
-			State:      model.StatusPending,
-			Environ:    item.Workflow.Environ,
-			AxisID:     item.Workflow.AxisID,
+			ID:             item.Workflow.ID,
+			Name:           item.Workflow.Name,
+			PID:            item.Workflow.PID,
+			PipelineID:     pipeline.ID,
+			State:          model.StatusPending,
+			Environ:        item.Workflow.Environ,
+			AxisID:         item.Workflow.AxisID,
+			OnMetadataEdit: item.OnMetadataEdit,
 		}
 
 		if item.Skipped {
