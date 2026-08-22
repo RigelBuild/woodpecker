@@ -99,9 +99,13 @@ func (when *When) IncludesStatusFailure(metadata metadata.Metadata, global bool,
 // event, judged structurally from the `event` filter alone (a superset of what
 // Match would return, since it ignores every other clause). An empty When
 // matches every event, and a constraint with no `event` filter matches every
-// event, so both return true. This is used at build time to persist whether a
-// workflow is a meta gate (listens on pull_request_metadata), a fact the parsed
-// `when` no longer carries by report time.
+// event, so both return true. Consequently a workflow with an empty `when` (or
+// a `when` carrying no `event` clause) is enrolled as a gate for EVERY event,
+// including pull_request_metadata — so an author adding a `when`-less workflow
+// to a served repo silently makes it a CI (meta) gate. This is used at build
+// time to persist whether a workflow is a meta gate (listens on
+// pull_request_metadata), a fact the parsed `when` no longer carries by report
+// time.
 func (when *When) IncludesEvent(event string) bool {
 	if when.IsEmpty() {
 		return true
