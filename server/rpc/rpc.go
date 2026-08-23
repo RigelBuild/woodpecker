@@ -604,7 +604,7 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 		}
 	}
 
-	if len(server.Config.Server.StatusMetaWorkflows) > 0 {
+	if server.Config.Server.StatusMeta {
 		if err := forge.ReportMetaStatus(ctx, _forge, s.store, user, repo, pipeline); err != nil {
 			log.Error().Err(err).Msgf("error setting meta status for %s/%d", repo.FullName, pipeline.Number)
 		}

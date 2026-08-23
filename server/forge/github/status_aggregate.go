@@ -19,7 +19,6 @@ import (
 
 	"github.com/google/go-github/v88/github"
 
-	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
@@ -62,24 +61,22 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 }
 
 // StatusMeta reports a SECOND, selective aggregate status that rolls up ONLY the
-// workflows named in StatusMetaWorkflows (the "meta gates"), under a stable,
-// event-independent context (GetPipelineMetaStatusContext). It is a sibling of
-// StatusAggregate, not a replacement: the code aggregate (CI (pr)) keeps rolling
-// up every workflow, while this meta context can be re-posted by a cheap
-// metadata-only pipeline without ever masking the code verdict.
+// workflows that listen on the pull_request_metadata event (the "meta gates"),
+// under a stable, event-independent context (GetPipelineMetaStatusContext). It
+// is a sibling of StatusAggregate, not a replacement: the code aggregate (CI
+// (pr)) keeps rolling up every workflow, while this meta context can be
+// re-posted by a cheap metadata-only pipeline without ever masking the code
+// verdict.
 //
-// It no-ops (posts nothing) when none of the pipeline's workflows are configured
-// meta gates, so a pipeline that carries no meta gate never touches the context.
+// It no-ops (posts nothing) when none of the pipeline's workflows are meta
+// gates, so a pipeline that carries no meta gate never touches the context.
 func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.Repo, p *model.Pipeline, workflows []*model.Workflow) error {
-	// Filter to the configured meta gates. Matching nothing means this pipeline
-	// carries no meta gate, so there is nothing to report.
-	metaNames := make(map[string]struct{}, len(server.Config.Server.StatusMetaWorkflows))
-	for _, name := range server.Config.Server.StatusMetaWorkflows {
-		metaNames[name] = struct{}{}
-	}
+	// Filter to the meta gates: workflows whose `when` listens on the
+	// pull_request_metadata event, persisted at build time. Matching nothing
+	// means this pipeline carries no meta gate, so there is nothing to report.
 	matched := make([]*model.Workflow, 0, len(workflows))
 	for _, workflow := range workflows {
-		if _, ok := metaNames[workflow.Name]; ok {
+		if workflow.OnMetadataEdit {
 			matched = append(matched, workflow)
 		}
 	}

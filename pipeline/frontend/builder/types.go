@@ -33,6 +33,11 @@ type Item struct {
 	// no compiled config and is not scheduled, but is persisted and reported so
 	// it can surface as a skipped check on the forge.
 	Skipped bool
+	// OnMetadataEdit marks a workflow whose `when` listens on the
+	// pull_request_metadata event (the meta-gate signal). It is computed from
+	// the parsed `when` at build time and persisted, because the parsed `when`
+	// is gone by the time the meta status is reported.
+	OnMetadataEdit bool
 }
 
 type Workflow struct {

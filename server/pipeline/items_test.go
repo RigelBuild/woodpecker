@@ -95,10 +95,12 @@ func TestSaveWorkflowsSkipped(t *testing.T) {
 					{Steps: []*backend_types.Step{{Name: "build"}}},
 				},
 			},
+			OnMetadataEdit: true,
 		},
 		{
-			Workflow: &builder.Workflow{ID: 2, PID: 2, Name: "skip"},
-			Skipped:  true,
+			Workflow:       &builder.Workflow{ID: 2, PID: 2, Name: "skip"},
+			Skipped:        true,
+			OnMetadataEdit: false,
 		},
 	}
 
@@ -119,6 +121,12 @@ func TestSaveWorkflowsSkipped(t *testing.T) {
 	assert.NotEmpty(t, byName["run"].Children)
 	assert.Equal(t, model.StatusSkipped, byName["skip"].State)
 	assert.Empty(t, byName["skip"].Children, "skipped workflow should carry no steps")
+	// The build-time OnMetadataEdit signal must survive onto the persisted
+	// model.Workflow: it is the only carrier of "this is a meta gate" by the
+	// time CI (meta) is reported, so a regression in the items.go mapping seam
+	// would silently stop the meta status from ever posting at pull_request open.
+	assert.True(t, byName["run"].OnMetadataEdit, "OnMetadataEdit must survive onto the persisted workflow")
+	assert.False(t, byName["skip"].OnMetadataEdit, "non-gate workflow must not be marked OnMetadataEdit")
 }
 
 func TestSaveWorkflowsReplaceExisting(t *testing.T) {

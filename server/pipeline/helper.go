@@ -48,7 +48,7 @@ func updatePipelineStatus(ctx context.Context, _forge forge.Forge, _store store.
 		}
 	}
 
-	if len(server.Config.Server.StatusMetaWorkflows) > 0 {
+	if server.Config.Server.StatusMeta {
 		if err := forge.ReportMetaStatus(ctx, _forge, _store, user, repo, pipeline); err != nil {
 			log.Error().Err(err).Msgf("error setting meta status for %s/%d", repo.FullName, pipeline.Number)
 		}

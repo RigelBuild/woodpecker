@@ -186,13 +186,20 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 		workflowMetadata.Workflow.Name = parsed.Name
 	}
 
+	// A workflow is a meta gate iff its `when` listens on the
+	// pull_request_metadata event. Compute it structurally from the parsed
+	// `when` now and persist it on the item: a pull_request pipeline runs meta
+	// gates alongside code workflows and metadata events never fire at open, so
+	// this signal must survive to report time when the parsed `when` is gone.
+	onMetadataEdit := parsed.When.IncludesEvent(string(metadata.EventPullMetadata))
+
 	// checking if filtered.
 	if match, err := parsed.When.Match(workflowMetadata, true, environ); !match && err == nil {
 		log.Debug().Str("pipeline", workflow.Name).Msg(
 			"marked as skipped, does not match metadata",
 		)
 		if b.ReportSkipped {
-			return &Item{Workflow: workflow, Skipped: true}, errorsAndWarnings
+			return &Item{Workflow: workflow, Skipped: true, OnMetadataEdit: onMetadataEdit}, errorsAndWarnings
 		}
 		return nil, nil
 	} else if err != nil {
@@ -218,6 +225,7 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 		DependsOn:        parsed.DependsOn,
 		ConcurrencyLimit: parsed.Concurrency.Limit,
 		ConcurrencyGroup: parsed.Concurrency.Group,
+		OnMetadataEdit:   onMetadataEdit,
 		// TODO: remove in next major.
 		RunsOn: parsed.RunsOn, //nolint:staticcheck
 	}
