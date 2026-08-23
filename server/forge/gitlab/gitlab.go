@@ -203,7 +203,7 @@ func (g *GitLab) Teams(ctx context.Context, user *model.User, p *model.ListOptio
 	for i := range groups {
 		teams = append(
 			teams, &model.Team{
-				Login:  groups[i].Name,
+				Login:  groups[i].FullPath,
 				Avatar: groups[i].AvatarURL,
 			},
 		)
@@ -309,12 +309,22 @@ func (g *GitLab) Repos(ctx context.Context, user *model.User, p *model.ListOptio
 	repos := make([]*model.Repo, 0, len(projects))
 
 	for i := range projects {
-		projectMember, _, err := client.ProjectMembers.GetInheritedProjectMember(projects[i].ID, int64(intUserID), gitlab.WithContext(ctx))
-		if err != nil {
-			return nil, err
+		project := projects[i]
+
+		// The projects list API already reports the current user's access level
+		var projectMember *gitlab.ProjectMember
+		if embeddedAccessLevel(project) == gitlab.NoPermissions {
+			var resp *gitlab.Response
+			projectMember, resp, err = client.ProjectMembers.GetInheritedProjectMember(project.ID, int64(intUserID), gitlab.WithContext(ctx))
+			if err != nil {
+				if resp != nil && resp.StatusCode == http.StatusNotFound {
+					continue
+				}
+				return nil, err
+			}
 		}
 
-		repo, err := g.convertGitLabRepo(projects[i], projectMember)
+		repo, err := g.convertGitLabRepo(project, projectMember)
 		if err != nil {
 			return nil, err
 		}
@@ -322,7 +332,7 @@ func (g *GitLab) Repos(ctx context.Context, user *model.User, p *model.ListOptio
 		repos = append(repos, repo)
 	}
 
-	return repos, err
+	return repos, nil
 }
 
 func (g *GitLab) PullRequests(ctx context.Context, u *model.User, r *model.Repo, p *model.ListOptions) ([]*model.PullRequest, error) {
@@ -661,7 +671,16 @@ func (g *GitLab) Hook(ctx context.Context, req *http.Request) (*model.Repo, *mod
 		pipeline, err = g.loadCommitFromSHA(ctx, repo, pipeline, cmID)
 		return repo, pipeline, err
 	case *gitlab.ReleaseEvent:
-		return convertReleaseHook(event)
+		repo, pipeline, err := convertReleaseHook(event)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if pipeline, err = g.loadReleaseAuthor(ctx, repo, pipeline); err != nil {
+			return nil, nil, err
+		}
+
+		return repo, pipeline, nil
 	default:
 		return nil, nil, &forge_types.ErrIgnoreEvent{Event: string(eventType)}
 	}
@@ -820,6 +839,44 @@ func (g *GitLab) loadMetadataFromMergeRequest(ctx context.Context, tmpRepo *mode
 		}
 		pipeline.PullRequestMilestone = milestone.Title
 	}
+
+	return pipeline, nil
+}
+
+func (g *GitLab) loadReleaseAuthor(ctx context.Context, tmpRepo *model.Repo, pipeline *model.Pipeline) (*model.Pipeline, error) {
+	_store, ok := store.TryFromContext(ctx)
+	if !ok {
+		log.Error().Msg("could not get store from context")
+		return pipeline, nil
+	}
+
+	repo, err := _store.GetRepoNameFallback(g.id, tmpRepo.ForgeRemoteID, tmpRepo.FullName)
+	if err != nil {
+		return nil, err
+	}
+
+	user, err := _store.GetUser(repo.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := newClient(g.url, user.AccessToken, g.skipVerify)
+	if err != nil {
+		return nil, err
+	}
+
+	_repo, err := g.getProject(ctx, client, repo.ForgeRemoteID, repo.Owner, repo.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	release, _, err := client.Releases.GetRelease(_repo.ID, pipeline.TagTitle, gitlab.WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+
+	pipeline.Author = release.Author.Username
+	pipeline.Avatar = release.Author.AvatarURL
 
 	return pipeline, nil
 }

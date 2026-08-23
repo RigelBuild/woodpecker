@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/compiler"
@@ -1186,4 +1187,34 @@ steps:
 	assert.True(t, byName["gate"].OnMetadataEdit, "a workflow listening on pull_request_metadata is a meta gate")
 	assert.False(t, byName["code"].OnMetadataEdit, "a workflow listening only on pull_request is not a meta gate")
 	assert.True(t, byName["always"].OnMetadataEdit, "an empty `when` matches every event, so it is a meta gate")
+}
+
+func TestInternalCommitBranchAndEventLabels(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{
+		pipelineEvent: "push",
+		branch:        "main",
+	}
+
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{
+			{Data: []byte(`
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+		},
+	}
+
+	items, err := b.Build()
+	assert.NoError(t, err)
+	assert.Len(t, items, 1)
+
+	assert.Equal(t, "main", items[0].Labels[pipeline.LabelCommitBranch])
+	assert.Equal(t, "push", items[0].Labels[pipeline.LabelEvent])
 }

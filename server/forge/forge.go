@@ -265,7 +265,7 @@ func ReportMetaStatus(ctx context.Context, f Forge, s store.Store, u *model.User
 // event-filtered and ref-scoped (the PR ref), and the head commit is matched in
 // memory — no candidate's workflow tree is ever loaded.
 func hasLaterMetaPipeline(s store.Store, r *model.Repo, b *model.Pipeline) (bool, error) {
-	pipelines, err := s.GetPipelineList(r, &model.ListOptions{All: true}, &model.PipelineFilter{
+	pipelines, err := s.GetPipelineList(r, &model.ListOptionsWithAll{All: true}, &model.PipelineFilter{
 		Events:      []model.WebhookEvent{model.EventPull, model.EventPullMetadata},
 		RefContains: b.Ref,
 	})
