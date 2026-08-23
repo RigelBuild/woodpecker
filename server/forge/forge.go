@@ -179,21 +179,52 @@ type Forge interface {
 }
 
 // AggregateStatusReporter is an optional Forge capability: report a single
-// pipeline-level status that rolls up every workflow's state. Because it has no
-// per-workflow component, it is stable across an affected-aware fan-out and can
-// serve as a required branch-protection check that only passes when the whole
-// pipeline passes.
+// pipeline-level status that rolls up the CODE (non-meta) workflows' state.
+// Because it has no per-workflow component, it is stable across an
+// affected-aware fan-out and can serve as a required branch-protection check
+// that only passes when the whole code pipeline passes. It receives the workflow
+// tree so it can exclude the meta gates (those go to the sibling
+// MetaStatusReporter's CI (meta) context), keeping CI (pr) from redding on a
+// gate a title/body edit can fix.
 type AggregateStatusReporter interface {
-	StatusAggregate(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline) error
+	StatusAggregate(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, workflows []*model.Workflow) error
 }
 
-// ReportAggregateStatus reports the pipeline-level aggregate status when the
-// forge supports it; it is a no-op for forges that don't.
-func ReportAggregateStatus(ctx context.Context, f Forge, u *model.User, r *model.Repo, b *model.Pipeline) error {
-	if reporter, ok := f.(AggregateStatusReporter); ok {
-		return reporter.StatusAggregate(ctx, u, r, b)
+// ReportAggregateStatus reports the pipeline-level code aggregate status when the
+// forge supports it; it is a no-op for forges that don't. It self-loads the
+// workflow tree the reporter needs to partition the rollup:
+//
+//  1. Event scope — only pull_request and pull_request_metadata pipelines carry
+//     the meta gates, so only they need the tree to exclude them. Every other
+//     event (push, tag, cron, deploy) has no meta gate, so its stored pipeline
+//     status is already the code verdict — pass no tree and let StatusAggregate
+//     fall back to it, adding no store read on the hot push path.
+//  2. Workflow self-load — updatePipelineStatus can run BEFORE the tree is loaded
+//     (the cancel path loads it after), so this loads it itself rather than
+//     trusting caller load order; otherwise the partition silently falls back to
+//     the whole-pipeline status and re-counts the meta gates into CI (pr). It
+//     populates b.Workflows so the sibling ReportMetaStatus (called next) reuses
+//     this one read instead of loading the tree a second time.
+func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model.User, r *model.Repo, b *model.Pipeline) error {
+	reporter, ok := f.(AggregateStatusReporter)
+	if !ok {
+		return nil
 	}
-	return nil
+
+	var workflows []*model.Workflow
+	if b.Event == model.EventPull || b.Event == model.EventPullMetadata {
+		workflows = b.Workflows
+		if len(workflows) == 0 {
+			var err error
+			workflows, err = s.WorkflowGetTree(b)
+			if err != nil {
+				return err
+			}
+			b.Workflows = workflows
+		}
+	}
+
+	return reporter.StatusAggregate(ctx, u, r, b, workflows)
 }
 
 // MetaStatusReporter is an optional Forge capability: report a SECOND, selective
