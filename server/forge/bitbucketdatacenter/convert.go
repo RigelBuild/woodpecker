@@ -102,6 +102,8 @@ func convertRepositoryPushEvent(ev *bitbucket.RepositoryPushEvent, baseURL strin
 
 	if strings.HasPrefix(ev.Changes[0].RefId, "refs/tags/") {
 		pipeline.Event = model.EventTag
+		pipeline.ForgeURL = fmt.Sprintf("%s/projects/%s/repos/%s/browse?at=%s", baseURL, ev.Repository.Project.Key, ev.Repository.Slug, url.QueryEscape(pipeline.Ref))
+		pipeline.TagTitle = strings.TrimPrefix(ev.Changes[0].RefId, "refs/tags/")
 	} else {
 		pipeline.Event = model.EventPush
 	}
@@ -174,9 +176,6 @@ func bitbucketAvatarURL(baseURL, slug string) string {
 }
 
 func convertListOptions(p *model.ListOptions) bitbucket.ListOptions {
-	if p.All {
-		return bitbucket.ListOptions{}
-	}
 	return bitbucket.ListOptions{Limit: uint(p.PerPage), Start: uint((p.Page - 1) * p.PerPage)}
 }
 

@@ -17,7 +17,7 @@ package github
 import (
 	"context"
 
-	"github.com/google/go-github/v88/github"
+	"github.com/google/go-github/v90/github"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"

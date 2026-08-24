@@ -2831,6 +2831,56 @@ const docTemplate = `{
                 }
             }
         },
+        "/repos/{repo_id}/logs/{pipeline_number}/{step_id}/download": {
+            "get": {
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Pipeline logs"
+                ],
+                "summary": "Download logs for a pipeline step",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "Bearer \u003cpersonal access token\u003e",
+                        "description": "Insert your personal access token",
+                        "name": "Authorization",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "the repository id",
+                        "name": "repo_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "the number of the pipeline",
+                        "name": "pipeline_number",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "the step id",
+                        "name": "step_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/repos/{repo_id}/move": {
             "post": {
                 "produces": [
@@ -4796,15 +4846,19 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "event": {
-                    "type": "string"
+                    "$ref": "#/definitions/WebhookEvent"
                 },
                 "finished": {
                     "type": "integer"
+                },
+                "full_name": {
+                    "type": "string"
                 },
                 "id": {
                     "type": "integer"
                 },
                 "message": {
+                    "description": "// Deprecated",
                     "type": "string"
                 },
                 "number": {
@@ -4816,6 +4870,14 @@ const docTemplate = `{
                 "refspec": {
                     "type": "string"
                 },
+                "release": {
+                    "description": "Ongoing Work: https://github.com/woodpecker-ci/woodpecker/pull/4626\n// New",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/Release"
+                        }
+                    ]
+                },
                 "repo_id": {
                     "type": "integer"
                 },
@@ -4823,6 +4885,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "status": {
+                    "type": "string"
+                },
+                "tag_title": {
                     "type": "string"
                 },
                 "title": {
@@ -4846,6 +4911,13 @@ const docTemplate = `{
                 "oauth_host": {
                     "description": "public url for oauth if different from url",
                     "type": "string"
+                },
+                "orgs": {
+                    "description": "members of those orgs may log in using this forge, in addition to the globally allowed ones",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "skip_verify": {
                     "type": "boolean"
@@ -4877,6 +4949,13 @@ const docTemplate = `{
                 "oauth_host": {
                     "description": "public url for oauth if different from url",
                     "type": "string"
+                },
+                "orgs": {
+                    "description": "members of those orgs may log in using this forge, in addition to the globally allowed ones",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "skip_verify": {
                     "type": "boolean"
@@ -4987,9 +5066,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "author": {
+                    "description": "TODO: only // The user sending the webhook data or triggering the pipeline event",
                     "type": "string"
                 },
                 "author_avatar": {
+                    "description": "TODO: only \u0026 rename to AuthorAvatar // Avatar URL of the author of the commit",
                     "type": "string"
                 },
                 "author_email": {
@@ -5051,6 +5132,7 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "is_prerelease": {
+                    "description": "deprecated, use release.is_prerelease instead",
                     "type": "boolean"
                 },
                 "message": {
@@ -5080,6 +5162,14 @@ const docTemplate = `{
                 "refspec": {
                     "type": "string"
                 },
+                "release": {
+                    "description": "Ongoing Work: https://github.com/woodpecker-ci/woodpecker/pull/4626\n// New",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/Release"
+                        }
+                    ]
+                },
                 "rerun_count": {
                     "type": "integer"
                 },
@@ -5099,10 +5189,14 @@ const docTemplate = `{
                 "status": {
                     "$ref": "#/definitions/StatusValue"
                 },
+                "tag_title": {
+                    "type": "string"
+                },
                 "timestamp": {
                     "type": "integer"
                 },
                 "title": {
+                    "description": "// Deprecated",
                     "type": "string"
                 },
                 "updated": {
@@ -5129,6 +5223,9 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "branch": {
+                    "type": "string"
+                },
+                "message": {
                     "type": "string"
                 },
                 "variables": {
@@ -5215,6 +5312,17 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "Release": {
+            "type": "object",
+            "properties": {
+                "is_prerelease": {
+                    "type": "boolean"
+                },
+                "title": {
                     "type": "string"
                 }
             }
@@ -5909,9 +6017,6 @@ const docTemplate = `{
                 "draft": {
                     "type": "boolean"
                 },
-                "is_prerelease": {
-                    "type": "boolean"
-                },
                 "labels": {
                     "type": "array",
                     "items": {
@@ -6042,6 +6147,9 @@ const docTemplate = `{
                 "parent": {
                     "type": "integer"
                 },
+                "release": {
+                    "$ref": "#/definitions/metadata.Release"
+                },
                 "rerun_count": {
                     "type": "integer"
                 },
@@ -6055,6 +6163,17 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "task": {
+                    "type": "string"
+                }
+            }
+        },
+        "metadata.Release": {
+            "type": "object",
+            "properties": {
+                "is_prerelease": {
+                    "type": "boolean"
+                },
+                "title": {
                     "type": "string"
                 }
             }

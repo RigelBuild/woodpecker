@@ -14,7 +14,7 @@
         # Fork build version. Must not collide with upstream tags (`v3.16.x`)
         # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
         # fork release.
-        version = "3.16.0-rigel.3";
+        version = "3.17.0-rigel.1";
 
         # The repo requires Go 1.26 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
@@ -35,8 +35,8 @@
 
         # Locked against this fork's go.sum / web pnpm-lock. To refresh: set to
         # pkgs.lib.fakeHash, build, and paste the hash nix reports.
-        vendorHash = "sha256-hZV7ZLoyhsKyugutlSh6R49g1xyqZvBoBryP8TSrfJc=";
-        webuiHash = "sha256-6sWSybiSJj7G1KO2iv81yylmOV6DBVN1D15PFYpilC0=";
+        vendorHash = "sha256-BLqkVqMadojMeL27L3YbRn2rmgtqixZidrpbhmE63lg=";
+        webuiHash = "sha256-N6XjylPpJu5VCyp/j71pog71q/yvShOoklsv6/kgKBo=";
 
         # Re-rooted to a content-addressed copy of this fork's own subtree
         # (SEA-1860): `self.outPath` is a subpath into the whole-repo store

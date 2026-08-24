@@ -41,6 +41,7 @@ import (
 type PipelineBuilder struct {
 	Yamls               []*YamlFile
 	Envs                map[string]string
+	AdditionalEnvs      map[string]string
 	DefaultLabels       map[string]string
 	RepoTrusted         *metadata.TrustedConfiguration
 	TrustedClonePlugins []string
@@ -209,7 +210,7 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 		return nil, multierr.Append(errorsAndWarnings, err)
 	}
 
-	ir, err := b.toInternalRepresentation(parsed, environ, workflowMetadata, workflow.ID)
+	ir, err := b.toInternalRepresentation(parsed, axis, workflowMetadata, workflow.ID)
 	if err != nil {
 		return nil, multierr.Append(errorsAndWarnings, err)
 	}
@@ -260,6 +261,8 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 	item.Labels[pipeline.LabelRepoFullName] = workflowMetadata.Repo.Owner + "/" + workflowMetadata.Repo.Name
 	item.Labels[pipeline.LabelBranch] = workflowMetadata.Repo.Branch
 	item.Labels[pipeline.LabelOrgID] = strconv.FormatInt(workflowMetadata.Repo.OrgID, 10)
+	item.Labels[pipeline.LabelCommitBranch] = workflowMetadata.Curr.Commit.Branch
+	item.Labels[pipeline.LabelEvent] = string(workflowMetadata.Curr.Event)
 
 	return item, errorsAndWarnings
 }
@@ -270,11 +273,12 @@ func (b *PipelineBuilder) environmentVariables(metadata metadata.Metadata, axis 
 	return environ
 }
 
-func (b *PipelineBuilder) toInternalRepresentation(parsed *yaml_types.Workflow, environ map[string]string, metadata metadata.Metadata, workflowID int64) (*backend_types.Config, error) {
+func (b *PipelineBuilder) toInternalRepresentation(parsed *yaml_types.Workflow, axis map[string]string, metadata metadata.Metadata, workflowID int64) (*backend_types.Config, error) {
 	options := []compiler.Option{}
 	options = append(
 		options,
-		compiler.WithEnviron(environ),
+		compiler.WithNonPluginEnviron(axis),
+		compiler.WithNonPluginEnviron(b.AdditionalEnvs),
 		compiler.WithEnviron(b.Envs),
 		compiler.WithEscalated(b.PrivilegedPlugins...),
 		compiler.WithTrustedClonePlugins(b.TrustedClonePlugins),
