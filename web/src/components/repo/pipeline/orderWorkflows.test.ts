@@ -155,11 +155,7 @@ describe('orderWorkflows', () => {
   });
 
   it('keeps equal-priority workflows in their input order (stable sort)', () => {
-    const workflows = [
-      makeWorkflow(1, [], 'failure'),
-      makeWorkflow(2, [], 'success'),
-      makeWorkflow(3, [], 'failure'),
-    ];
+    const workflows = [makeWorkflow(1, [], 'failure'), makeWorkflow(2, [], 'success'), makeWorkflow(3, [], 'failure')];
 
     const result = run(workflows, { showSkipped: false });
 
