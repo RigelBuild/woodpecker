@@ -37,6 +37,20 @@ steps:
         - <<: *when_path
         - '.woodpecker/**'
 
+  dummy-web:
+    # The web package embeds web/dist via //go:embed; golangci-lint and
+    # check-openapi typecheck it, so the dist dir must exist in this workflow's
+    # workspace before any compile step runs. Each workflow file runs on its own
+    # agent with its own workspace, so this stub must be recreated here (it also
+    # lives in test.yaml for that file's spine).
+    depends_on:
+      - vendor
+    image: *golang_image
+    commands:
+      - mkdir -p web/dist/
+      - echo "test" > web/dist/index.html
+    when: *when
+
   lint-pipeline:
     depends_on:
       # vendor (required) supplies the module cache the cmd/cli compile needs.
@@ -62,7 +76,7 @@ steps:
 
   lint:
     depends_on:
-      - vendor
+      - dummy-web
     image: golangci/golangci-lint:v2.12.2
     commands:
       - make lint

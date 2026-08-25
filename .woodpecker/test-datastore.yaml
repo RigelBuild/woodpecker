@@ -39,9 +39,22 @@ steps:
         - <<: *when_path
         - '.woodpecker/**'
 
-  postgres:
+  dummy-web:
+    # make test-server-datastore builds the server, which imports the web
+    # package that embeds web/dist via //go:embed. This workflow runs on its own
+    # agent/workspace, so the dist stub must be recreated here before the
+    # datastore steps compile (mirrors test.yaml / test-checks.yaml).
     depends_on:
       - vendor
+    image: *golang_image
+    commands:
+      - mkdir -p web/dist/
+      - echo "test" > web/dist/index.html
+    when: *when
+
+  postgres:
+    depends_on:
+      - dummy-web
     image: *golang_image
     environment:
       WOODPECKER_DATABASE_DRIVER: postgres
