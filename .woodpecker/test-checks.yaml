@@ -40,9 +40,10 @@ steps:
   dummy-web:
     # The web package embeds web/dist via //go:embed; golangci-lint and
     # check-openapi typecheck it, so the dist dir must exist in this workflow's
-    # workspace before any compile step runs. Each workflow file runs on its own
-    # agent with its own workspace, so this stub must be recreated here (it also
-    # lives in test.yaml for that file's spine).
+    # workspace before the lint/check-openapi spine compiles. (lint-pipeline is
+    # exempt — cmd/cli does not import web — which is why it depends only on
+    # vendor.) Each workflow file runs on its own agent with its own workspace,
+    # so this stub must be recreated here (it also lives in test.yaml).
     depends_on:
       - vendor
     image: *golang_image
