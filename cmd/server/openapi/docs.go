@@ -6449,6 +6449,9 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "on_metadata_edit": {
+                    "type": "boolean"
+                },
                 "pid": {
                     "type": "integer"
                 },
