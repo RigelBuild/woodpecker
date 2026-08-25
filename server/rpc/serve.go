@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -46,6 +47,10 @@ type ServeConfig struct {
 	// prometheus.NewRegistry() in tests to avoid duplicate-registration
 	// panics when the server is created multiple times.
 	Registerer prometheus.Registerer
+	// ReportWG, when non-nil, tracks in-flight background forge status
+	// reports so tests can await them before tearing down shared state.
+	// Nil in production, where reporting stays fire-and-forget.
+	ReportWG *sync.WaitGroup
 }
 
 // Serve registers Woodpecker's gRPC services on cfg.Listener and blocks
@@ -64,9 +69,13 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		}),
 	)
 
-	proto.RegisterWoodpeckerServer(grpcServer, NewWoodpeckerServer(
+	woodpeckerServer := NewWoodpeckerServer(
 		cfg.Scheduler, cfg.Logger, cfg.Store, cfg.Registerer,
-	))
+	)
+	if cfg.ReportWG != nil {
+		woodpeckerServer.(*WoodpeckerServer).peer.reportWG = cfg.ReportWG
+	}
+	proto.RegisterWoodpeckerServer(grpcServer, woodpeckerServer)
 	proto.RegisterWoodpeckerAuthServer(grpcServer, NewWoodpeckerAuthServer(
 		jwtManager, cfg.AgentToken, cfg.Store,
 	))
