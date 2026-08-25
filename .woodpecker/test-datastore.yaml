@@ -22,6 +22,9 @@ variables:
     - path: *when_path
       event: pull_request
 
+# Path-gated (unlike test-checks.yaml's bare `pull_request`): this file has no
+# .woodpecker/**-sensitive step, so only run — and only spin up the two DB
+# service containers — when a gating source/config path actually changes.
 when:
   - event: pull_request
     path: *when_path
