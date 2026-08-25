@@ -50,6 +50,8 @@ steps:
           - '.woodpecker/**'
 
   dummy-web:
+    depends_on:
+      - vendor
     image: *golang_image
     commands:
       - mkdir -p web/dist/
@@ -59,7 +61,7 @@ steps:
 
   lint:
     depends_on:
-      - vendor
+      - sqlite
     image: golangci/golangci-lint:v2.12.2
     commands:
       - make lint
@@ -67,7 +69,7 @@ steps:
 
   check-openapi:
     depends_on:
-      - vendor
+      - lint
     image: *golang_image
     commands:
       - 'make generate-openapi'
@@ -76,6 +78,8 @@ steps:
     when: *when
 
   lint-license-header:
+    depends_on:
+      - check-openapi
     image: *golang_image
     commands:
       - make install-addlicense # cspell:words addlicense
@@ -84,7 +88,7 @@ steps:
 
   test:
     depends_on:
-      - vendor
+      - dummy-web
     image: *golang_image
     commands:
       - make test-agent
@@ -96,7 +100,7 @@ steps:
 
   test-e2e:
     depends_on:
-      - vendor
+      - test
     image: *golang_image
     commands:
       - make test-e2e
@@ -105,7 +109,7 @@ steps:
 
   test-fuzz:
     depends_on:
-      - vendor
+      - test-e2e
     image: *golang_image
     commands:
       - make fuzz
@@ -116,7 +120,7 @@ steps:
 
   sqlite:
     depends_on:
-      - vendor
+      - test-fuzz
     image: *golang_image
     environment:
       WOODPECKER_DATABASE_DRIVER: sqlite3
@@ -127,7 +131,7 @@ steps:
 
   postgres:
     depends_on:
-      - vendor
+      - lint-license-header
     image: *golang_image
     environment:
       WOODPECKER_DATABASE_DRIVER: postgres
@@ -138,7 +142,7 @@ steps:
 
   mysql:
     depends_on:
-      - vendor
+      - postgres
     image: *golang_image
     environment:
       WOODPECKER_DATABASE_DRIVER: mysql
