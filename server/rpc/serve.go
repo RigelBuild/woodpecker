@@ -73,7 +73,15 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		cfg.Scheduler, cfg.Logger, cfg.Store, cfg.Registerer,
 	)
 	if cfg.ReportWG != nil {
-		woodpeckerServer.(*WoodpeckerServer).peer.reportWG = cfg.ReportWG
+		// Same-package invariant: NewWoodpeckerServer always returns
+		// *WoodpeckerServer. Use comma-ok rather than a bare assertion so a
+		// future upstream change to the concrete type surfaces as a returned
+		// error, never a panic that takes the process down.
+		ws, ok := woodpeckerServer.(*WoodpeckerServer)
+		if !ok {
+			return fmt.Errorf("rpc serve: NewWoodpeckerServer returned %T, want *WoodpeckerServer", woodpeckerServer)
+		}
+		ws.peer.reportWG = cfg.ReportWG
 	}
 	proto.RegisterWoodpeckerServer(grpcServer, woodpeckerServer)
 	proto.RegisterWoodpeckerAuthServer(grpcServer, NewWoodpeckerAuthServer(

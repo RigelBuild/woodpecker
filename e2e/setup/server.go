@@ -119,9 +119,18 @@ func StartServer(ctx context.Context, t *testing.T, files []*forge_types.FileMet
 	// cleanup above runs. reportForgeStatusAsync fires goroutines that read
 	// server.Config; those are detached from the gRPC server lifecycle, so
 	// GracefulStop alone does not wait for them. t.Cleanup is LIFO: this Wait is
-	// registered after the restore cleanup (so it runs before it) and before
-	// startGRPCServer's stop cleanup (so it runs after GracefulStop, once no new
-	// reports can be spawned).
+	// registered immediately after the restore cleanup (so it runs before it) and
+	// before startGRPCServer's stop cleanup (so it runs after GracefulStop, once
+	// no new reports can be spawned). Keep this block adjacent to and after the
+	// restore cleanup above — the ordering is the whole fix; separating them
+	// reopens the race, and only the -race CI run would catch it.
+	//
+	// Scope: this drains only the server.Config-reading forge reports. The
+	// sibling detached goroutines in Done/Update (logger Close/Write) are not
+	// awaited here and are safe only because they touch per-subtest state
+	// (s.logger, s.store, the request context), never the server.Config global
+	// this cleanup restores. If either ever reads server.Config, it needs the
+	// same WaitGroup treatment.
 	reportWG := &sync.WaitGroup{}
 	t.Cleanup(reportWG.Wait)
 
