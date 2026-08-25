@@ -47,7 +47,7 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 	// pipeline persists no tree, and its terminal p.Status IS the correct verdict
 	// — rolling up an empty set would post a vacuous success and mask the error,
 	// stranding the required check green. (A real PR pipeline always carries code
-	// workflows, so the filtered rollup is the live path there.)
+	// workflows, so the filtered aggregate is the live path there.)
 	status := p.Status
 	code := make([]*model.Workflow, 0, len(workflows))
 	for _, workflow := range workflows {
@@ -59,7 +59,7 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 		status = pipeline.PipelineStatus(code)
 		// Terminal-never-pending: a cancel sets a terminal pipeline status but
 		// leaves the still-running workflows untouched (they finish on the agent's
-		// stop signal — cancel.go), so the filtered rollup can be StatusRunning
+		// stop signal — cancel.go), so the filtered aggregate can be StatusRunning
 		// (→ pending) while the pipeline is already StatusKilled. The required
 		// check must reflect the terminal pipeline verdict, never a stale pending
 		// that could strand the merge gate if the agent never reports Done.
@@ -151,7 +151,7 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 // rolled-up workflow status can be StatusRunning/StatusPending when a cancel set
 // a terminal pipeline status but deliberately left the still-running workflows
 // untouched (cancel.go — they finish on the agent stop signal). In that window a
-// naive rollup would post "pending" to a required branch-protection check, which
+// naive aggregate would post "pending" to a required branch-protection check, which
 // flaps the gate and — if the agent never reports Done — strands it pending
 // forever. When the rolled-up status is non-terminal but the pipeline status is
 // terminal, prefer the pipeline status; otherwise keep the (more specific)

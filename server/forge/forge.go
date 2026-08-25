@@ -192,7 +192,7 @@ type AggregateStatusReporter interface {
 
 // ReportAggregateStatus reports the pipeline-level code aggregate status when the
 // forge supports it; it is a no-op for forges that don't. It self-loads the
-// workflow tree the reporter needs to partition the rollup:
+// workflow tree the reporter needs to partition the aggregate:
 //
 //  1. Event scope — only pull_request and pull_request_metadata pipelines carry
 //     the meta gates, so only they need the tree to exclude them. Every other
