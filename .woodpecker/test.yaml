@@ -37,7 +37,14 @@ steps:
 
   lint-pipeline:
     depends_on:
+      # vendor supplies the module cache; mysql is the tail of the heavy serial
+      # spine. Depending on it (optionally, so a .woodpecker-only PR that filters
+      # the spine out still runs this step) keeps lint-pipeline's own `go run`
+      # compile from overlapping a spine compile, holding peak to one heavy
+      # compile at a time on a 4 GiB agent (RIG-2713).
       - vendor
+      - name: mysql
+        optional: true
     image: *golang_image
     commands:
       - go run go.woodpecker-ci.org/woodpecker/v3/cmd/cli lint
