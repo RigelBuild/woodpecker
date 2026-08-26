@@ -1,23 +1,36 @@
 # Rigel CI runs a heterogeneous agent pool including a local-backend agent that
 # cannot run service containers or pull images; pin to docker-backend agents.
+#
+# RIG-2713: the heavy Go test suite is split across three workflow files
+# (test.yaml, test-checks.yaml, test-datastore.yaml). Each runs as its own
+# workflow on its own agent (WOODPECKER_MAX_WORKFLOWS=1), and within each file
+# the steps are chained strictly 1-wide (serial) so a 4 GiB agent never runs
+# more than one heavy Go compile at once — that bounds peak RAM and prevents the
+# OOM that expired task leases. Splitting across three files lets the three
+# chains run in parallel, keeping each workflow's wall time well under the
+# repo's 30-minute per-workflow timeout (a single fully-serial chain exceeded
+# it). This file is the push+PR Go-test spine.
 labels:
   backend: docker
 
 variables:
   - &golang_image 'docker.io/golang:1.27'
-  - &when
-    - path: &when_path # related config files
-        - '.woodpecker/test.yaml'
-        - '.golangci.yaml'
-        # go source code
-        - '**/*.go'
-        - 'go.*'
-        # schema changes
-        - 'pipeline/schema/**'
-        # tools updates
-        - Makefile
-        - 'codecov.yaml'
-      event: pull_request
+  # Paths that gate the Go test suite. Mirrored verbatim in test-checks.yaml and
+  # test-datastore.yaml — YAML anchors do not cross workflow files, so the list
+  # is intentionally duplicated; keep the three copies in sync.
+  - &when_path
+    - '.woodpecker/test.yaml'
+    - '.woodpecker/test-checks.yaml'
+    - '.woodpecker/test-datastore.yaml'
+    - '.golangci.yaml'
+    # go source code
+    - '**/*.go'
+    - 'go.*'
+    # schema changes
+    - 'pipeline/schema/**'
+    # tools updates
+    - Makefile
+    - 'codecov.yaml'
 
 when:
   - event: pull_request
@@ -35,27 +48,6 @@ steps:
         - <<: *when_path
         - '.woodpecker/**'
 
-  lint-pipeline:
-    depends_on:
-      # vendor supplies the module cache; mysql is the tail of the heavy serial
-      # spine. Depending on it (optionally, so a .woodpecker-only PR that filters
-      # the spine out still runs this step) keeps lint-pipeline's own `go run`
-      # compile from overlapping a spine compile, holding peak to one heavy
-      # compile at a time on a 4 GiB agent (RIG-2713).
-      - vendor
-      - name: mysql
-        optional: true
-    image: *golang_image
-    commands:
-      - go run go.woodpecker-ci.org/woodpecker/v3/cmd/cli lint
-    environment:
-      WOODPECKER_DISABLE_UPDATE_CHECK: true
-      WOODPECKER_LINT_STRICT: true
-    when:
-      - event: pull_request
-        path:
-          - '.woodpecker/**'
-
   dummy-web:
     depends_on:
       - vendor
@@ -65,33 +57,6 @@ steps:
       - echo "test" > web/dist/index.html
     when:
       - path: *when_path
-
-  lint:
-    depends_on:
-      - sqlite
-    image: golangci/golangci-lint:v2.12.2
-    commands:
-      - make lint
-    when: *when
-
-  check-openapi:
-    depends_on:
-      - lint
-    image: *golang_image
-    commands:
-      - 'make generate-openapi'
-      - 'DIFF=$(git diff | head)'
-      - '[ -n "$DIFF" ] && { echo "openapi not up to date, exec make generate-openapi and commit"; exit 1; } || true'
-    when: *when
-
-  lint-license-header:
-    depends_on:
-      - check-openapi
-    image: *golang_image
-    commands:
-      - make install-addlicense # cspell:words addlicense
-      - bash -c 'shopt -s globstar; addlicense -check -ignore "vendor/**" -ignore cmd/server/openapi/docs.go **/*.go'
-    when: *when
 
   test:
     depends_on:
@@ -135,42 +100,3 @@ steps:
       - make test-server-datastore-coverage
     when:
       - path: *when_path
-
-  postgres:
-    depends_on:
-      - lint-license-header
-    image: *golang_image
-    environment:
-      WOODPECKER_DATABASE_DRIVER: postgres
-      WOODPECKER_DATABASE_DATASOURCE: 'host=postgres user=postgres dbname=postgres sslmode=disable' # cspell:disable-line
-    commands:
-      - make test-server-datastore
-    when: *when
-
-  mysql:
-    depends_on:
-      - postgres
-    image: *golang_image
-    environment:
-      WOODPECKER_DATABASE_DRIVER: mysql
-      WOODPECKER_DATABASE_DATASOURCE: root@tcp(mysql:3306)/test?parseTime=true
-    commands:
-      - make test-server-datastore
-    when: *when
-
-services:
-  postgres:
-    image: docker.io/postgres:18
-    ports: ['5432']
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_HOST_AUTH_METHOD: trust
-    when: *when
-
-  mysql:
-    image: docker.io/mysql:26.7.0
-    ports: ['3306']
-    environment:
-      MYSQL_DATABASE: test
-      MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
-    when: *when
