@@ -115,6 +115,25 @@ func StartServer(ctx context.Context, t *testing.T, files []*forge_types.FileMet
 		server.Config = orig
 	})
 
+	// Drain in-flight background forge status reports before the config-restore
+	// cleanup above runs. reportForgeStatusAsync fires goroutines that read
+	// server.Config; those are detached from the gRPC server lifecycle, so
+	// GracefulStop alone does not wait for them. t.Cleanup is LIFO: this Wait is
+	// registered immediately after the restore cleanup (so it runs before it) and
+	// before startGRPCServer's stop cleanup (so it runs after GracefulStop, once
+	// no new reports can be spawned). Keep this block adjacent to and after the
+	// restore cleanup above — the ordering is the whole fix; separating them
+	// reopens the race, and only the -race CI run would catch it.
+	//
+	// Scope: this drains only the server.Config-reading forge reports. The
+	// sibling detached goroutines in Done/Update (logger Close/Write) are not
+	// awaited here and are safe only because they touch per-subtest state
+	// (s.logger, s.store, the request context), never the server.Config global
+	// this cleanup restores. If either ever reads server.Config, it needs the
+	// same WaitGroup treatment.
+	reportWG := &sync.WaitGroup{}
+	t.Cleanup(reportWG.Wait)
+
 	server.Config.Services.Logs = logging.New()
 	server.Config.Services.Scheduler = scheduler.NewScheduler(t.Context(), memStore, memQueue, memory.New()) //nolint:contextcheck
 	server.Config.Services.Membership = cache.NewMembershipService(memStore)
@@ -136,7 +155,7 @@ func StartServer(ctx context.Context, t *testing.T, files []*forge_types.FileMet
 	server.Config.Permissions.Orgs = permissions.NewOrgs([]string{})
 	server.Config.Permissions.OwnersAllowlist = permissions.NewOwnersAllowlist([]string{})
 
-	grpcAddr := startGRPCServer(ctx, t, memStore)
+	grpcAddr := startGRPCServer(ctx, t, memStore, reportWG)
 
 	return &ServerEnv{
 		GRPCAddr: grpcAddr,
@@ -183,7 +202,7 @@ func newTestManager(s store.Store, mockForge *forge_mocks.MockForge) (services.M
 // GracefulStop inside Serve) and then blocks until Serve has returned.
 // Without this wait, the next subtest can start while the previous server's
 // goroutines are still live, which races on shared state like server.Config.
-func startGRPCServer(ctx context.Context, t *testing.T, s store.Store) string {
+func startGRPCServer(ctx context.Context, t *testing.T, s store.Store, reportWG *sync.WaitGroup) string {
 	t.Helper()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -203,6 +222,7 @@ func startGRPCServer(ctx context.Context, t *testing.T, s store.Store) string {
 			AgentToken:       TestAgentToken,
 			KeepaliveMinTime: shortTimeout,
 			Registerer:       prometheus.NewRegistry(),
+			ReportWG:         reportWG,
 		})
 	}()
 
