@@ -1,0 +1,92 @@
+# RIG-2713 sibling of test.yaml — see that file's header for the split rationale.
+# This file is the PR-only datastore integration chain: the server datastore
+# suite against postgres and mysql service containers. postgres and mysql are
+# chained 1-wide (serial) so only one runs at a time on a 4 GiB agent.
+labels:
+  backend: docker
+
+variables:
+  - &golang_image 'docker.io/golang:1.27'
+  # Kept in sync with test.yaml / test-checks.yaml (anchors do not cross files).
+  - &when_path
+    - '.woodpecker/test.yaml'
+    - '.woodpecker/test-checks.yaml'
+    - '.woodpecker/test-datastore.yaml'
+    - '.golangci.yaml'
+    - '**/*.go'
+    - 'go.*'
+    - 'pipeline/schema/**'
+    - Makefile
+    - 'codecov.yaml'
+  - &when
+    - path: *when_path
+      event: pull_request
+
+# Path-gated (unlike test-checks.yaml's bare `pull_request`): this file has no
+# .woodpecker/**-sensitive step, so only run — and only spin up the two DB
+# service containers — when a gating source/config path actually changes.
+when:
+  - event: pull_request
+    path: *when_path
+
+steps:
+  vendor:
+    image: *golang_image
+    commands:
+      - go mod vendor
+    when:
+      path:
+        - <<: *when_path
+        - '.woodpecker/**'
+
+  dummy-web:
+    # make test-server-datastore builds the server, which imports the web
+    # package that embeds web/dist via //go:embed. This workflow runs on its own
+    # agent/workspace, so the dist stub must be recreated here before the
+    # datastore steps compile (mirrors test.yaml / test-checks.yaml).
+    depends_on:
+      - vendor
+    image: *golang_image
+    commands:
+      - mkdir -p web/dist/
+      - echo "test" > web/dist/index.html
+    when: *when
+
+  postgres:
+    depends_on:
+      - dummy-web
+    image: *golang_image
+    environment:
+      WOODPECKER_DATABASE_DRIVER: postgres
+      WOODPECKER_DATABASE_DATASOURCE: 'host=postgres user=postgres dbname=postgres sslmode=disable' # cspell:disable-line
+    commands:
+      - make test-server-datastore
+    when: *when
+
+  mysql:
+    depends_on:
+      - postgres
+    image: *golang_image
+    environment:
+      WOODPECKER_DATABASE_DRIVER: mysql
+      WOODPECKER_DATABASE_DATASOURCE: root@tcp(mysql:3306)/test?parseTime=true
+    commands:
+      - make test-server-datastore
+    when: *when
+
+services:
+  postgres:
+    image: docker.io/postgres:18
+    ports: ['5432']
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    when: *when
+
+  mysql:
+    image: docker.io/mysql:26.7.0
+    ports: ['3306']
+    environment:
+      MYSQL_DATABASE: test
+      MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+    when: *when

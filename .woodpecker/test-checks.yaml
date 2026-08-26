@@ -1,0 +1,103 @@
+# RIG-2713 sibling of test.yaml — see that file's header for the split rationale.
+# This file is the PR-only lint/generate checks chain: golangci-lint,
+# check-openapi, license-header, and the pipeline-config lint. All steps are
+# chained 1-wide so a 4 GiB agent runs one heavy compile at a time.
+labels:
+  backend: docker
+
+variables:
+  - &golang_image 'docker.io/golang:1.27'
+  # Kept in sync with test.yaml / test-datastore.yaml (anchors do not cross files).
+  - &when_path
+    - '.woodpecker/test.yaml'
+    - '.woodpecker/test-checks.yaml'
+    - '.woodpecker/test-datastore.yaml'
+    - '.golangci.yaml'
+    - '**/*.go'
+    - 'go.*'
+    - 'pipeline/schema/**'
+    - Makefile
+    - 'codecov.yaml'
+  - &when
+    - path: *when_path
+      event: pull_request
+
+# Bare pull_request (no path) so a .woodpecker/**-only PR still triggers this
+# workflow and runs lint-pipeline; the individual steps self-filter by path.
+when:
+  - event: pull_request
+
+steps:
+  vendor:
+    image: *golang_image
+    commands:
+      - go mod vendor
+    when:
+      path:
+        - <<: *when_path
+        - '.woodpecker/**'
+
+  dummy-web:
+    # The web package embeds web/dist via //go:embed; golangci-lint and
+    # check-openapi typecheck it, so the dist dir must exist in this workflow's
+    # workspace before the lint/check-openapi spine compiles. (lint-pipeline is
+    # exempt — cmd/cli does not import web — which is why it depends only on
+    # vendor.) Each workflow file runs on its own agent with its own workspace,
+    # so this stub must be recreated here (it also lives in test.yaml).
+    depends_on:
+      - vendor
+    image: *golang_image
+    commands:
+      - mkdir -p web/dist/
+      - echo "test" > web/dist/index.html
+    when: *when
+
+  lint-pipeline:
+    depends_on:
+      # vendor (required) supplies the module cache the cmd/cli compile needs.
+      # lint-license-header is the tail of this file's serial lint spine;
+      # depending on it *optionally* keeps lint-pipeline's `go run` compile from
+      # co-running with a spine compile on a 4 GiB agent (RIG-2713), while a
+      # .woodpecker-only PR (which filters the *when spine out) still runs
+      # lint-pipeline after vendor alone — an optional dep on a filtered step is
+      # dropped, not errored.
+      - vendor
+      - name: lint-license-header
+        optional: true
+    image: *golang_image
+    commands:
+      - go run go.woodpecker-ci.org/woodpecker/v3/cmd/cli lint
+    environment:
+      WOODPECKER_DISABLE_UPDATE_CHECK: true
+      WOODPECKER_LINT_STRICT: true
+    when:
+      - event: pull_request
+        path:
+          - '.woodpecker/**'
+
+  lint:
+    depends_on:
+      - dummy-web
+    image: golangci/golangci-lint:v2.12.2
+    commands:
+      - make lint
+    when: *when
+
+  check-openapi:
+    depends_on:
+      - lint
+    image: *golang_image
+    commands:
+      - 'make generate-openapi'
+      - 'DIFF=$(git diff | head)'
+      - '[ -n "$DIFF" ] && { echo "openapi not up to date, exec make generate-openapi and commit"; exit 1; } || true'
+    when: *when
+
+  lint-license-header:
+    depends_on:
+      - check-openapi
+    image: *golang_image
+    commands:
+      - make install-addlicense # cspell:words addlicense
+      - bash -c 'shopt -s globstar; addlicense -check -ignore "vendor/**" -ignore cmd/server/openapi/docs.go **/*.go'
+    when: *when
