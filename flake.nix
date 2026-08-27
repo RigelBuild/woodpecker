@@ -94,14 +94,15 @@
           # The server embeds the web UI (//go:embed all:dist/*); stage the
           # built UI before the Go build. `web/dist/` is a tracked path in the
           # source (a .gitkeep anchors the go:embed target so a clean clone
-          # compiles), so `cp -r SRC web/dist` would copy INTO the existing
-          # dir (dist/<store-name>/index.html) and leave dist/index.html
-          # absent -> the server dies at boot on "cannot find index.html".
-          # Remove the anchored dir first so the copy re-creates dist with the
-          # built UI at its root.
+          # compiles), so a plain `cp -r SRC web/dist` would copy INTO the
+          # existing dir (dist/<store-name>/index.html) and leave
+          # dist/index.html absent -> the server dies at boot on "cannot find
+          # index.html". Remove the anchored dir first, and copy with -T
+          # (--no-target-directory) so DEST is always the target and the copy
+          # can never nest even if the dir reappears.
           postPatch = ''
             rm -rf web/dist
-            cp -r ${woodpecker-webui} web/dist
+            cp -rT ${woodpecker-webui} web/dist
           '';
 
           meta.mainProgram = "woodpecker-server";
