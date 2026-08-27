@@ -43,7 +43,7 @@ func updatePipelineStatus(ctx context.Context, _forge forge.Forge, _store store.
 	}
 
 	if server.Config.Server.StatusAggregate {
-		if err := forge.ReportAggregateStatus(ctx, _forge, user, repo, pipeline); err != nil {
+		if err := forge.ReportAggregateStatus(ctx, _forge, _store, user, repo, pipeline); err != nil {
 			log.Error().Err(err).Msgf("error setting aggregate status for %s/%d", repo.FullName, pipeline.Number)
 		}
 	}

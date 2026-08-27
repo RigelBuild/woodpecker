@@ -61,7 +61,7 @@ func TestStatusAggregate(t *testing.T) {
 	repo := &model.Repo{Owner: "o", Name: "r"}
 	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
 
-	err = c.StatusAggregate(ctx, &model.User{AccessToken: "x"}, repo, pipeline)
+	err = c.StatusAggregate(ctx, &model.User{AccessToken: "x"}, repo, pipeline, []*model.Workflow{{Name: "build", State: model.StatusSuccess}})
 	require.NoError(t, err)
 	assert.Equal(t, "CI (pr)", posted.GetContext())
 	assert.Equal(t, statusSuccess, posted.GetState())
@@ -128,7 +128,7 @@ func TestStatusAggregateRetriesTransientThenSucceeds(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	})
 
-	err := c.StatusAggregate(ctx, user, repo, pipeline)
+	err := c.StatusAggregate(ctx, user, repo, pipeline, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), calls.Load(), "the transient 500 must be retried exactly once, then succeed")
 }
@@ -153,7 +153,7 @@ func TestStatusAggregateGivesUpAfterMaxAttempts(t *testing.T) {
 		_, _ = w.Write([]byte(`{"message":"server error"}`))
 	})
 
-	err := c.StatusAggregate(ctx, user, repo, pipeline)
+	err := c.StatusAggregate(ctx, user, repo, pipeline, nil)
 	require.Error(t, err)
 	assert.Equal(t, int32(forgeWriteMaxAttempts), calls.Load(),
 		"a persistently failing POST must be attempted exactly forgeWriteMaxAttempts times, then give up")
@@ -184,7 +184,7 @@ func TestStatusAggregateRunsOnDetachedBudgetWhenCallerCanceled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(ctx, 0)
 	cancel() // caller's context is dead before the report even starts
 
-	err := c.StatusAggregate(ctx, user, repo, pipeline)
+	err := c.StatusAggregate(ctx, user, repo, pipeline, nil)
 	require.NoError(t, err, "the report must run on its own detached budget, not the canceled caller ctx")
 	assert.Equal(t, int32(1), calls.Load(), "the status must still be posted despite the canceled caller ctx")
 }
@@ -202,9 +202,153 @@ func TestStatusAggregateDeployEventIsNoOp(t *testing.T) {
 	})
 	pipeline.Event = model.EventDeploy
 
-	err := c.StatusAggregate(ctx, user, repo, pipeline)
+	err := c.StatusAggregate(ctx, user, repo, pipeline, nil)
 	require.NoError(t, err)
 	assert.Zero(t, calls.Load(), "deploy events must not post an aggregate status")
+}
+
+// TestStatusAggregateExcludesMetaGates is the core partition contract: CI (pr)
+// rolls up ONLY the code (non-meta) workflows. A FAILING meta gate beside GREEN
+// code workflows must leave CI (pr) GREEN — the meta gate's verdict belongs to
+// the sibling CI (meta) context, not here, so a bad PR title (fixable by a
+// metadata edit) can never red the code gate. Pre-partition this posted failure
+// (the meta gate double-counted into pipeline.Status).
+func TestStatusAggregateExcludesMetaGates(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	// The pipeline's own Status is failure (a naive rollup would post red), but
+	// that failure is entirely the meta gate — every code workflow is green.
+	pipeline.Status = model.StatusFailure
+	workflows := []*model.Workflow{
+		{Name: "build", State: model.StatusSuccess},
+		{Name: "test", State: model.StatusSuccess},
+		{Name: "pr-title-issue-ref", State: model.StatusFailure, OnMetadataEdit: true},
+	}
+
+	err := c.StatusAggregate(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, "CI (pr)", posted.GetContext())
+	assert.Equal(t, statusSuccess, posted.GetState(),
+		"CI (pr) must roll up ONLY the code workflows; a failing meta gate must not red it")
+}
+
+// TestStatusAggregateRedWhenCodeFails is the partition's other half: a failing
+// CODE workflow DOES red CI (pr), even when the meta gates are green. This keeps
+// TestStatusAggregateExcludesMetaGates honest — it proves the filter excludes
+// only the meta gates, not that CI (pr) is unconditionally green.
+func TestStatusAggregateRedWhenCodeFails(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	workflows := []*model.Workflow{
+		{Name: "build", State: model.StatusFailure},
+		{Name: "spec-impact", State: model.StatusSuccess, OnMetadataEdit: true},
+	}
+
+	err := c.StatusAggregate(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, statusFailure, posted.GetState(),
+		"a failing code workflow must red CI (pr); the filter excludes only meta gates")
+}
+
+// TestStatusAggregateEmptyCodeSetFallsBackToPipelineStatus is the
+// terminal-never-pending guard: a config-fetch-errored pipeline persists NO
+// workflow tree, so the code set is empty. Rolling up an empty set would post a
+// vacuous success (PipelineStatus([]) == success) and mask the error, stranding
+// the required check green. Instead CI (pr) must fall back to the stored terminal
+// pipeline status and report the error.
+func TestStatusAggregateEmptyCodeSetFallsBackToPipelineStatus(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	pipeline.Status = model.StatusError
+
+	err := c.StatusAggregate(ctx, user, repo, pipeline, nil)
+	require.NoError(t, err)
+	assert.Equal(t, statusFailure, posted.GetState(),
+		"an errored pipeline with no code workflows must red CI (pr), not post a vacuous success")
+}
+
+// TestStatusAggregateAllMetaGatesFallsBackToPipelineStatus pins the corner where
+// a pipeline carries ONLY meta gates (no code workflow at all): the code set is
+// empty after filtering, so — like the errored-empty-tree case — CI (pr) falls
+// back to the stored pipeline status rather than posting a vacuous success from
+// an empty rollup. In practice a real PR always carries code workflows; this
+// guards the degenerate filter result explicitly.
+func TestStatusAggregateAllMetaGatesFallsBackToPipelineStatus(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	pipeline.Status = model.StatusSuccess
+	workflows := []*model.Workflow{
+		{Name: "spec-impact", State: model.StatusFailure, OnMetadataEdit: true},
+	}
+
+	err := c.StatusAggregate(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, statusSuccess, posted.GetState(),
+		"with no code workflow, CI (pr) falls back to the stored pipeline status, not the meta gate's verdict")
+}
+
+// TestStatusAggregateCancelWhileRunningPostsTerminal is the terminal-never-pending
+// regression for the cancel path: a cancel sets a terminal pipeline status
+// (StatusKilled) but leaves the still-running workflows untouched (they finish on
+// the agent's stop signal — cancel.go), so the self-loaded tree carries a
+// StatusRunning code workflow. A naive rollup would be StatusRunning → pending,
+// flapping the required CI (pr) check (and stranding it forever if the agent
+// never reports Done). The terminal reconciliation must prefer the terminal
+// pipeline status, so CI (pr) posts failure, not pending.
+func TestStatusAggregateCancelWhileRunningPostsTerminal(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	pipeline.Status = model.StatusKilled // cancel set a terminal pipeline verdict
+	workflows := []*model.Workflow{
+		{Name: "build", State: model.StatusRunning}, // not yet stopped by the agent
+	}
+
+	err := c.StatusAggregate(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, statusFailure, posted.GetState(),
+		"a canceled pipeline with a still-running code workflow must post a terminal CI (pr), never pending")
+}
+
+// TestStatusMetaCancelWhileRunningPostsTerminal is the same terminal-never-pending
+// guard for the sibling CI (meta) context: a meta gate left StatusRunning by a
+// cancel, with a terminal pipeline status, must post a terminal meta verdict
+// rather than stranding the required CI (meta) check pending.
+func TestStatusMetaCancelWhileRunningPostsTerminal(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusKilled}
+	workflows := []*model.Workflow{
+		{Name: "spec-impact", State: model.StatusRunning, OnMetadataEdit: true},
+	}
+
+	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, statusFailure, posted.GetState(),
+		"a canceled pipeline with a still-running meta gate must post a terminal CI (meta), never pending")
 }
 
 // statusMetaFixture wires the meta-aggregate harness, mirroring
