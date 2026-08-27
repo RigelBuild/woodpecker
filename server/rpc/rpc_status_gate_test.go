@@ -54,7 +54,7 @@ func (f *perWorkflowGateForge) Status(_ context.Context, _ *model.User, _ *model
 	return nil
 }
 
-func (f *perWorkflowGateForge) StatusAggregate(_ context.Context, _ *model.User, _ *model.Repo, _ *model.Pipeline) error {
+func (f *perWorkflowGateForge) StatusAggregate(_ context.Context, _ *model.User, _ *model.Repo, _ *model.Pipeline, _ []*model.Workflow) error {
 	f.aggregateCalls++
 	return nil
 }

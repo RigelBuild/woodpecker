@@ -55,6 +55,11 @@ type aggregateResilienceForge struct {
 	statusCalledFor []int64
 	aggregateCalls  int
 
+	// aggregateWorkflows captures the workflow set the last StatusAggregate call
+	// was handed, so a test can assert CI (pr) rolled up ONLY the code workflows
+	// (the meta gates excluded).
+	aggregateWorkflows []*model.Workflow
+
 	// metaCalls counts StatusMeta invocations, and metaWorkflows captures the
 	// workflow set the last meta call was handed, so a test can assert both that
 	// the meta post fired beside the aggregate and what it rolled up.
@@ -70,8 +75,9 @@ func (f *aggregateResilienceForge) Status(_ context.Context, _ *model.User, _ *m
 	return nil
 }
 
-func (f *aggregateResilienceForge) StatusAggregate(_ context.Context, _ *model.User, _ *model.Repo, _ *model.Pipeline) error {
+func (f *aggregateResilienceForge) StatusAggregate(_ context.Context, _ *model.User, _ *model.Repo, _ *model.Pipeline, workflows []*model.Workflow) error {
 	f.aggregateCalls++
+	f.aggregateWorkflows = workflows
 	return nil
 }
 
@@ -580,4 +586,52 @@ func TestReportMetaStatusSkipsNonPullEvents(t *testing.T) {
 	err := forge.ReportMetaStatus(context.Background(), f, s, user, repo, pipeline)
 	require.NoError(t, err)
 	assert.Zero(t, f.metaCalls, "a non-PR event must not post CI (meta)")
+}
+
+// TestReportAggregateStatusSelfLoadsTreeForPull is the partition's self-load
+// guarantee on the code aggregate: on a pull_request pipeline whose Workflows are
+// nil at the call site (the cancel path loads the tree AFTER
+// updatePipelineStatus), ReportAggregateStatus must load the tree itself and hand
+// StatusAggregate the workflow set — otherwise the partition silently falls back
+// to the whole-pipeline status and re-counts the meta gates into CI (pr). It also
+// populates b.Workflows so the sibling ReportMetaStatus reuses the one read.
+func TestReportAggregateStatusSelfLoadsTreeForPull(t *testing.T) {
+	tree := []*model.Workflow{
+		{ID: 1, Name: "build", State: model.StatusSuccess},
+		{ID: 2, Name: "spec-impact", State: model.StatusFailure, OnMetadataEdit: true},
+	}
+	s := store_mocks.NewMockStore(t)
+	s.EXPECT().WorkflowGetTree(mock.Anything).Return(tree, nil).Once()
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x"}
+	// Workflows deliberately nil at the call site, like the cancel path.
+	pipeline := &model.Pipeline{Number: 5, Event: model.EventPull, Status: model.StatusFailure, Commit: "abc123", Ref: "refs/pull/7/head"}
+
+	err := forge.ReportAggregateStatus(context.Background(), f, s, user, repo, pipeline)
+	require.NoError(t, err)
+	require.Equal(t, 1, f.aggregateCalls, "the code aggregate must fire once")
+	require.Equal(t, tree, f.aggregateWorkflows, "StatusAggregate must receive the self-loaded tree, not nil")
+	assert.Equal(t, tree, pipeline.Workflows,
+		"the self-loaded tree must be cached on the pipeline so the sibling meta report reuses it")
+}
+
+// TestReportAggregateStatusSkipsSelfLoadForPush pins the hot-path optimization:
+// a push pipeline carries no meta gate, so its stored pipeline status is already
+// the code verdict — ReportAggregateStatus must NOT query the store for the tree
+// (the MockStore has no WorkflowGetTree expectation, so any load would panic) and
+// must hand StatusAggregate a nil workflow set (fall back to p.Status).
+func TestReportAggregateStatusSkipsSelfLoadForPush(t *testing.T) {
+	s := store_mocks.NewMockStore(t)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x"}
+	pipeline := &model.Pipeline{Number: 5, Event: model.EventPush, Status: model.StatusSuccess, Commit: "abc123"}
+
+	err := forge.ReportAggregateStatus(context.Background(), f, s, user, repo, pipeline)
+	require.NoError(t, err)
+	require.Equal(t, 1, f.aggregateCalls, "the code aggregate must fire once on push")
+	assert.Nil(t, f.aggregateWorkflows, "a push pipeline must not self-load the tree; StatusAggregate falls back to p.Status")
 }
