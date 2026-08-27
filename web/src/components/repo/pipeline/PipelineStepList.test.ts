@@ -1,7 +1,7 @@
 import { shallowMount } from '@vue/test-utils';
+import { describe, expect, it } from 'vitest';
 import { ref } from 'vue';
 import { createI18n } from 'vue-i18n';
-import { describe, expect, it } from 'vitest';
 
 import PipelineStepList from '~/components/repo/pipeline/PipelineStepList.vue';
 import type { Pipeline, PipelineConfig, PipelineStep, PipelineWorkflow } from '~/lib/api/types';
@@ -108,10 +108,7 @@ describe('pipelineStepList', () => {
     // iterates when workflows.length > 1) and calls `.some()` on the null children.
     // Pre-fix this was `workflow.children.some(...)` -> TypeError on null -> the whole
     // pipeline view blanked. The guard `(workflow.children ?? [])` is what keeps it alive.
-    const pipeline = makePipeline([
-      makeWorkflow(1, null, 'skipped'),
-      makeWorkflow(2, [makeStep(1)], 'success'),
-    ]);
+    const pipeline = makePipeline([makeWorkflow(1, null, 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
 
     expect(() => mountStepList(pipeline)).not.toThrow();
 
@@ -141,10 +138,7 @@ describe('pipelineStepList', () => {
 
   it('handles an empty children array', () => {
     // Mixed with a second workflow so the setup `.some()` path executes on `[]` too.
-    const pipeline = makePipeline([
-      makeWorkflow(1, [], 'skipped'),
-      makeWorkflow(2, [makeStep(1)], 'success'),
-    ]);
+    const pipeline = makePipeline([makeWorkflow(1, [], 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
 
     expect(() => mountStepList(pipeline)).not.toThrow();
   });
