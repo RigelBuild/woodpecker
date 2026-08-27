@@ -512,11 +512,11 @@ func TestStatusMetaRollsUpOnlyMetaGates(t *testing.T) {
 
 // TestIsTerminalStatusMatchesConvertStatus locks isTerminalStatus in lockstep
 // with convertStatus: a status is terminal exactly when convertStatus maps it to
-// something other than statusPending. reconcileTerminalStatus relies on this
-// equivalence to decide when a rolled-up verdict may override a still-running
-// workflow status, so the two must never drift. If a future model.StatusValue is
-// wired into convertStatus's terminal branches without being added to
-// isTerminalStatus (or vice versa), this test fails — which is the point.
+// something other than statusPending — the equivalence reconcileTerminalStatus
+// relies on to decide when a rolled-up verdict may override a still-running
+// workflow status, so the two must never drift. A future model.StatusValue wired
+// into convertStatus's terminal branches without being added to isTerminalStatus
+// (or vice versa) fails this test — which is the point.
 func TestIsTerminalStatusMatchesConvertStatus(t *testing.T) {
 	all := []model.StatusValue{
 		model.StatusSkipped,
