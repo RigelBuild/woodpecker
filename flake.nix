@@ -14,7 +14,7 @@
         # Fork build version. Must not collide with upstream tags (`v3.16.x`)
         # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
         # fork release.
-        version = "3.17.0-rigel.1";
+        version = "3.17.0-rigel.2";
 
         # The repo requires Go 1.26 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
@@ -92,9 +92,17 @@
           env.CGO_ENABLED = 1;
 
           # The server embeds the web UI (//go:embed all:dist/*); stage the
-          # built UI before the Go build.
+          # built UI before the Go build. `web/dist/` is a tracked path in the
+          # source (a .gitkeep anchors the go:embed target so a clean clone
+          # compiles), so a plain `cp -r SRC web/dist` would copy INTO the
+          # existing dir (dist/<store-name>/index.html) and leave
+          # dist/index.html absent -> the server dies at boot on "cannot find
+          # index.html". Remove the anchored dir first, and copy with -T
+          # (--no-target-directory) so DEST is always the target and the copy
+          # can never nest even if the dir reappears.
           postPatch = ''
-            cp -r ${woodpecker-webui} web/dist
+            rm -rf web/dist
+            cp -rT ${woodpecker-webui} web/dist
           '';
 
           meta.mainProgram = "woodpecker-server";
