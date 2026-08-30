@@ -15,7 +15,9 @@
 package api
 
 import (
+	"context"
 	"encoding/base32"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -123,13 +125,29 @@ func GetRepos(c *gin.Context) {
 			dbStaleReposMap[r.ID] = r
 		}
 
+		// Same slow shape as the permission sync below: paging against the forge
+		// can outrun the server-wide WriteTimeout, which bounds total handler
+		// runtime. This is the "add repository" listing, so a large account is
+		// the expected case rather than the edge one.
+		onPage := slowHandlerProgress(c, newResponseController(c.Writer))
 		_repos, err := utils.Paginate(func(page int) ([]*model.Repo, error) {
+			if err := onPage(); err != nil {
+				return nil, err
+			}
 			return _forge.Repos(c, user, &model.ListOptions{
 				Page:    page,
 				PerPage: perPage,
 			})
 		}, maxPage)
 		if err != nil {
+			// The error may be onPage's rather than the forge's: the client went
+			// away mid-paging, so there is no listing to return and no fault to
+			// report.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				log.Debug().Err(err).Msgf("get repos: client has gone away while listing repositories for user %s", user.Login)
+				c.AbortWithStatus(statusClientClosedRequest)
+				return
+			}
 			c.String(http.StatusInternalServerError, "Error fetching repository list. %s", err)
 			return
 		}
@@ -228,7 +246,20 @@ func RefreshRepos(c *gin.Context) {
 		return
 	}
 
-	if err := updateRepoPermissions(c, user, _store, _forge, user.ForgeID); err != nil {
+	// The sync pages against the forge and can outrun the server-wide
+	// WriteTimeout, which bounds total handler runtime; re-arm per page so a
+	// refresh over a large account still returns its 200, and stop paging once
+	// the client has gone away.
+	onPage := slowHandlerProgress(c, newResponseController(c.Writer))
+	if err := updateRepoPermissions(c, user, _store, _forge, user.ForgeID, onPage); err != nil {
+		// onPage stopped the sync because the client went away, not because the
+		// sync failed. A 500 here would report our own healthy refresh as a
+		// server fault.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log.Debug().Err(err).Msgf("refresh repos: client has gone away while syncing repo permissions for user %s", user.Login)
+			c.AbortWithStatus(statusClientClosedRequest)
+			return
+		}
 		log.Error().Err(err).Msgf("Can't update repo permissions for user %s in forge %s", user.Login, _forge.Name())
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return

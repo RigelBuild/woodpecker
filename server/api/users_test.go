@@ -17,13 +17,19 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server"
+	forge_mocks "go.woodpecker-ci.org/woodpecker/v3/server/forge/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	manager_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/mocks"
 )
 
 func TestPostUser(t *testing.T) {
@@ -58,5 +64,90 @@ func TestPostUser(t *testing.T) {
 		created := new(model.User)
 		tc.decodeJSON(t, created)
 		assert.EqualValues(t, 2, created.ForgeID)
+	})
+}
+
+// installUserForge wires a mock manager whose ForgeFromUser returns forge, so
+// GetRepos and RefreshRepos resolve the forge they page against.
+func installUserForge(t *testing.T) *forge_mocks.MockForge {
+	t.Helper()
+	mgr := manager_mocks.NewMockManager(t)
+	_forge := forge_mocks.NewMockForge(t)
+	mgr.On("ForgeFromUser", mock.Anything).Return(_forge, nil)
+	server.Config.Services.Manager = mgr
+	return _forge
+}
+
+// The slow forge-paging handlers gained a 499-vs-500 split: a client that
+// disconnects mid-paging is reported as 499 (client closed request), a genuine
+// forge error as 500. The slowHandlerProgress hook checks the request context
+// before each page, so a request whose context is already canceled makes the
+// forge call return context.Canceled without any real disconnect timing — the
+// same error the abort branch keys on.
+func TestGetReposClassifiesClientCancelVsForgeError(t *testing.T) {
+	s := newTestStore(t)
+	user := &model.User{ID: 1, ForgeID: defaultForgeID, Login: "alice"}
+
+	t.Run("client cancel while listing repos returns 499", func(t *testing.T) {
+		installUserForge(t)
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+
+		// all=true takes the forge-paging path; a canceled request context
+		// trips slowHandlerProgress before the first forge page.
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancel(nil)
+		tc.Ctx.Request = httptest.NewRequestWithContext(ctx, http.MethodGet, "/user/repos?all=true", nil)
+
+		GetRepos(tc.Ctx)
+
+		assert.Equal(t, statusClientClosedRequest, tc.Recorder.Code, tc.Recorder.Body.String())
+	})
+
+	t.Run("forge error while listing repos returns 500", func(t *testing.T) {
+		_forge := installUserForge(t)
+		_forge.On("Repos", mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, assert.AnError)
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+		tc.Ctx.Request = httptest.NewRequest(http.MethodGet, "/user/repos?all=true", nil)
+
+		GetRepos(tc.Ctx)
+
+		assert.Equal(t, http.StatusInternalServerError, tc.Recorder.Code, tc.Recorder.Body.String())
+	})
+}
+
+func TestRefreshReposClassifiesClientCancelVsForgeError(t *testing.T) {
+	s := newTestStore(t)
+	user := &model.User{ID: 1, ForgeID: defaultForgeID, Login: "alice"}
+
+	t.Run("client cancel while syncing permissions returns 499", func(t *testing.T) {
+		installUserForge(t)
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancel(nil)
+		tc.Ctx.Request = httptest.NewRequestWithContext(ctx, http.MethodGet, "/user/repos", nil)
+
+		RefreshRepos(tc.Ctx)
+
+		assert.Equal(t, statusClientClosedRequest, tc.Recorder.Code, tc.Recorder.Body.String())
+	})
+
+	t.Run("forge error while syncing permissions returns 500", func(t *testing.T) {
+		_forge := installUserForge(t)
+		_forge.On("Repos", mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, assert.AnError)
+		// RefreshRepos logs the forge name on the 500 path.
+		_forge.On("Name").Return("mock-forge").Maybe()
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+		tc.Ctx.Request = httptest.NewRequest(http.MethodGet, "/user/repos", nil)
+
+		RefreshRepos(tc.Ctx)
+
+		assert.Equal(t, http.StatusInternalServerError, tc.Recorder.Code, tc.Recorder.Body.String())
 	})
 }

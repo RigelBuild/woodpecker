@@ -472,6 +472,84 @@ func TestHandleAuth(t *testing.T) {
 	})
 }
 
+// The synchronous permission sync in HandleAuth gained a 499-vs-internal_error
+// split: a browser that gives up mid-sync is logged as a client disconnect and
+// aborted with 499, while a genuine forge error still redirects to the login
+// page with error=internal_error. The slowHandlerProgress hook checks the
+// context before each forge page, so a request whose context is already
+// canceled makes the sync return context.Canceled — the same error the abort
+// branch keys on — without depending on real disconnect timing.
+func TestHandleAuthClassifiesClientCancelVsForgeError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	user := &model.User{
+		ID:            1,
+		OrgID:         1,
+		ForgeID:       1,
+		ForgeRemoteID: "remote-id-1",
+		Login:         "test",
+		Email:         "test@example.com",
+	}
+	org := &model.Org{ID: 1, Name: user.Login}
+	server.Config.Server.SessionExpires = time.Hour
+
+	// wireAuthedLogin sets up the mock chain for a login that reaches the
+	// synchronous permission sync: RepoList returns no stored repos, so the
+	// sync runs inline rather than in the background.
+	wireAuthedLogin := func(t *testing.T) (*forge_mocks.MockForge, *store_mocks.MockStore) {
+		t.Helper()
+		_manager := manager_mocks.NewMockManager(t)
+		_forge := forge_mocks.NewMockForge(t)
+		_store := store_mocks.NewMockStore(t)
+		server.Config.Services.Manager = _manager
+		server.Config.Permissions.Open = true
+		server.Config.Permissions.Orgs = permissions.NewOrgs(nil)
+		server.Config.Permissions.Admins = permissions.NewAdmins(nil)
+
+		_manager.On("ForgeByID", int64(1)).Return(_forge, nil)
+		_store.On("ForgeGet", int64(1)).Return(&model.Forge{ID: 1}, nil)
+		_forge.On("Login", mock.Anything, mock.Anything).Return(user, "", nil)
+		_store.On("GetUserByRemoteID", user.ForgeID, user.ForgeRemoteID).Return(user, nil)
+		_store.On("OrgGet", org.ID).Return(org, nil)
+		_store.On("UpdateUser", mock.Anything).Return(nil)
+		// empty repo list => noStoredRepositories, so the sync runs synchronously
+		_store.On("RepoList", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
+		return _forge, _store
+	}
+
+	t.Run("client disconnect during sync aborts with 499", func(t *testing.T) {
+		_, _store := wireAuthedLogin(t)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("store", _store)
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(nil)
+		c.Request = httptest.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/authorize", nil)
+
+		api.HandleAuth(c)
+
+		// A canceled request trips slowHandlerProgress before the first forge
+		// page, so the sync returns context.Canceled and the handler aborts with
+		// nginx's 499 (client closed request) rather than redirecting the
+		// browser that already left.
+		assert.Equal(t, 499, c.Writer.Status())
+	})
+
+	t.Run("forge error during sync redirects to internal_error", func(t *testing.T) {
+		_forge, _store := wireAuthedLogin(t)
+		_forge.On("Repos", mock.Anything, mock.Anything, mock.Anything).Return(nil, assert.AnError)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("store", _store)
+		c.Request = httptest.NewRequest(http.MethodGet, "https://example.com/authorize", nil)
+
+		api.HandleAuth(c)
+
+		assert.Equal(t, http.StatusSeeOther, c.Writer.Status())
+		assert.Equal(t, "/login?error=internal_error", c.Writer.Header().Get("Location"))
+	})
+}
+
 // TestHandleAuthAllowedOrgs walks through the combinations of WOODPECKER_ORGS
 // and the orgs of the forge a user logs in with. The global list applies to
 // every forge, the orgs of a forge are allowed in addition to it. Org names are

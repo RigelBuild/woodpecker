@@ -710,8 +710,28 @@ func RepairAllRepos(c *gin.Context) {
 		return
 	}
 
+	// Each repairRepo below is at least one forge round-trip, so a large install
+	// easily outruns the server-wide WriteTimeout, which bounds total handler
+	// runtime. Re-arm once per repo: steady progress keeps the response alive,
+	// while a repair wedged on an unresponsive forge still dies on the original
+	// budget.
+	progress := slowHandlerProgress(c, newResponseController(c.Writer))
+
 	failedRepos := make([]int64, 0)
 	for _, r := range repos {
+		// Rolling the deadline means no write can end this loop early, and each
+		// repair is several forge round-trips. Stop when the client goes away
+		// rather than working through the whole install for a response nobody
+		// will read.
+		if err := progress(); err != nil {
+			// A partial repair is not a success. Without an explicit status gin
+			// finalizes a bare 200 with an empty body and the access log records
+			// the abandoned repair as a completed one.
+			log.Debug().Err(err).Msg("repair all repos: client has gone away, stopping")
+			c.AbortWithStatus(statusClientClosedRequest)
+			return
+		}
+
 		// updatePermissions is false as RepoListAll does not load permissions
 		updatePermissions := false
 		err := repairRepo(c, r, updatePermissions)
