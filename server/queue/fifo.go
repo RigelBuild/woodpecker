@@ -73,11 +73,12 @@ func NewMemoryQueue(ctx context.Context) Queue {
 	return q
 }
 
-// PushAtOnce pushes multiple tasks to the tail of this queue.
+// PushAtOnce pushes multiple tasks to this queue, each into its creation-order
+// position among the tasks already pending.
 func (q *fifo) PushAtOnce(_ context.Context, tasks []*model.Task) error {
 	q.Lock()
 	for _, task := range tasks {
-		q.pending.PushBack(task)
+		q.pushPending(task)
 	}
 	q.Unlock()
 	return nil
@@ -287,10 +288,26 @@ func (q *fifo) process() {
 }
 
 func (q *fifo) filterWaiting() {
-	// resubmits all waiting tasks to pending, deps may have cleared
+	// Resubmit all waiting tasks to pending; deps may have cleared. Both lists
+	// are ordered by taskOrderLess — waitingOnDeps is rebuilt below by scanning
+	// pending in order — so this is a merge of two sorted lists, walked once,
+	// rather than a search per task. A drained task from an older pipeline
+	// therefore costs no more than the newer tail it sorts ahead of.
+	at := q.pending.Front()
 	for element := q.waitingOnDeps.Front(); element != nil; element = element.Next() {
 		task, _ := element.Value.(*model.Task)
-		q.pending.PushBack(task)
+		for at != nil {
+			other, _ := at.Value.(*model.Task)
+			if taskOrderLess(task, other) {
+				break
+			}
+			at = at.Next()
+		}
+		if at == nil {
+			q.pending.PushBack(task)
+			continue
+		}
+		q.pending.InsertBefore(task, at)
 	}
 
 	// rebuild waitingDeps
@@ -315,7 +332,7 @@ func (q *fifo) assignToWorker() (*list.Element, *worker) {
 	var bestWorker *worker
 	var bestScore int
 
-	for _, element := range q.pendingByCreation() {
+	for element := q.pending.Front(); element != nil; element = element.Next() {
 		task, _ := element.Value.(*model.Task)
 		log.Debug().Msgf("queue: trying to assign task: %v with deps %v", task.ID, task.Dependencies)
 
@@ -342,35 +359,73 @@ func (q *fifo) assignToWorker() (*list.Element, *worker) {
 	return nil, nil
 }
 
-// pendingByCreation returns the pending tasks' list elements ordered by
-// taskOrderLess (creation time, then workflow name). Dispatch walks this order
-// so a workflow whose dependencies have cleared keeps its creation-order
-// priority instead of being overtaken by tasks from pipelines created later,
-// regardless of the order tasks were appended to the pending list. The sort is
-// stable, so elements the comparator treats as equal keep their relative order.
+// pushPending inserts a task into the pending list, keeping the list ordered by
+// taskOrderLess (creation time, then workflow name). The sort key is immutable
+// once a task is queued, so maintaining the order at insertion time is
+// equivalent to — and replaces — re-sorting the whole pending set on every
+// dispatch. Dispatch therefore walks the list directly, and a workflow whose
+// dependencies have cleared keeps its creation-order priority instead of being
+// overtaken by tasks from pipelines created later.
 //
-// This orders the post-filterWaiting pending set (assignToWorker runs right
-// after filterWaiting on each process tick), where pending never simultaneously
-// holds a task and a task that depends on it, so reordering cannot dispatch a
-// dependent before its dependency. Expects the queue to be locked by the caller.
-func (q *fifo) pendingByCreation() []*list.Element {
-	elements := make([]*list.Element, 0, q.pending.Len())
-	for element := q.pending.Front(); element != nil; element = element.Next() {
-		elements = append(elements, element)
+// A task is inserted after the tasks it compares equal to, matching the
+// append-then-stable-sort order this replaces. Expects the queue to be locked
+// by the caller.
+//
+// The scan runs back-to-front, which is one step for the common case of a new
+// pipeline's batch appended to the tail. A task belonging ahead of the whole
+// list is that direction's worst case, so it is taken by a front check first.
+// The check is on a strict less-than, so it never reorders equals.
+func (q *fifo) pushPending(task *model.Task) {
+	if front := q.pending.Front(); front == nil {
+		q.pending.PushFront(task)
+		return
+	} else if other, _ := front.Value.(*model.Task); taskOrderLess(task, other) {
+		q.pending.PushFront(task)
+		return
 	}
-	slices.SortStableFunc(elements, func(a, b *list.Element) int {
-		taskA, _ := a.Value.(*model.Task)
-		taskB, _ := b.Value.(*model.Task)
-		switch {
-		case taskOrderLess(taskA, taskB):
-			return -1
-		case taskOrderLess(taskB, taskA):
-			return 1
-		default:
-			return 0
+
+	for element := q.pending.Back(); element != nil; element = element.Prev() {
+		other, _ := element.Value.(*model.Task)
+		if !taskOrderLess(task, other) {
+			q.pending.InsertAfter(task, element)
+			return
 		}
-	})
-	return elements
+	}
+	// Unreachable: the front-check above returns when the task sorts before the
+	// head, so the back-to-front scan always finds an insertion point. Kept as a
+	// defensive fallback.
+	q.pending.PushFront(task)
+}
+
+// pushPendingFront inserts a task ahead of the tasks it compares equal to,
+// otherwise keeping the taskOrderLess order pushPending maintains. A resubmitted
+// expired task has already been dispatched once, so it keeps the head position
+// among its equals that a plain list push-front used to give it.
+// Expects the queue to be locked by the caller.
+//
+// The scan runs front-to-back, the good end for a resubmitted task from an
+// older pipeline. A task sorting past the whole list is taken by a back check
+// first, on a strict less-than so equals are never reordered.
+func (q *fifo) pushPendingFront(task *model.Task) {
+	if back := q.pending.Back(); back == nil {
+		q.pending.PushBack(task)
+		return
+	} else if other, _ := back.Value.(*model.Task); taskOrderLess(other, task) {
+		q.pending.PushBack(task)
+		return
+	}
+
+	for element := q.pending.Front(); element != nil; element = element.Next() {
+		other, _ := element.Value.(*model.Task)
+		if !taskOrderLess(other, task) {
+			q.pending.InsertBefore(task, element)
+			return
+		}
+	}
+	// Unreachable: the back-check above returns when the task sorts after the
+	// tail, so the front-to-back scan always finds an insertion point. Kept as a
+	// defensive fallback.
+	q.pending.PushBack(task)
 }
 
 // canRunConcurrent reports whether the given task may currently start without
@@ -454,7 +509,7 @@ func (q *fifo) resubmitExpiredPipelines() {
 		if time.Now().After(taskState.deadline) {
 			log.Info().Msgf("queue: resubmitting expired task %s", taskID)
 			taskState.error = ErrTaskExpired
-			q.pending.PushFront(taskState.item)
+			q.pushPendingFront(taskState.item)
 			delete(q.running, taskID)
 			close(taskState.done)
 		}
