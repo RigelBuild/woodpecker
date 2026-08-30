@@ -17,9 +17,14 @@
 package api
 
 import (
+	"context"
+	"net"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -190,4 +195,92 @@ func TestPauseResumeQueue(t *testing.T) {
 		assert.Equal(t, http.StatusNoContent, tc.Ctx.Writer.Status())
 		q.AssertCalled(t, "Resume")
 	})
+}
+
+// BlockTilQueueHasRunningItem waits for a condition that may never arrive, and
+// arming the rolling write deadline removed the bound that used to end it: the
+// loop writes nothing, so no write can trip a deadline, and WriteTimeout no
+// longer applies. Client disconnect is the only remaining bound, so this pins
+// it directly — without it the handler goroutine runs until the process does.
+func TestBlockTilQueueHasRunningItemStopsWhenTheClientDisconnects(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	s := newTestStore(t)
+	q := installScheduler(t, s)
+	// Never drains: Running stays at 1 for the life of the test, so the only
+	// way out of the loop is the client going away. polled closes on the first
+	// Info call, gating the hangup on the handler actually reaching its loop —
+	// reading the mock's call log from the test goroutine would race the
+	// handler's writes to it.
+	info := queue.InfoT{}
+	info.Stats.Running = 1
+	polled := make(chan struct{})
+	var polledOnce sync.Once
+	q.On("Info", mock.Anything).Return(info).
+		Run(func(mock.Arguments) { polledOnce.Do(func() { close(polled) }) })
+
+	handlerDone := make(chan struct{})
+	router := gin.New()
+	router.GET("/queue/resume", BlockTilQueueHasRunningItem)
+
+	// Signal after gin has fully finished with the request, not from inside the
+	// handler: gin writes the response header after the handler returns, so a
+	// defer inside it would release the test while gin still owns the context
+	// the mock's cleanup formats.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		router.ServeHTTP(w, r)
+	})
+
+	// A plain http.Server rather than httptest.Server: httptest's Close waits
+	// for outstanding handlers, so when this test fails — the handler leaked —
+	// cleanup would block forever and take the whole package's suite down with
+	// it. Closing the listener alone lets a failure stay a failed test.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	// WriteTimeout unset: cancellation is the only bound under test.
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		// Close (not Shutdown) so a leaked handler cannot block cleanup, then
+		// give the handler a bounded moment to return. Without this wait a
+		// handler still in its poll loop outlives the test and calls the mock
+		// queue while a later test owns it.
+		_ = srv.Close()
+		select {
+		case <-handlerDone:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	reqCtx, cancelReq := context.WithCancelCause(t.Context())
+	url := "http://" + ln.Addr().String() + "/queue/resume"
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	require.NoError(t, err)
+
+	reqDone := make(chan struct{})
+	go func() {
+		defer close(reqDone)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	// Let the handler reach its loop before hanging up, so the test exercises
+	// cancellation mid-wait rather than a request that never started.
+	select {
+	case <-polled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler never polled the queue")
+	}
+
+	cancelReq(nil)
+	<-reqDone
+
+	select {
+	case <-handlerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler outlived its client: the long-poll has no cancellation bound and leaks a goroutine per hangup")
+	}
 }

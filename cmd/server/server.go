@@ -50,7 +50,32 @@ import (
 
 const (
 	shutdownTimeout = time.Second * 5
+
+	readHeaderTimeout = 10 * time.Second
+	writeTimeout      = 60 * time.Second
+	idleTimeout       = 120 * time.Second
 )
+
+// setupServerTimeouts applies conservative timeouts to an http.Server so a
+// response write blocked on a zero-window peer, or an abandoned keepalive
+// connection, is reclaimed instead of orphaning the connection forever.
+//
+// ReadTimeout is intentionally left zero: request bodies here are small
+// (webhooks, API JSON — agent log upload rides gRPC on :9000, not this
+// server), so an unbounded body read is low exposure. The slow-loris variants
+// are still bounded: a slow HEADER is capped by ReadHeaderTimeout, and a slow
+// BODY is capped by WriteTimeout — net/http arms the write deadline once the
+// headers are read, so a handler that has begun responding cannot be held open
+// indefinitely by a trickled request body. A future body-streaming handler
+// that re-arms its own write deadline (as the SSE handlers do) would escape
+// that WriteTimeout bound and must add its own body/read deadline. SSE
+// handlers override WriteTimeout per-response via http.ResponseController (see
+// server/api/stream.go).
+func setupServerTimeouts(s *http.Server) {
+	s.ReadHeaderTimeout = readHeaderTimeout
+	s.WriteTimeout = writeTimeout
+	s.IdleTimeout = idleTimeout
+}
 
 var (
 	stopServerFunc     context.CancelCauseFunc = func(error) {}
@@ -192,6 +217,7 @@ func run(ctx context.Context, c *cli.Command) error {
 					NextProtos: []string{"h2", "http/1.1"},
 				},
 			}
+			setupServerTimeouts(tlsServer)
 
 			go func() {
 				<-ctx.Done()
@@ -231,6 +257,7 @@ func run(ctx context.Context, c *cli.Command) error {
 				Addr:    server.Config.Server.Port,
 				Handler: http.HandlerFunc(redirect),
 			}
+			setupServerTimeouts(redirectServer)
 			go func() {
 				<-ctx.Done()
 				log.Info().Msg("shutdown redirect server ...")
@@ -278,6 +305,7 @@ func run(ctx context.Context, c *cli.Command) error {
 			httpServer := &http.Server{
 				Handler: handler,
 			}
+			setupServerTimeouts(httpServer)
 
 			go func() {
 				<-ctx.Done()
@@ -307,6 +335,7 @@ func run(ctx context.Context, c *cli.Command) error {
 				Addr:    metricsServerAddr,
 				Handler: metricsRouter,
 			}
+			setupServerTimeouts(metricsServer)
 
 			go func() {
 				<-ctx.Done()
