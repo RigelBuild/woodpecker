@@ -58,7 +58,8 @@ func isTerminalWorkflowState(state model.StatusValue) bool {
 	}
 }
 
-// PushAtOnce pushes multiple tasks to the tail of this queue.
+// PushAtOnce persists multiple tasks and pushes them to this queue, each into
+// its creation-order position among the tasks already pending.
 func (q *persistentQueue) PushAtOnce(c context.Context, tasks []*model.Task) error {
 	// TODO: invent store.NewSession who return context including a session and make TaskInsert & TaskDelete use it
 	for _, task := range tasks {
