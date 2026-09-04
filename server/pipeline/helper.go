@@ -42,6 +42,48 @@ func updatePipelineStatus(ctx context.Context, _forge forge.Forge, _store store.
 		}
 	}
 
+	// Stale-pending guard (RIG-1170). GitHub commit-status is last-write-wins per
+	// context, so a non-terminal ("pending"-mapped) post that lands AFTER a
+	// terminal one silently wedges the required check pending forever. That is
+	// exactly what two concurrent same-commit handlers produce: each cancels the
+	// other (posting a terminal status) and then posts its OWN creation-time
+	// pending, so the last pending wins even though every pipeline is terminal.
+	//
+	// So: when the pipeline we are about to report is non-terminal, re-read it
+	// from the store and skip the shared-context posts if the STORED state has
+	// since gone terminal — our in-memory copy is stale. Guarding here covers
+	// every caller of this shared poster at one site: start.go (the observed
+	// stale writer), cancel.go, decline.go and restart.go. The agent-driven rpc
+	// path posts through its own updateForgeStatus and does not route here.
+	//
+	// Deliberately narrow:
+	//   - Skip-only. It never invents or upgrades a status, and never gates a
+	//     terminal post; a genuinely-pending pipeline still posts.
+	//   - Only the shared-context reports (aggregate + meta) are suppressed. The
+	//     per-workflow loop above writes workflow-scoped contexts, which are not
+	//     the wedged required check.
+	//   - Fail-open. A store error or an unpersisted pipeline (ID 0) posts as
+	//     before: losing a report is worse than a redundant one.
+	//   - Honest residue: a re-read narrows but cannot close the TOCTOU window (a
+	//     cancel can commit between the read and the POST flush). The ingest dedup
+	//     window (server/api/hook.go) is what removes the competing writer; this
+	//     is defense in depth.
+	if !pipeline.Status.IsTerminal() && pipeline.ID != 0 {
+		stored, err := _store.GetPipeline(pipeline.ID)
+		switch {
+		case err != nil:
+			log.Error().Err(err).Msgf("stale-pending guard: cannot re-read pipeline %s/%d, posting anyway", repo.FullName, pipeline.Number)
+		case stored.Status.IsTerminal():
+			log.Debug().
+				Str("repo", repo.FullName).
+				Int64("pipeline", pipeline.Number).
+				Str("in-memory", string(pipeline.Status)).
+				Str("stored", string(stored.Status)).
+				Msg("skipping stale non-terminal status post: the stored pipeline is already terminal")
+			return
+		}
+	}
+
 	if server.Config.Server.StatusAggregate {
 		if err := forge.ReportAggregateStatus(ctx, _forge, _store, user, repo, pipeline); err != nil {
 			log.Error().Err(err).Msgf("error setting aggregate status for %s/%d", repo.FullName, pipeline.Number)

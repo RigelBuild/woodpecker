@@ -59,14 +59,16 @@ func (f *perWorkflowGateForge) StatusAggregate(_ context.Context, _ *model.User,
 	return nil
 }
 
-// setStatusFlags toggles the process-global StatusPerWorkflow and StatusAggregate
-// flags for the duration of a test, restoring the previous values on cleanup.
-func setStatusFlags(t *testing.T, perWorkflow, aggregate bool) {
+// setStatusFlags toggles the process-global StatusPerWorkflow flag for the
+// duration of a test, restoring the previous value on cleanup. StatusAggregate
+// is forced on: every caller exercises a path that needs the aggregate report,
+// so it is not a parameter.
+func setStatusFlags(t *testing.T, perWorkflow bool) {
 	t.Helper()
 	origPerWorkflow := server.Config.Server.StatusPerWorkflow
 	origAggregate := server.Config.Server.StatusAggregate
 	server.Config.Server.StatusPerWorkflow = perWorkflow
-	server.Config.Server.StatusAggregate = aggregate
+	server.Config.Server.StatusAggregate = true
 	t.Cleanup(func() {
 		server.Config.Server.StatusPerWorkflow = origPerWorkflow
 		server.Config.Server.StatusAggregate = origAggregate
@@ -103,7 +105,7 @@ func TestUpdateForgeStatusPerWorkflowGate(t *testing.T) {
 	// the whole point of the flag — collapse the fan-out to a single forge write.
 	// Drop the StatusPerWorkflow half of the guard and statusCalledFor gains 30.
 	t.Run("per-workflow status gated off, aggregate still fires", func(t *testing.T) {
-		setStatusFlags(t, false, true)
+		setStatusFlags(t, false)
 
 		f := &perWorkflowGateForge{}
 		rpcInst := newForgeStatusFixture(t, f)
@@ -121,7 +123,7 @@ func TestUpdateForgeStatusPerWorkflowGate(t *testing.T) {
 	// honest — it proves the flag drives the per-workflow call, not that Status
 	// is simply never reached.
 	t.Run("per-workflow status fires when gate on, aggregate too", func(t *testing.T) {
-		setStatusFlags(t, true, true)
+		setStatusFlags(t, true)
 
 		f := &perWorkflowGateForge{}
 		rpcInst := newForgeStatusFixture(t, f)
@@ -140,7 +142,7 @@ func TestUpdateForgeStatusPerWorkflowGate(t *testing.T) {
 	// `workflow != nil` half protects the nil deref. The aggregate still fires.
 	// Drop that half and _forge.Status(…, nil) dereferences a nil workflow.
 	t.Run("nil workflow never reports per-workflow even with gate on", func(t *testing.T) {
-		setStatusFlags(t, true, true)
+		setStatusFlags(t, true)
 
 		f := &perWorkflowGateForge{}
 		rpcInst := newForgeStatusFixture(t, f)

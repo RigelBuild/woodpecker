@@ -354,6 +354,40 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 
 	// check workflow's own state to prevent finishing an already-finished or blocked workflow
 	if err := checkWorkflowState(workflow.State); err != nil {
+		// RIG-1129: the guard correctly REJECTS the illegal state change, but
+		// returning here also skips the terminal aggregate POST further down,
+		// which is the only forge report on the Done path. An agent-fault
+		// double-finish (a killed step cascade-canceling its siblings, then the
+		// agent re-running Done on the already-terminal workflow) therefore leaves the
+		// required CI (pr) check stranded pending forever, even though the
+		// pipeline is terminal.
+		//
+		// So before returning: if the PIPELINE itself is terminal, drive the
+		// terminal aggregate through the same async poster the clean path uses,
+		// then still return the rejection.
+		//
+		// The pipeline's own stored status is the sole, authoritative terminality
+		// signal, and it is the right one: the other shape this same guard rejects
+		// is a BLOCKED workflow (awaiting approval), whose pipeline status is
+		// StatusBlocked — non-terminal — so it is excluded here and never gets a
+		// premature verdict. A pipeline with still-running siblings is likewise
+		// non-terminal and excluded. We deliberately do NOT gate on whether the
+		// stored workflow tree still has a running stage: a cascade-cancel leaves
+		// running sibling rows untouched (cancel.go — they finish on the agent
+		// stop signal), so a terminal pipeline routinely still carries a running
+		// row, and gating on it would re-suppress the very POST this fixes. The
+		// aggregate poster loads the tree itself and reconcileTerminalStatus makes
+		// the terminal pipeline verdict win over any stale running row.
+		//
+		// The report is aggregate-only (workflow=nil) because the workflow's own
+		// state is unchanged — we add the missing pipeline-level report, never a
+		// state mutation, and never weaken the rejection. Scoped to this abnormal
+		// branch on purpose: the happy path already POSTs below, so the two never
+		// overlap and there is no double-post.
+		if currentPipeline.Status.IsTerminal() {
+			s.reportForgeStatusAsync(c, repo, currentPipeline, nil)
+		}
+
 		return err
 	}
 

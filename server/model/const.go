@@ -79,6 +79,34 @@ func (s StatusValue) Validate() error {
 	}
 }
 
+// IsTerminal reports whether a status is a FINAL state for status-reporting
+// purposes — one that resolves the forge commit status rather than leaving it
+// pending.
+//
+// The partition is deliberately the same one the GitHub mapping uses:
+// convertStatus (server/forge/github/convert.go) maps exactly these states to a
+// concrete GitHub commit status (failure/success) and lets every other state
+// fall through to "pending". Keeping the two in lockstep is what makes the
+// terminal-wins invariant expressible at the shared status poster: a
+// non-terminal POST must never overwrite a terminal one for the same
+// commit+context, because GitHub commit-status is last-write-wins per context.
+//
+// StatusSkipped is terminal in the sense that a skipped workflow never runs, but
+// it is NOT terminal here: convertStatus reports it as "pending", so calling it
+// terminal would let a pending-mapped write bypass the guard — precisely the
+// write the guard exists to suppress. Terminality here is defined by what gets
+// REPORTED, not by whether the state can still change.
+func (s StatusValue) IsTerminal() bool {
+	switch s {
+	case StatusSuccess, StatusFailure, StatusKilled, StatusError, StatusDeclined, StatusCanceled:
+		return true
+	default:
+		// StatusCreated, StatusPending, StatusRunning, StatusBlocked and
+		// StatusSkipped (plus any future state) report as "pending".
+		return false
+	}
+}
+
 // RepoVisibility represent to what state a repo in woodpecker is visible to others.
 type RepoVisibility string //	@name	RepoVisibility
 
