@@ -358,7 +358,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		// returning here also skips the terminal aggregate POST further down,
 		// which is the only forge report on the Done path. An agent-fault
 		// double-finish (a killed step cascade-canceling its siblings, then the
-		// agent re-Doneing the already-terminal workflow) therefore leaves the
+		// agent re-running Done on the already-terminal workflow) therefore leaves the
 		// required CI (pr) check stranded pending forever, even though the
 		// pipeline is terminal.
 		//

@@ -86,7 +86,7 @@ func installDoneGuardForge(t *testing.T, f forge.Forge) {
 
 // TestRPCDoneGuardHitPostsTerminalAggregate is the RIG-1129 regression. An agent
 // fault kills a step, the cascade-cancel drives every workflow terminal, and the
-// agent then re-Dones the already-terminal workflow. checkWorkflowState rejects
+// agent then re-runs Done on the already-terminal workflow. The guard rejects
 // that state change — correctly — but pre-fix it `return err`ed BEFORE the only
 // forge report on the Done path (rpc.go reportForgeStatusAsync), so the required
 // CI (pr) check stayed pending forever on a pipeline that had already finished.
@@ -100,7 +100,7 @@ func installDoneGuardForge(t *testing.T, f forge.Forge) {
 // (the rejection assertion passes in both directions — it is the "don't weaken
 // the guard" half of the contract, not the repro).
 func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
-	setStatusFlags(t, false, true)
+	setStatusFlags(t, false)
 
 	f := &doneGuardForge{}
 	installDoneGuardForge(t, f)
@@ -152,8 +152,8 @@ func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
 
 // TestRPCDoneGuardHitPostsTerminalAggregateDespiteStaleRunningSibling is the
 // actual RIG-1170 wedge: a terminal pipeline whose cascade-cancel left a RUNNING
-// sibling workflow row untouched. cancel.go only rewrites *pending* siblings to
-// skipped — a running sibling is meant to finish on the agent stop signal, so
+// sibling workflow row untouched. The cascade-cancel only rewrites *pending*
+// siblings to skipped — a running sibling is meant to finish on the agent stop signal, so
 // when the faulted agent is the one that would have reaped it the row stays
 // StatusRunning forever.
 //
@@ -164,7 +164,7 @@ func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
 // exactly one terminal aggregate; reconcileTerminalStatus makes the terminal
 // pipeline verdict win over the stale running row.
 func TestRPCDoneGuardHitPostsTerminalAggregateDespiteStaleRunningSibling(t *testing.T) {
-	setStatusFlags(t, false, true)
+	setStatusFlags(t, false)
 
 	f := &doneGuardForge{}
 	installDoneGuardForge(t, f)
@@ -221,7 +221,7 @@ func TestRPCDoneGuardHitPostsTerminalAggregateDespiteStaleRunningSibling(t *test
 // non-terminal, so no aggregate is posted early on a guard-hit. The tree
 // expectation is Maybe() because nothing on this path loads it.
 func TestRPCDoneGuardHitSkipsAggregateWhenPipelineStillRunning(t *testing.T) {
-	setStatusFlags(t, false, true)
+	setStatusFlags(t, false)
 
 	f := &doneGuardForge{}
 	installDoneGuardForge(t, f)
@@ -257,7 +257,7 @@ func TestRPCDoneGuardHitSkipsAggregateWhenPipelineStillRunning(t *testing.T) {
 }
 
 // TestRPCDoneGuardHitOnBlockedWorkflowPostsNothing pins the trap that
-// IsThereRunningStage alone walks into. checkWorkflowState rejects TWO shapes:
+// IsThereRunningStage alone walks into. The guard rejects TWO shapes:
 // an already-terminal workflow (the RIG-1129 double-finish) and a BLOCKED one
 // (awaiting approval, ErrAgentIllegalWorkflowRun). A blocked workflow is neither
 // pending nor running, so IsThereRunningStage reports "no running stage" for a
@@ -271,7 +271,7 @@ func TestRPCDoneGuardHitSkipsAggregateWhenPipelineStillRunning(t *testing.T) {
 // Drop the currentPipeline.Status.IsTerminal() precondition and this reddens on
 // the unexpected WorkflowGetTree call.
 func TestRPCDoneGuardHitOnBlockedWorkflowPostsNothing(t *testing.T) {
-	setStatusFlags(t, false, true)
+	setStatusFlags(t, false)
 
 	f := &doneGuardForge{}
 	installDoneGuardForge(t, f)
@@ -308,7 +308,7 @@ func TestRPCDoneGuardHitOnBlockedWorkflowPostsNothing(t *testing.T) {
 // still posts exactly one aggregate. If the new POST were made unconditional
 // (rather than scoped to the guard-hit branch), this would see 2.
 func TestRPCDoneHappyPathPostsAggregateOnce(t *testing.T) {
-	setStatusFlags(t, false, true)
+	setStatusFlags(t, false)
 
 	f := &doneGuardForge{}
 	installDoneGuardForge(t, f)

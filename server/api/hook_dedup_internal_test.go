@@ -41,8 +41,8 @@ func newTestDeduper() (*hookDeduper, *fakeClock) {
 	return d, clock
 }
 
-func testKey(commit string) hookDedupKey {
-	return hookDedupKey{RepoID: 1, Refspec: "feature:main", Commit: commit}
+func testKey() hookDedupKey {
+	return hookDedupKey{RepoID: 1, Refspec: "feature:main", Commit: "abc"}
 }
 
 // TestHookDeduperCoalescesWithinWindow is the core mechanic: the first sighting
@@ -50,7 +50,7 @@ func testKey(commit string) hookDedupKey {
 // the duplicate).
 func TestHookDeduperCoalescesWithinWindow(t *testing.T) {
 	d, _ := newTestDeduper()
-	key := testKey("abc")
+	key := testKey()
 
 	assert.False(t, d.seenWithin(key, time.Minute), "the first delivery must be a miss and create")
 	assert.True(t, d.seenWithin(key, time.Minute), "an immediate repeat must be caught as a duplicate")
@@ -62,7 +62,7 @@ func TestHookDeduperCoalescesWithinWindow(t *testing.T) {
 // permanently blacklist a commit.
 func TestHookDeduperExpiresAfterWindow(t *testing.T) {
 	d, clock := newTestDeduper()
-	key := testKey("abc")
+	key := testKey()
 	const window = 10 * time.Second
 
 	require.False(t, d.seenWithin(key, window))
@@ -84,7 +84,7 @@ func TestHookDeduperExpiresAfterWindow(t *testing.T) {
 // would come back a miss and spawn a second pipeline.
 func TestHookDeduperCollapsesBurstRatherThanAlternating(t *testing.T) {
 	d, clock := newTestDeduper()
-	key := testKey("abc")
+	key := testKey()
 	const window = 10 * time.Second
 
 	require.False(t, d.seenWithin(key, window), "first delivery creates")
@@ -101,7 +101,7 @@ func TestHookDeduperCollapsesBurstRatherThanAlternating(t *testing.T) {
 // exactly as before the feature existed.
 func TestHookDeduperZeroWindowNeverDedups(t *testing.T) {
 	d, _ := newTestDeduper()
-	key := testKey("abc")
+	key := testKey()
 
 	assert.False(t, d.seenWithin(key, 0))
 	assert.False(t, d.seenWithin(key, 0), "a disabled window must never coalesce")
@@ -143,7 +143,7 @@ func TestHookDeduperForgetClearsRefspecAcrossCommits(t *testing.T) {
 	d, _ := newTestDeduper()
 	const window = time.Minute
 
-	mine := testKey("abc")
+	mine := testKey()
 	other := hookDedupKey{RepoID: 1, Refspec: "unrelated:main", Commit: "zzz"}
 
 	require.False(t, d.seenWithin(mine, window))
@@ -165,7 +165,7 @@ func TestHookDeduperForgetClearsRefspecAcrossCommits(t *testing.T) {
 // the whole point of the dedup under concurrency, not just memory safety.
 func TestHookDeduperConcurrentAccess(t *testing.T) {
 	d := newHookDeduper() // real clock: this is a concurrency test, not a TTL one
-	key := testKey("abc")
+	key := testKey()
 
 	const goroutines = 8
 	var (

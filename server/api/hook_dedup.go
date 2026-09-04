@@ -152,7 +152,7 @@ func isDedupableHook(p *model.Pipeline) bool {
 // `reopened` and `synchronize` all collapse to model.EventPull with an EMPTY
 // EventReason (only the metadata actions populate a reason — see the forge
 // parsers), so by the time PostHook holds the parsed pipeline a reopen is
-// byte-identical to an ordinary push delivery. That indistinguishability is
+// byte-identical to an ordinary push delivery. That indistinguishable shape is
 // precisely why the wedge reproduces with two EventPull deliveries in the first
 // place.
 //
