@@ -111,6 +111,15 @@ func (d *hookDeduper) forget(repoID int64, refspec string) {
 	}
 }
 
+// reset drops all recorded keys. It exists for tests, which share the package
+// singleton across cases and would otherwise see a previous case's keys as live
+// hits on a rerun (-count>1, t.Parallel, or a CI job retry).
+func (d *hookDeduper) reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	clear(d.seen)
+}
+
 // hookDedupWindow is the process-wide window used by PostHook. It is a package
 // singleton because the webhook handler is a plain gin HandlerFunc with no
 // server-scoped receiver to hang state off.
@@ -123,8 +132,14 @@ var hookDedupWindow = newHookDeduper()
 // problem lives. Push pipelines keep their existing branch-keyed supersede path
 // untouched, and pull_request_metadata is a different event that renders a
 // different status context, so it never shares a key with a code pipeline.
+//
+// An EMPTY head SHA is also non-dedupable: the key is (repo, refspec, commit),
+// so every SHA-less delivery would collapse onto the same key and the second
+// would be silently dropped — a missing pipeline and a stranded check, the very
+// wedge this exists to prevent. An absent SHA carries no dedup signal, so it
+// fails open into the pre-existing create-both behavior.
 func isDedupableHook(p *model.Pipeline) bool {
-	return p != nil && p.Event == model.EventPull
+	return p != nil && p.Event == model.EventPull && p.Commit != ""
 }
 
 // purgeOnClose implements the "never suppress a reopened PR" carve-out.

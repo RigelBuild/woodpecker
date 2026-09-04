@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // TestStatusValueIsTerminal pins the terminality partition for ALL eleven
@@ -49,10 +48,11 @@ func TestStatusValueIsTerminal(t *testing.T) {
 		StatusSkipped, // convertStatus default -> pending (never runs, still reports pending)
 	}
 
-	// Guard against a future constant being added without a decision here: the
-	// two lists together must cover every declared StatusValue.
-	require.Len(t, append(append([]StatusValue{}, terminal...), nonTerminal...), 11,
-		"every declared StatusValue must be classified by this test")
+	// The two lists above enumerate every StatusValue constant declared in
+	// const.go (11 of them) and each is asserted, so the partition is exhaustive
+	// by construction. Go cannot enumerate a const group at runtime, so there is
+	// no non-tautological way to auto-detect a newly-added constant here; adding
+	// one requires classifying it in exactly one of these two lists.
 
 	for _, s := range terminal {
 		assert.Truef(t, s.IsTerminal(), "%q maps to a concrete GitHub status, so it must be terminal", s)

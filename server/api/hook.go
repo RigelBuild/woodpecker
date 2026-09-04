@@ -229,6 +229,8 @@ func PostHook(c *gin.Context) {
 	// A close purges the window for its refspec so a following reopen is never
 	// swallowed; see purgeOnClose for why the carve-out has to hang off the close
 	// rather than off the reopen delivery itself.
+	// Deliberately unconditional, ahead of the window > 0 gate: if the flag is
+	// enabled at runtime the window is then already clear of closed refspecs.
 	purgeOnClose(repo.ID, pipelineFromForge)
 
 	if window := server.Config.Server.HookDedupWindow; window > 0 && isDedupableHook(pipelineFromForge) {

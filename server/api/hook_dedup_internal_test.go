@@ -193,10 +193,15 @@ func TestHookDeduperConcurrentAccess(t *testing.T) {
 // TestIsDedupableHook pins the event scoping of the window: only pull_request
 // pipelines participate. Push keeps its own branch-keyed supersede path,
 // pull_request_closed is what CLEARS the window rather than consulting it, and
-// pull_request_metadata renders a different status context entirely.
+// pull_request_metadata renders a different status context entirely. A
+// pull_request with no head SHA is also out of scope — it carries no dedup
+// signal, so it must fail open and create.
 func TestIsDedupableHook(t *testing.T) {
-	assert.True(t, isDedupableHook(&model.Pipeline{Event: model.EventPull}),
+	assert.True(t, isDedupableHook(&model.Pipeline{Event: model.EventPull, Commit: "abc123"}),
 		"pull_request is the event the duplicate-delivery bug lives on")
+
+	assert.False(t, isDedupableHook(&model.Pipeline{Event: model.EventPull, Commit: ""}),
+		"an EventPull with no head SHA carries no dedup signal and must fail open (create, never coalesce)")
 
 	for _, event := range []model.WebhookEvent{
 		model.EventPush,
@@ -207,7 +212,8 @@ func TestIsDedupableHook(t *testing.T) {
 		model.EventManual,
 		model.EventDeploy,
 	} {
-		assert.Falsef(t, isDedupableHook(&model.Pipeline{Event: event}),
+		// A head SHA is set so the EVENT is the only thing excluding these.
+		assert.Falsef(t, isDedupableHook(&model.Pipeline{Event: event, Commit: "abc123"}),
 			"%q must be out of scope for the pull-family dedup window", event)
 	}
 

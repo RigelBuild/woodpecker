@@ -42,12 +42,19 @@ import (
 )
 
 // setHookDedupWindow sets the process-global dedup window for one test and
-// restores it afterwards.
+// restores it afterwards. It also clears the process-global deduper on entry and
+// on cleanup: the keys are stable across cases, so without a cold window a
+// second in-process run (-count>1, t.Parallel, a CI job retry) would see run 1's
+// keys as live hits and the FIRST delivery would already be deduped.
 func setHookDedupWindow(t *testing.T, d time.Duration) {
 	t.Helper()
+	api.ResetHookDedupWindow()
 	orig := server.Config.Server.HookDedupWindow
 	server.Config.Server.HookDedupWindow = d
-	t.Cleanup(func() { server.Config.Server.HookDedupWindow = orig })
+	t.Cleanup(func() {
+		server.Config.Server.HookDedupWindow = orig
+		api.ResetHookDedupWindow()
+	})
 }
 
 // hookReplay drives PostHook repeatedly against one repo and counts how many

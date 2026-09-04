@@ -91,9 +91,9 @@ func installDoneGuardForge(t *testing.T, f forge.Forge) {
 // forge report on the Done path (rpc.go reportForgeStatusAsync), so the required
 // CI (pr) check stayed pending forever on a pipeline that had already finished.
 //
-// Post-fix the guard-hit loads the workflow tree, sees no running stage, and
-// posts the terminal aggregate through the SAME async poster the clean path
-// uses — then still returns the rejection.
+// Post-fix the guard-hit sees that the PIPELINE itself is terminal and posts the
+// terminal aggregate through the SAME async poster the clean path uses — then
+// still returns the rejection.
 //
 // Red pre-fix: `return err` fires immediately, so zero aggregate POSTs are
 // recorded and the require.Equal(1, calls) fails with "expected: 1 / actual: 0"
@@ -107,8 +107,11 @@ func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
 
 	mockStore := store_mocks.NewMockStore(t)
 	agent := defaultAgent()
-	// The pipeline already reached a terminal state via the cascade-cancel.
+	// The pipeline already reached a terminal state via the cascade-cancel. It is
+	// a pull_request pipeline: that is the event whose required CI (pr) check the
+	// wedge strands, and the event for which ReportAggregateStatus loads the tree.
 	pipeline := defaultPipeline(model.StatusKilled)
+	pipeline.Event = model.EventPull
 	// …and the workflow the agent re-Dones is already terminal, which is exactly
 	// what trips checkWorkflowState.
 	workflow := defaultWorkflow(model.StatusKilled)
@@ -118,8 +121,9 @@ func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
 	mockStore.On("GetPipeline", int64(20)).Return(pipeline, nil)
 	mockStore.On("GetRepo", int64(10)).Return(defaultRepo(), nil)
 	mockStore.On("AgentFind", int64(1)).Return(agent, nil)
-	// The guard-hit must load the tree itself: at this point in Done it has not
-	// been loaded yet. Every workflow is terminal, so no stage is running.
+	// Loaded by the async aggregate poster, not by the guard-hit:
+	// ReportAggregateStatus self-loads the tree when pipeline.Workflows is empty.
+	// Every workflow is terminal, so no stage is running.
 	mockStore.On("WorkflowGetTree", mock.Anything).
 		Return([]*model.Workflow{{ID: 30, PipelineID: 20, State: model.StatusKilled}}, nil)
 	// Resolved inside the async poster (updateForgeStatus).
@@ -146,6 +150,64 @@ func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
 		"the aggregate posted on the guard-hit must carry a TERMINAL pipeline status, never pending")
 }
 
+// TestRPCDoneGuardHitPostsTerminalAggregateDespiteStaleRunningSibling is the
+// actual RIG-1170 wedge: a terminal pipeline whose cascade-cancel left a RUNNING
+// sibling workflow row untouched. cancel.go only rewrites *pending* siblings to
+// skipped — a running sibling is meant to finish on the agent stop signal, so
+// when the faulted agent is the one that would have reaped it the row stays
+// StatusRunning forever.
+//
+// Pre-fix the guard-hit gated its POST on !model.IsThereRunningStage(tree),
+// which saw that stale running row and suppressed the aggregate (calls = 0) —
+// the stranded-pending bug, in exactly the scenario the POST exists for.
+// Post-fix the pipeline's own terminal status is the sole gate, so this posts
+// exactly one terminal aggregate; reconcileTerminalStatus makes the terminal
+// pipeline verdict win over the stale running row.
+func TestRPCDoneGuardHitPostsTerminalAggregateDespiteStaleRunningSibling(t *testing.T) {
+	setStatusFlags(t, false, true)
+
+	f := &doneGuardForge{}
+	installDoneGuardForge(t, f)
+
+	mockStore := store_mocks.NewMockStore(t)
+	agent := defaultAgent()
+	// The pipeline itself is terminal, on the pull_request event whose required
+	// CI (pr) check the wedge strands.
+	pipeline := defaultPipeline(model.StatusKilled)
+	pipeline.Event = model.EventPull
+	// …and the re-Doned workflow is already terminal, which trips the guard.
+	workflow := defaultWorkflow(model.StatusKilled)
+
+	mockStore.On("WorkflowLoad", int64(30)).Return(workflow, nil)
+	mockStore.On("StepListFromWorkflowFind", mock.Anything).Return([]*model.Step{}, nil)
+	mockStore.On("GetPipeline", int64(20)).Return(pipeline, nil)
+	mockStore.On("GetRepo", int64(10)).Return(defaultRepo(), nil)
+	mockStore.On("AgentFind", int64(1)).Return(agent, nil)
+	// The stored tree still carries a StatusRunning sibling the cascade-cancel
+	// never rewrote — the shape that used to suppress the POST.
+	mockStore.On("WorkflowGetTree", mock.Anything).Return([]*model.Workflow{
+		{ID: 30, PipelineID: 20, State: model.StatusKilled},
+		{ID: 31, PipelineID: 20, State: model.StatusRunning},
+	}, nil)
+	mockStore.On("GetUser", mock.Anything).Return(&model.User{ID: 1, AccessToken: "x"}, nil).Maybe()
+
+	rpcInst := newTestRPC(t, mockStore, nil)
+	ctx := context.WithValue(t.Context(), agentIDKey, int64(1))
+
+	err := rpcInst.Done(ctx, "30", rpc.WorkflowState{Finished: 200})
+	require.ErrorIs(t, err, ErrAgentIllegalWorkflowReRunStateChange,
+		"the guard must keep rejecting the double-finish state change")
+
+	rpcInst.reportWG.Wait()
+
+	calls, statuses := f.snapshot()
+	require.Equal(t, 1, calls,
+		"a terminal pipeline must POST its terminal aggregate even when a stale running sibling row remains (RIG-1170)")
+	require.Len(t, statuses, 1)
+	assert.True(t, statuses[0].IsTerminal(),
+		"the aggregate posted on the guard-hit must carry a TERMINAL pipeline status, never pending")
+}
+
 // TestRPCDoneGuardHitSkipsAggregateWhenPipelineStillRunning is the terminal-only
 // constraint. A workflow can hit the Done guard (e.g. a blocked workflow, or one
 // re-Doned) while SIBLING workflows are still running — the pipeline is not
@@ -153,11 +215,11 @@ func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
 // pipeline that has not finished. The clean path will post when the last workflow
 // finishes.
 //
-// This holds in BOTH directions by design (pre-fix nothing posts at all): it is
-// the terminal-only tripwire, not a red repro. Drop the !IsThereRunningStage
-// condition and it reddens immediately — aggregateCalls becomes 1. The tree
-// expectation is Maybe() so pre-fix (where the guard-hit never loads it) the
-// result is a clean pass rather than mock-bookkeeping noise.
+// This holds in BOTH directions by design: it is the terminal-only tripwire, not
+// a red repro. The constraint is now enforced solely by
+// currentPipeline.Status.IsTerminal() — a still-running pipeline is
+// non-terminal, so no aggregate is posted early on a guard-hit. The tree
+// expectation is Maybe() because nothing on this path loads it.
 func TestRPCDoneGuardHitSkipsAggregateWhenPipelineStillRunning(t *testing.T) {
 	setStatusFlags(t, false, true)
 

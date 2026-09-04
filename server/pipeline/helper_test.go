@@ -804,6 +804,30 @@ func TestUpdatePipelineStatusGuardFailsOpenOnStoreError(t *testing.T) {
 		"a store re-read failure must fail open and still post, never swallow the report")
 }
 
+// TestUpdatePipelineStatusFailsOpenOnUnpersistedPipeline pins the ID==0 half of
+// the fail-open contract. A pipeline that has not been persisted yet (ID 0) has
+// no row to re-read, so the stale-pending guard must NOT attempt a store read and
+// must post its aggregate as before — losing a report strands the required check.
+func TestUpdatePipelineStatusFailsOpenOnUnpersistedPipeline(t *testing.T) {
+	setStatusAggregate(t, true)
+	setStatusMeta(t, false)
+	setStatusPerWorkflow(t, false)
+
+	pipeline, repo, user := stalePendingPipeline(model.StatusPending)
+	pipeline.ID = 0 // not yet persisted
+
+	s := store_mocks.NewMockStore(t)
+	// No GetPipeline expectation: a re-read on a zero-ID pipeline must never
+	// happen, so mockery fails the test loudly if the guard tries one.
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+
+	updatePipelineStatus(context.Background(), f, s, pipeline, repo, user)
+
+	assert.Equal(t, 1, f.aggregateCalls,
+		"an unpersisted (ID 0) pipeline must fail open and post, never attempt a store re-read")
+	s.AssertNotCalled(t, "GetPipeline", mock.Anything)
+}
+
 // TestUpdatePipelineStatusPerWorkflowStatusesAreNotGated pins the guard's blast
 // radius: it suppresses only the SHARED-context reports (the aggregate and meta,
 // which are the wedged required checks). Per-workflow statuses write

@@ -354,43 +354,38 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 
 	// check workflow's own state to prevent finishing an already-finished or blocked workflow
 	if err := checkWorkflowState(workflow.State); err != nil {
-		// RIG-1129: the guard correctly REJECTS the state change, but returning
-		// here also skips the terminal aggregate POST further down, which is the
-		// only forge report on the Done path. An agent-fault double-finish (a
-		// killed step cascade-canceling its siblings, then the agent re-Doneing an
-		// already-terminal workflow) therefore leaves the required CI (pr) check
-		// stranded pending forever, even though the pipeline is terminal.
+		// RIG-1129: the guard correctly REJECTS the illegal state change, but
+		// returning here also skips the terminal aggregate POST further down,
+		// which is the only forge report on the Done path. An agent-fault
+		// double-finish (a killed step cascade-canceling its siblings, then the
+		// agent re-Doneing the already-terminal workflow) therefore leaves the
+		// required CI (pr) check stranded pending forever, even though the
+		// pipeline is terminal.
 		//
-		// So before returning: if the PIPELINE is terminal, drive the terminal
-		// aggregate through the same async poster the clean path uses.
+		// So before returning: if the PIPELINE itself is terminal, drive the
+		// terminal aggregate through the same async poster the clean path uses,
+		// then still return the rejection.
 		//
-		// Terminality is established by TWO independent signals, and both must
-		// hold. IsThereRunningStage alone is NOT sufficient here: it asks whether
-		// any workflow is pending-or-running, and a BLOCKED workflow (the other
-		// state this same guard rejects, with ErrAgentIllegalWorkflowRun) is
-		// neither — so a pipeline merely awaiting approval would look "terminal"
-		// and get a premature verdict posted for work that has not run. The
-		// pipeline's own stored status is the authoritative signal, and it is also
-		// free: checking it first means the blocked and still-running paths do no
-		// store read at all and behave exactly as before.
+		// The pipeline's own stored status is the sole, authoritative terminality
+		// signal, and it is the right one: the other shape this same guard rejects
+		// is a BLOCKED workflow (awaiting approval), whose pipeline status is
+		// StatusBlocked — non-terminal — so it is excluded here and never gets a
+		// premature verdict. A pipeline with still-running siblings is likewise
+		// non-terminal and excluded. We deliberately do NOT gate on whether the
+		// stored workflow tree still has a running stage: a cascade-cancel leaves
+		// running sibling rows untouched (cancel.go — they finish on the agent
+		// stop signal), so a terminal pipeline routinely still carries a running
+		// row, and gating on it would re-suppress the very POST this fixes. The
+		// aggregate poster loads the tree itself and reconcileTerminalStatus makes
+		// the terminal pipeline verdict win over any stale running row.
 		//
-		// Scoped to this abnormal branch on purpose: the happy path already POSTs
-		// below, so the two never overlap by construction and there is no
-		// double-post. The report is aggregate-only (workflow=nil) because the
-		// workflow's own state is unchanged — we add the missing pipeline-level
-		// report, never a state mutation, and never weaken the rejection.
-		//
-		// A tree-load failure is non-fatal: log it and still return the guard
-		// error, which is the caller's contract either way.
+		// The report is aggregate-only (workflow=nil) because the workflow's own
+		// state is unchanged — we add the missing pipeline-level report, never a
+		// state mutation, and never weaken the rejection. Scoped to this abnormal
+		// branch on purpose: the happy path already POSTs below, so the two never
+		// overlap and there is no double-post.
 		if currentPipeline.Status.IsTerminal() {
-			if workflows, treeErr := s.store.WorkflowGetTree(currentPipeline); treeErr != nil {
-				log.Error().Err(treeErr).Msgf("done guard-hit: cannot load workflow tree for pipeline %d", currentPipeline.ID)
-			} else {
-				currentPipeline.Workflows = workflows
-				if !model.IsThereRunningStage(currentPipeline.Workflows) {
-					s.reportForgeStatusAsync(c, repo, currentPipeline, nil)
-				}
-			}
+			s.reportForgeStatusAsync(c, repo, currentPipeline, nil)
 		}
 
 		return err
