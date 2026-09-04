@@ -635,3 +635,200 @@ func TestReportAggregateStatusSkipsSelfLoadForPush(t *testing.T) {
 	require.Equal(t, 1, f.aggregateCalls, "the code aggregate must fire once on push")
 	assert.Nil(t, f.aggregateWorkflows, "a push pipeline must not self-load the tree; StatusAggregate falls back to p.Status")
 }
+
+// stalePendingPipeline returns a persisted pull_request pipeline whose IN-MEMORY
+// status is the caller-supplied (typically non-terminal) value. Tests pair it
+// with a MockStore whose GetPipeline returns the same row at a different stored
+// status, reproducing the stale-writer shape: handler A holds a pending snapshot
+// while handler B has already driven the row terminal in the DB.
+func stalePendingPipeline(status model.StatusValue) (*model.Pipeline, *model.Repo, *model.User) {
+	pipeline := &model.Pipeline{
+		ID:      42,
+		Number:  7,
+		Event:   model.EventPull,
+		Status:  status,
+		Commit:  "abc123",
+		Ref:     "refs/pull/7/head",
+		Refspec: "feature:main",
+		Workflows: []*model.Workflow{
+			{ID: 1, Name: "build", State: model.StatusPending},
+		},
+	}
+	repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+	user := &model.User{AccessToken: "x"}
+	return pipeline, repo, user
+}
+
+// TestUpdatePipelineStatusSkipsStalePendingOverTerminal is the RIG-1170
+// terminal-wins regression at the shared poster. Two same-commit handlers race:
+// handler B has already canceled this pipeline and posted its TERMINAL status,
+// but handler A still holds a pending in-memory snapshot and is about to flush
+// its creation-time pending. GitHub commit-status is last-write-wins per
+// context, so that late pending would overwrite the terminal one and strand the
+// required CI (pr) check pending forever.
+//
+// The guard re-reads the pipeline by ID: stored status is canceled (terminal),
+// so the shared-context posts (aggregate + meta) are SKIPPED.
+//
+// Red pre-fix: without the guard updatePipelineStatus posts unconditionally, so
+// aggregateCalls is 1 (and metaCalls 1) and both Zero assertions fail with
+// "Should be zero, but was 1". The store expectations are Maybe() precisely so
+// that failure is the BEHAVIORAL assertion below and not mock bookkeeping.
+func TestUpdatePipelineStatusSkipsStalePendingOverTerminal(t *testing.T) {
+	setStatusAggregate(t, true)
+	setStatusMeta(t, true)
+	setStatusPerWorkflow(t, false)
+
+	pipeline, repo, user := stalePendingPipeline(model.StatusPending)
+
+	s := store_mocks.NewMockStore(t)
+	// The store already holds the terminal (canceled-by-supersede) state that the
+	// competing handler committed.
+	s.On("GetPipeline", int64(42)).Return(&model.Pipeline{
+		ID:     42,
+		Number: 7,
+		Event:  model.EventPull,
+		Status: model.StatusCanceled,
+		Commit: "abc123",
+	}, nil).Maybe()
+	// Only reached if the guard fails to skip (the red state); tolerated so the
+	// failure surfaces as the aggregate/meta assertions rather than a mock panic.
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{{Number: 7, Event: model.EventPull, Commit: "abc123"}}, nil).Maybe()
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+
+	updatePipelineStatus(context.Background(), f, s, pipeline, repo, user)
+
+	assert.Zero(t, f.aggregateCalls,
+		"a stale pending must never post the aggregate over an already-terminal stored status")
+	assert.Zero(t, f.metaCalls,
+		"a stale pending must never post the meta status over an already-terminal stored status")
+}
+
+// TestUpdatePipelineStatusPostsGenuinelyPendingPipeline is the other half of the
+// guard and keeps the skip assertion honest: a pipeline that is pending in memory
+// AND pending in the store is a live first report, not a stale write, so it MUST
+// still post. Without this, "skip every pending" would pass the test above while
+// suppressing every creation-time pending on the fleet — the check would never
+// go yellow and the guard would be strictly worse than the bug.
+//
+// This one holds in BOTH directions by design (pre-fix there is no guard at all,
+// so it posts): it is the over-suppression tripwire, not a red repro. Tighten the
+// guard to skip every pending and it reddens immediately.
+func TestUpdatePipelineStatusPostsGenuinelyPendingPipeline(t *testing.T) {
+	setStatusAggregate(t, true)
+	setStatusMeta(t, true)
+	setStatusPerWorkflow(t, false)
+
+	pipeline, repo, user := stalePendingPipeline(model.StatusPending)
+
+	s := store_mocks.NewMockStore(t)
+	// Store agrees: still pending, nothing superseded it.
+	s.On("GetPipeline", int64(42)).Return(&model.Pipeline{
+		ID:     42,
+		Number: 7,
+		Event:  model.EventPull,
+		Status: model.StatusPending,
+		Commit: "abc123",
+	}, nil).Maybe()
+	// Meta freshness query: this is the only meta-carrying pipeline for the ref.
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{{Number: 7, Event: model.EventPull, Commit: "abc123"}}, nil)
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+
+	updatePipelineStatus(context.Background(), f, s, pipeline, repo, user)
+
+	assert.Equal(t, 1, f.aggregateCalls,
+		"a genuinely-pending pipeline must still post its aggregate exactly once")
+	assert.Equal(t, 1, f.metaCalls,
+		"a genuinely-pending pipeline must still post its meta status exactly once")
+}
+
+// TestUpdatePipelineStatusTerminalPostIsNeverGated pins that the guard is
+// skip-only for NON-terminal posts: a terminal pipeline posts without the store
+// ever being re-read, so the happy path pays no extra query.
+//
+// It is also the composition guarantee for RIG-1129's Done guard-hit report.
+// Those two fixes compose on two independent counts, and this test pins the
+// second (the load-bearing one):
+//
+//  1. Different posters. The rpc Done path reports through updateForgeStatus
+//     (rpc.go), which calls forge.ReportAggregateStatus directly and never
+//     reaches this helper — so this guard is not even on that code path today.
+//  2. Terminal by construction. The guard-hit POST only fires when the pipeline
+//     is terminal, and this test proves a terminal post is never suppressed. So
+//     even if the rpc path were later refactored onto this shared poster —
+//     exactly the kind of consolidation someone would reach for — the RIG-1129
+//     report would still go out.
+//
+// The MockStore carries NO GetPipeline expectation, so a re-read on the terminal
+// path fails the test loudly rather than silently costing a query.
+func TestUpdatePipelineStatusTerminalPostIsNeverGated(t *testing.T) {
+	setStatusAggregate(t, true)
+	setStatusMeta(t, false)
+	setStatusPerWorkflow(t, false)
+
+	pipeline, repo, user := stalePendingPipeline(model.StatusSuccess)
+
+	s := store_mocks.NewMockStore(t)
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+
+	updatePipelineStatus(context.Background(), f, s, pipeline, repo, user)
+
+	assert.Equal(t, 1, f.aggregateCalls,
+		"a terminal post must never be gated by the stale-pending guard")
+	s.AssertNotCalled(t, "GetPipeline", mock.Anything)
+}
+
+// TestUpdatePipelineStatusGuardFailsOpenOnStoreError pins the fail-open contract:
+// if the re-read errors, the post proceeds. A dropped status report strands the
+// required check pending — strictly worse than a redundant write — so a flaky
+// store must never turn the guard into a silent report-swallower.
+func TestUpdatePipelineStatusGuardFailsOpenOnStoreError(t *testing.T) {
+	setStatusAggregate(t, true)
+	setStatusMeta(t, false)
+	setStatusPerWorkflow(t, false)
+
+	pipeline, repo, user := stalePendingPipeline(model.StatusPending)
+
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipeline", int64(42)).Return(nil, errors.New("db unavailable")).Maybe()
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+
+	updatePipelineStatus(context.Background(), f, s, pipeline, repo, user)
+
+	assert.Equal(t, 1, f.aggregateCalls,
+		"a store re-read failure must fail open and still post, never swallow the report")
+}
+
+// TestUpdatePipelineStatusPerWorkflowStatusesAreNotGated pins the guard's blast
+// radius: it suppresses only the SHARED-context reports (the aggregate and meta,
+// which are the wedged required checks). Per-workflow statuses write
+// workflow-scoped contexts that no other pipeline competes for, and are the
+// pipeline's own UI-facing detail, so they still post even on a stale pending.
+func TestUpdatePipelineStatusPerWorkflowStatusesAreNotGated(t *testing.T) {
+	setStatusAggregate(t, true)
+	setStatusMeta(t, false)
+	setStatusPerWorkflow(t, true)
+
+	pipeline, repo, user := stalePendingPipeline(model.StatusPending)
+
+	s := store_mocks.NewMockStore(t)
+	// Maybe(): pre-fix (no guard) the re-read never happens, so the red must be
+	// the aggregate assertion below, not an unmet mock expectation.
+	s.On("GetPipeline", int64(42)).Return(&model.Pipeline{
+		ID: 42, Number: 7, Event: model.EventPull, Status: model.StatusKilled, Commit: "abc123",
+	}, nil).Maybe()
+
+	f := &aggregateResilienceForge{statusErrForWorkflowID: -1}
+
+	updatePipelineStatus(context.Background(), f, s, pipeline, repo, user)
+
+	assert.Equal(t, []int64{1}, f.statusCalledFor,
+		"per-workflow statuses write workflow-scoped contexts and are not gated by the guard")
+	assert.Zero(t, f.aggregateCalls,
+		"the shared aggregate context is still suppressed on a stale pending")
+}
