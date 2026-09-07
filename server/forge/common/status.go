@@ -71,12 +71,15 @@ func GetPipelineStatusDescription(status model.StatusValue) string {
 		return "Pipeline is pending approval"
 	case model.StatusDeclined:
 		return "Pipeline was rejected"
-	case model.StatusCanceled, model.StatusSkipped, model.StatusCreated:
+	case model.StatusCanceled:
+		return "Pipeline was canceled"
+	case model.StatusSkipped:
+		return "Pipeline was skipped"
+	// StatusCreated is internal-only and never terminal.
+	case model.StatusCreated:
 		return "Pipeline is pending"
 	default:
-		// Any unrecognized or not-yet-terminal state (e.g. the internal-only
-		// StatusCreated) is reported as pending rather than "unknown status".
-		return "Pipeline is pending"
+		return "unknown status"
 	}
 }
 

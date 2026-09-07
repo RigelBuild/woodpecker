@@ -49,7 +49,9 @@ const (
 // GitHub commit status.
 func convertStatus(status model.StatusValue) string {
 	switch status {
-	case model.StatusPending, model.StatusRunning, model.StatusBlocked, model.StatusSkipped, model.StatusCanceled:
+	// StatusCreated is internal-only and never terminal, so reporting it as a
+	// red "error" commit status invents a failure the pipeline never had.
+	case model.StatusPending, model.StatusRunning, model.StatusBlocked, model.StatusSkipped, model.StatusCanceled, model.StatusCreated:
 		return statusPending
 	case model.StatusFailure, model.StatusDeclined:
 		return statusFailure
@@ -58,11 +60,10 @@ func convertStatus(status model.StatusValue) string {
 	case model.StatusSuccess:
 		return statusSuccess
 	default:
-		// A not-yet-terminal or internal state (e.g. the internal-only
-		// StatusCreated) must never be reported as a red "error" commit
-		// status. Treat any unrecognized state as pending rather than
-		// inventing a failure the pipeline never had.
-		return statusPending
+		// A value outside the enum is a bug, so keep reporting it loudly. A
+		// required check left pending never resolves and blocks the pull
+		// request with nothing to show for it.
+		return statusError
 	}
 }
 

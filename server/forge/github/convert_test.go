@@ -46,9 +46,11 @@ func Test_convertStatus(t *testing.T) {
 		{name: "blocked", status: model.StatusBlocked, want: statusPending},
 		{name: "skipped", status: model.StatusSkipped, want: statusPending},
 		{name: "canceled", status: model.StatusCanceled, want: statusPending},
-		// Regression: the internal-only StatusCreated used to fall through the
-		// default to statusError, posting a spurious red commit status.
+		// StatusCreated is internal-only and never terminal, so it belongs with
+		// the pending states rather than falling through to statusError.
 		{name: "created", status: model.StatusCreated, want: statusPending},
+		// A value outside the enum is a bug and stays loud.
+		{name: "out of enum", status: model.StatusValue("bogus"), want: statusError},
 	}
 
 	for _, tc := range tests {
