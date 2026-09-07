@@ -15,7 +15,6 @@
 package logging
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,8 +30,6 @@ func TestCloseUnopenedStreamReturnsErrNotFound(t *testing.T) {
 	err := New().Close(t.Context(), int64(123))
 
 	assert.ErrorIs(t, err, ErrNotFound)
-	assert.False(t, errors.Is(errors.New(ErrNotFound.Error()), ErrNotFound),
-		"a same-text error must not satisfy errors.Is; callers rely on the sentinel identity")
 }
 
 // Closing an open stream succeeds, so a caller that treats every Close error
@@ -46,7 +43,9 @@ func TestCloseOpenStreamSucceeds(t *testing.T) {
 
 	assert.NoError(t, logger.Close(t.Context(), stepID))
 
-	// The stream is gone once closed, so closing it twice reports not-found.
+	// Closing the same stream again finds it already retired. This holds for
+	// sequential calls; Close drops the lock between the lookup and the
+	// delete, so concurrent calls are a separate matter.
 	assert.ErrorIs(t, logger.Close(t.Context(), stepID), ErrNotFound)
 }
 
