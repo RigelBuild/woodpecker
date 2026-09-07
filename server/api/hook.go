@@ -226,11 +226,12 @@ func PostHook(c *gin.Context) {
 		defer cancel()
 		pl, err = pipeline.Create(bgCtx, _store, repo, pipelineFromForge)
 		if err != nil {
-			// A filtered pipeline is a clean no-op rather than a failure: either
-			// nothing matched its `when` filters, the config was absent, or the
-			// commit asked to be skipped. Create leaves no pipeline behind in
-			// any of those cases. Log it at debug so PR, metadata and closed
-			// webhooks that match nothing don't spam the error log.
+			// A filtered pipeline is not a failure: either the commit asked to
+			// be skipped, the config was absent, or nothing matched its `when`
+			// filters. Only the skip-ci case returns before the pipeline is
+			// persisted; the other two delete the row they created, on a best
+			// effort basis. Log it at debug so PR, metadata and closed webhooks
+			// that match nothing don't spam the error log.
 			if errors.Is(err, pipeline.ErrFiltered) {
 				log.Debug().Str("repo", repo.FullName).Msg("webhook produced no matching workflows; skipped")
 			} else {
