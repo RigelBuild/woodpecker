@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { findStep } from '~/components/repo/pipeline/findStep';
 import type { PipelineStep, PipelineWorkflow } from '~/lib/api/types';
+import { findStep } from '~/lib/findStep';
 
 function makeStep(pid: number): PipelineStep {
   return {
@@ -39,9 +39,9 @@ function makeWorkflow(id: number, children: PipelineStep[] | null, state: Pipeli
   };
 }
 
-// Single deliberate boundary cast: the fixtures intentionally carry `children: null`
-// or omit `children` altogether, runtime shapes the declared `PipelineStep[]` type
-// forbids -- precisely the crash under test. `findStep` must tolerate them.
+// The server tags Children `json:"children,omitempty"`, so a workflow with no
+// steps arrives with the key absent rather than null. The cast covers that plus
+// the null an older or hand-rolled payload can still carry; both crashed.
 function run(workflows: LooseWorkflow[], pid: number): PipelineStep | undefined {
   return findStep(workflows as unknown as PipelineWorkflow[], pid);
 }

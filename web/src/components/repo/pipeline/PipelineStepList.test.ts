@@ -45,15 +45,20 @@ function makeStep(pid: number): PipelineStep {
   };
 }
 
-// `children` is typed `PipelineStep[]`, but the backend sends `null` for a skipped
-// (stepless) workflow -- the exact mismatch that crashed the view. Modeling it requires
-// stepping outside the declared type, so we build a loose object and cast once.
+// `children` is typed `PipelineStep[]`, but a stepless workflow never arrives that
+// way: the server tags it `json:"children,omitempty"`, so the key is absent. Older
+// or hand-rolled payloads can still carry an explicit null. Both crashed the view,
+// and modeling either requires stepping outside the declared type.
 interface LooseWorkflow extends Omit<PipelineWorkflow, 'children'> {
-  children: PipelineStep[] | null;
+  children?: PipelineStep[] | null;
 }
 
-function makeWorkflow(id: number, children: PipelineStep[] | null, state: PipelineWorkflow['state']): LooseWorkflow {
-  return {
+function makeWorkflow(
+  id: number,
+  children: PipelineStep[] | null | undefined,
+  state: PipelineWorkflow['state'],
+): LooseWorkflow {
+  const workflow: LooseWorkflow = {
     id,
     pipeline_id: 1,
     pid: id,
@@ -61,8 +66,12 @@ function makeWorkflow(id: number, children: PipelineStep[] | null, state: Pipeli
     state,
     started: 1,
     finished: 2,
-    children,
   };
+  // `undefined` means the key is absent, which is what omitempty produces.
+  if (children !== undefined) {
+    workflow.children = children;
+  }
+  return workflow;
 }
 
 function makePipeline(workflows: LooseWorkflow[]): Pipeline {
@@ -97,8 +106,9 @@ function makePipeline(workflows: LooseWorkflow[]): Pipeline {
     version: '1',
     workflows,
   };
-  // Single deliberate boundary cast: the fixture intentionally carries `children: null`,
-  // which the Pipeline type forbids -- that is precisely the crash under test.
+  // The server tags Children `json:"children,omitempty"`, so a stepless workflow
+  // arrives with the key absent. The cast covers that and the null an older or
+  // hand-rolled payload can still carry.
   return pipeline as unknown as Pipeline;
 }
 
@@ -139,6 +149,15 @@ describe('pipelineStepList', () => {
   it('handles an empty children array', () => {
     // Mixed with a second workflow so the setup `.some()` path executes on `[]` too.
     const pipeline = makePipeline([makeWorkflow(1, [], 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
+
+    expect(() => mountStepList(pipeline)).not.toThrow();
+  });
+
+  it('renders a workflow whose children key is absent', () => {
+    // The shape the server actually sends for a stepless workflow: omitempty
+    // drops the key entirely, so `children` is undefined rather than null.
+    // Paired with a second workflow so the guarded reduce in setup runs.
+    const pipeline = makePipeline([makeWorkflow(1, undefined, 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
 
     expect(() => mountStepList(pipeline)).not.toThrow();
   });

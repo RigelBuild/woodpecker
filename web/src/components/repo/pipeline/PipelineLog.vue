@@ -180,7 +180,7 @@ import { requiredInject } from '~/compositions/useInjectProvide';
 import useNotifications from '~/compositions/useNotifications';
 import useUserConfig from '~/compositions/useUserConfig';
 import type { Pipeline, PipelineConfig } from '~/lib/api/types';
-import { findStep } from '~/components/repo/pipeline/findStep';
+import { findStep } from '~/lib/findStep';
 import { debounce } from '~/lib/utils';
 
 interface LogLine {
