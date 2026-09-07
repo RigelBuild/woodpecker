@@ -58,7 +58,7 @@ func TestSignClient(t *testing.T) {
 	req.Header.Set("Date", time.Now().Format(time.RFC3339))
 	req.Header.Set("Content-Type", "application/json")
 
-	client, err := utils.NewHTTPClient(privEd25519Key, "loopback")
+	client, err := utils.NewHTTPClient(privEd25519Key, "loopback", 10*time.Second)
 	require.NoError(t, err)
 
 	rr, err := client.Do(req)
@@ -84,7 +84,7 @@ func TestRetry(t *testing.T) {
 		}
 	}))
 
-	client, err := utils.NewHTTPClient(privEd25519Key, "loopback")
+	client, err := utils.NewHTTPClient(privEd25519Key, "loopback", 10*time.Second)
 	require.NoError(t, err)
 
 	// first time: retry fails all the times

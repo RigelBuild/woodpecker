@@ -1132,6 +1132,15 @@ Comma-separated list of hosts that are allowed to be contacted by extensions. Po
 
 ---
 
+### EXTENSIONS_TIMEOUT
+
+- Name: `WOODPECKER_EXTENSIONS_TIMEOUT`
+- Default: 10s
+
+How long before timeout when contacting an extension endpoint (config, registry or secret).
+
+---
+
 ### FORGE_TIMEOUT
 
 - Name: `WOODPECKER_FORGE_TIMEOUT`
