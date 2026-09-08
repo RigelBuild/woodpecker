@@ -5076,6 +5076,10 @@ const docTemplate = `{
                 "author_email": {
                     "type": "string"
                 },
+                "before": {
+                    "description": "previous head commit of the pushed range; GitHub push events only, empty when there is no usable base (force push, tag, new branch, or a ref that did not move)",
+                    "type": "string"
+                },
                 "branch": {
                     "type": "string"
                 },
