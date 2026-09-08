@@ -78,9 +78,7 @@ func TestLogging(t *testing.T) {
 	cancel(nil)
 }
 
-// Close on a step that never opened a stream is expected: a step killed or
-// skipped before it ran has nothing to close. Callers tell that apart from a
-// real failure with errors.Is(err, ErrNotFound).
+// A step killed before it ran never opened a stream.
 func TestCloseUnopenedStreamReturnsErrNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -102,7 +100,6 @@ func TestCloseOpenStreamSucceeds(t *testing.T) {
 	assert.ErrorIs(t, logger.Close(t.Context(), stepID), ErrNotFound)
 }
 
-// Tail shares the same not-found contract as Close.
 func TestTailUnopenedStreamReturnsErrNotFound(t *testing.T) {
 	t.Parallel()
 
