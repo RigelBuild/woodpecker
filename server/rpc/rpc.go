@@ -410,8 +410,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		for _, step := range workflow.Children {
 			if step.State != model.StatusSkipped {
 				if err := s.logger.Close(c, step.ID); err != nil {
-					// A step that never opened a log stream (e.g. killed before it ran)
-					// has nothing to close; that is expected, not an error.
+					// A step killed before it ran never opened a stream.
 					if errors.Is(err, logging.ErrNotFound) {
 						logger.Debug().Err(err).Msgf("done: no log stream to close for step %d", step.ID)
 					} else {
