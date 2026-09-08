@@ -41,8 +41,7 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		return nil, &ErrBadRequest{Msg: "cannot restart a pipeline with status blocked"}
 	}
 
-	// Seed the refetch with the old pipeline's persisted config. The forge
-	// fetcher reuses this as-is on restart; a config extension may replace it.
+	// The forge fetcher reuses this as-is; a config extension may replace it.
 	oldConfigs, err := store.ConfigsForPipeline(lastPipeline.ID)
 	if err != nil {
 		log.Error().Err(err).Msgf("failure to get pipeline config for %s", repo.FullName)
@@ -75,11 +74,8 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		return nil, errors.New(msg)
 	}
 
-	// Guard on the refetched config, not the old persisted rows. A pipeline that
-	// errored before persisting any config (e.g. a transient config-extension
-	// failure) has no old rows, yet a healthy refetch here can still yield a
-	// valid definition to restart from. Only a genuinely empty result — no old
-	// config and nothing served — is "definition not found".
+	// Guard on the refetched config: a pipeline that errored before persisting
+	// any config has no old rows but can still refetch a valid definition.
 	if len(pipelineFiles) == 0 {
 		newPipeline, uErr := UpdateToStatusError(store, *newPipeline, errors.New("pipeline definition not found"))
 		if uErr != nil {
@@ -89,9 +85,8 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		}
 		return newPipeline, nil
 	}
-	// Persist the refetched config and link it, so the restart's config-of-record
-	// matches what it actually runs (mirrors Create). ConfigPersist dedups by
-	// (repo, name, hash), so an unchanged config reuses the existing rows.
+	// Persist and link the refetched config, as Create does. ConfigPersist
+	// dedups on (repo, name, hash).
 	configs := make([]*model.Config, 0, len(pipelineFiles))
 	for _, pipelineFile := range pipelineFiles {
 		config, cErr := findOrPersistPipelineConfig(store, newPipeline, pipelineFile)
