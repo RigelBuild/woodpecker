@@ -37,20 +37,24 @@ import (
 func TestUsablePushBase(t *testing.T) {
 	const curr = "366701fde727cb7a9e7f21eb88264f59f6f9b89c"
 
+	const prev = "2f780193b136b72bfea4eeb640786a8c4450c7a2"
+
 	tests := []struct {
 		name string
+		curr string
 		prev string
 		want bool
 	}{
-		{name: "distinct previous head is a usable base", prev: "2f780193b136b72bfea4eeb640786a8c4450c7a2", want: true},
-		{name: "all-zero SHA is not a usable base", prev: zeroSHA},
-		{name: "previous head equal to current is not a usable base", prev: curr},
-		{name: "empty previous head is not a usable base", prev: ""},
+		{name: "distinct previous head is a usable base", curr: curr, prev: prev, want: true},
+		{name: "all-zero SHA is not a usable base", curr: curr, prev: zeroSHA},
+		{name: "previous head equal to current is not a usable base", curr: curr, prev: curr},
+		{name: "empty previous head is not a usable base", curr: curr, prev: ""},
+		{name: "empty current head is not a usable base", curr: "", prev: prev},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, usablePushBase(curr, tc.prev))
+			assert.Equal(t, tc.want, usablePushBase(tc.curr, tc.prev))
 		})
 	}
 }
