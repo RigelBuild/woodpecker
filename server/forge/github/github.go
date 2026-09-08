@@ -55,6 +55,9 @@ const (
 	// slow GitHub call does not fail with "context deadline exceeded" mid-report.
 	statusReportTimeout            = 30 * time.Second
 	githubClientKey     contextKey = "github_client"
+	// The all-zero commit id GitHub reports as the "before" commit of a push
+	// that creates a ref. It never names a real commit.
+	zeroSHA = "0000000000000000000000000000000000000000"
 )
 
 // Opts defines configuration options.
@@ -779,6 +782,9 @@ func (c *client) Hook(ctx context.Context, r *http.Request) (*model.Repo, *model
 			return nil, nil, err
 		}
 	} else if pipeline != nil && pipeline.Event == model.EventPush {
+		if usablePushBase(currCommit, prevCommit) {
+			pipeline.Before = prevCommit
+		}
 		// GitHub has removed commit summaries from Events API payloads from 7th October 2025 onwards.
 		pipeline, err = c.loadChangedFilesFromCommits(ctx, repo, pipeline, currCommit, prevCommit)
 		if err != nil {
@@ -888,6 +894,13 @@ func (c *client) getTagCommitSHA(ctx context.Context, repo *model.Repo, tagName 
 	return tag.GetCommit().GetSHA(), nil
 }
 
+// usablePushBase reports whether prev names a commit a push can be compared
+// against. GitHub sends the all-zero SHA when the push creates the ref, and
+// repeats curr when the ref did not move, neither of which is a usable base.
+func usablePushBase(curr, prev string) bool {
+	return prev != "" && prev != zeroSHA && prev != curr
+}
+
 func (c *client) loadChangedFilesFromCommits(ctx context.Context, tmpRepo *model.Repo, pipeline *model.Pipeline, curr, prev string) (*model.Pipeline, error) {
 	_store, ok := store.TryFromContext(ctx)
 	if !ok {
@@ -899,7 +912,7 @@ func (c *client) loadChangedFilesFromCommits(ctx context.Context, tmpRepo *model
 	case curr:
 		log.Error().Msg("GitHub push event contains the same commit before and after, no changes detected")
 		return pipeline, nil
-	case "0000000000000000000000000000000000000000":
+	case zeroSHA:
 		prev = ""
 		fallthrough
 	case "":

@@ -15,9 +15,11 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPipelineToAPIModel(t *testing.T) {
@@ -74,4 +76,30 @@ func TestPipelineToAPIModel(t *testing.T) {
 			assert.Equal(t, tc.wantIsPrerelease, ap.IsPrerelease)
 		})
 	}
+}
+
+func TestPipelineBeforeJSON(t *testing.T) {
+	t.Run("before is carried in the payload when set", func(t *testing.T) {
+		raw, err := json.Marshal(Pipeline{
+			Commit: "366701fde727cb7a9e7f21eb88264f59f6f9b89c",
+			Before: "2f780193b136b72bfea4eeb640786a8c4450c7a2",
+		})
+		require.NoError(t, err)
+
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(raw, &payload))
+		assert.Equal(t, "2f780193b136b72bfea4eeb640786a8c4450c7a2", payload["before"])
+	})
+
+	t.Run("before is omitted from the payload when empty", func(t *testing.T) {
+		raw, err := json.Marshal(Pipeline{Commit: "366701fde727cb7a9e7f21eb88264f59f6f9b89c"})
+		require.NoError(t, err)
+
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(raw, &payload))
+		// commit has no omitempty, so its presence proves the payload really was
+		// inspected and "before" is absent by the tag, not by a broken decode.
+		assert.Contains(t, payload, "commit")
+		assert.NotContains(t, payload, "before")
+	})
 }

@@ -39,6 +39,7 @@ type Pipeline struct {
 	DeployTo             string                  `json:"deploy_to"               xorm:"deploy"`
 	DeployTask           string                  `json:"deploy_task"             xorm:"deploy_task"`
 	Commit               string                  `json:"commit"                  xorm:"commit"`
+	Before               string                  `json:"before,omitempty"        xorm:"before"` // previous head commit of the pushed range, empty when there is no usable base (force push, tag, new branch)
 	Branch               string                  `json:"branch"                  xorm:"branch"`
 	RerunCount           int64                   `json:"rerun_count"             xorm:"rerun_count"`
 	Ref                  string                  `json:"ref"                     xorm:"ref"`
