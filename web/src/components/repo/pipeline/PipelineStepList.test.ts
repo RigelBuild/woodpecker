@@ -6,8 +6,7 @@ import { createI18n } from 'vue-i18n';
 import PipelineStepList from '~/components/repo/pipeline/PipelineStepList.vue';
 import type { Pipeline, PipelineConfig, PipelineStep, PipelineWorkflow } from '~/lib/api/types';
 
-// Minimal i18n instance: PipelineStepList -> usePipeline() -> useI18n() must resolve
-// during setup, otherwise the component throws before we can test the real path.
+// usePipeline() calls useI18n(), which must resolve during setup.
 const i18n = createI18n({
   legacy: false,
   locale: 'en',
@@ -25,8 +24,7 @@ function mountStepList(pipeline: Pipeline) {
     global: {
       plugins: [i18n],
       provide: { 'pipeline-configs': pipelineConfigs },
-      // shallowMount stubs the imported child components (Icon/Badge/Panel/...),
-      // but router-link is resolved globally via vue-router which we do not install.
+      // router-link resolves globally, so shallowMount does not stub it.
       stubs: { 'router-link': true, RouterLink: true },
     },
   });
@@ -45,10 +43,8 @@ function makeStep(pid: number): PipelineStep {
   };
 }
 
-// `children` is typed `PipelineStep[]`, but a stepless workflow never arrives that
-// way: the server tags it `json:"children,omitempty"`, so the key is absent. Older
-// or hand-rolled payloads can still carry an explicit null. Both crashed the view,
-// and modeling either requires stepping outside the declared type.
+// The server omits `children` for a stepless workflow; older payloads sent null.
+// Both shapes need a cast, since neither matches the declared type.
 interface LooseWorkflow extends Omit<PipelineWorkflow, 'children'> {
   children?: PipelineStep[] | null;
 }
@@ -67,7 +63,6 @@ function makeWorkflow(
     started: 1,
     finished: 2,
   };
-  // `undefined` means the key is absent, which is what omitempty produces.
   if (children !== undefined) {
     workflow.children = children;
   }
@@ -106,18 +101,12 @@ function makePipeline(workflows: LooseWorkflow[]): Pipeline {
     version: '1',
     workflows,
   };
-  // The server tags Children `json:"children,omitempty"`, so a stepless workflow
-  // arrives with the key absent. The cast covers that and the null an older or
-  // hand-rolled payload can still carry.
   return pipeline as unknown as Pipeline;
 }
 
 describe('pipelineStepList', () => {
   it('renders a workflow that has no steps without throwing', () => {
-    // Two workflows so setup's `workflowsCollapsed` reduce actually runs (it only
-    // iterates when workflows.length > 1) and calls `.some()` on the null children.
-    // Pre-fix this was `workflow.children.some(...)` -> TypeError on null -> the whole
-    // pipeline view blanked. The guard `(workflow.children ?? [])` is what keeps it alive.
+    // Two workflows, so the `workflowsCollapsed` reduce in setup runs.
     const pipeline = makePipeline([makeWorkflow(1, null, 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
 
     expect(() => mountStepList(pipeline)).not.toThrow();
@@ -141,22 +130,17 @@ describe('pipelineStepList', () => {
 
     const wrapper = mountStepList(pipeline);
     expect(wrapper.exists()).toBe(true);
-    // The happy path must still render its steps -- the null-guards must not regress it.
-    // Each step renders a button carrying `data-step-id`.
     expect(wrapper.findAll('[data-step-id]')).toHaveLength(2);
   });
 
   it('handles an empty children array', () => {
-    // Mixed with a second workflow so the setup `.some()` path executes on `[]` too.
+    // Paired with a second workflow so the reduce in setup runs.
     const pipeline = makePipeline([makeWorkflow(1, [], 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
 
     expect(() => mountStepList(pipeline)).not.toThrow();
   });
 
   it('renders a workflow whose children key is absent', () => {
-    // The shape the server actually sends for a stepless workflow: omitempty
-    // drops the key entirely, so `children` is undefined rather than null.
-    // Paired with a second workflow so the guarded reduce in setup runs.
     const pipeline = makePipeline([makeWorkflow(1, undefined, 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
 
     expect(() => mountStepList(pipeline)).not.toThrow();

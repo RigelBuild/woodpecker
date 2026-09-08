@@ -16,12 +16,8 @@ function makeStep(pid: number): PipelineStep {
   };
 }
 
-// `children` is typed `PipelineStep[]` (optional), but the backend serializes a
-// skipped (stepless) workflow's children as `null` or omits the key entirely
-// (`json:"children,omitempty"`) -- the exact mismatch that crashed the log view.
-// Modeling both runtime shapes requires stepping outside the declared type, so we
-// build a loose object and cast once at the boundary. `children?` covers the
-// absent-key (omitempty) case; `| null` covers the skipped-workflow case.
+// The server omits `children` for a stepless workflow; older payloads sent null.
+// Both shapes need a cast, since neither matches the declared type.
 interface LooseWorkflow extends Omit<PipelineWorkflow, 'children'> {
   children?: PipelineStep[] | null;
 }
@@ -39,9 +35,6 @@ function makeWorkflow(id: number, children: PipelineStep[] | null, state: Pipeli
   };
 }
 
-// The server tags Children `json:"children,omitempty"`, so a workflow with no
-// steps arrives with the key absent rather than null. The cast covers that plus
-// the null an older or hand-rolled payload can still carry; both crashed.
 function run(workflows: LooseWorkflow[], pid: number): PipelineStep | undefined {
   return findStep(workflows as unknown as PipelineWorkflow[], pid);
 }
@@ -57,7 +50,6 @@ describe('findStep', () => {
   });
 
   it('tolerates a workflow with an absent children key (omitempty shape)', () => {
-    // Built without a `children` key at all -> `undefined`, mirroring the omitempty JSON.
     const stepless: LooseWorkflow = {
       id: 1,
       pipeline_id: 1,

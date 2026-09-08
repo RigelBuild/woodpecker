@@ -1,10 +1,6 @@
 import type { PipelineStep, PipelineWorkflow } from '~/lib/api/types';
 
-// findStep locates the step with the given pid across all workflows of a
-// pipeline. A skipped/stepless workflow serializes `children` as absent
-// (`omitempty`) or null, so the deref is guarded: an unguarded
-// `workflow.children.reduce` throws "Cannot read properties of undefined
-// (reading 'reduce')" and blanks the log view.
+// A stepless workflow has no `children`, so the deref is guarded.
 export function findStep(workflows: PipelineWorkflow[], pid: number): PipelineStep | undefined {
   return workflows.reduce(
     (prev, workflow) => {
