@@ -120,6 +120,41 @@ func TestPipelines(t *testing.T) {
 	assert.EqualValues(t, pipeline2, GetPipeline)
 }
 
+// TestPipelineBeforePersists pins Before to a real column. The config
+// extension reads it off a pipeline the store loaded, which is what a restart
+// hands to config.Fetch, so an in-memory-only field would read empty there and
+// silently narrow the compared range instead of failing.
+func TestPipelineBeforePersists(t *testing.T) {
+	const before = "2f780193b136b72bfea4eeb640786a8c4450c7a2"
+
+	repo := &model.Repo{
+		UserID:   1,
+		FullName: "bradrydzewski/test",
+		Owner:    "bradrydzewski",
+		Name:     "test",
+	}
+
+	store, closer := newTestStore(t, new(model.Repo), new(model.Step), new(model.Pipeline))
+	defer closer()
+
+	assert.NoError(t, store.CreateRepo(repo))
+
+	pipeline := model.Pipeline{
+		RepoID: repo.ID,
+		Status: model.StatusSuccess,
+		Event:  model.EventPush,
+		Branch: "some-branch",
+		Commit: "366701fde727cb7a9e7f21eb88264f59f6f9b89c",
+		Before: before,
+	}
+	assert.NoError(t, store.CreatePipeline(&pipeline))
+
+	// GetPipelineNumber is the accessor the restart path uses.
+	loaded, err := store.GetPipelineNumber(repo, pipeline.Number)
+	assert.NoError(t, err)
+	assert.Equal(t, before, loaded.Before)
+}
+
 func TestPipelineListFilter(t *testing.T) {
 	repo := &model.Repo{
 		UserID:   1,

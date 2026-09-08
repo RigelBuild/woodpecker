@@ -894,11 +894,13 @@ func (c *client) getTagCommitSHA(ctx context.Context, repo *model.Repo, tagName 
 	return tag.GetCommit().GetSHA(), nil
 }
 
-// usablePushBase reports whether prev names a commit a push can be compared
-// against. GitHub sends the all-zero SHA when the push creates the ref, and
-// repeats curr when the ref did not move, neither of which is a usable base.
+// usablePushBase reports whether prev and curr name commits a push can be
+// compared across. GitHub sends the all-zero SHA when the push creates the
+// ref, and repeats curr when the ref did not move, neither of which is a
+// usable base. A push carrying no head commit leaves curr empty, which is
+// not a usable end of the range either.
 func usablePushBase(curr, prev string) bool {
-	return prev != "" && prev != zeroSHA && prev != curr
+	return curr != "" && prev != "" && prev != zeroSHA && prev != curr
 }
 
 func (c *client) loadChangedFilesFromCommits(ctx context.Context, tmpRepo *model.Repo, pipeline *model.Pipeline, curr, prev string) (*model.Pipeline, error) {
