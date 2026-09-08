@@ -23,7 +23,7 @@ import (
 // getStatus is a helper that converts a Woodpecker status to a Gitlab status.
 func getStatus(status model.StatusValue) gitlab.BuildStateValue {
 	switch status {
-	case model.StatusPending, model.StatusBlocked:
+	case model.StatusPending, model.StatusBlocked, model.StatusCreated:
 		return gitlab.Pending
 	case model.StatusRunning:
 		return gitlab.Running

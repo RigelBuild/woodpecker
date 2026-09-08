@@ -25,12 +25,6 @@ import (
 )
 
 func Test_convertStatus(t *testing.T) {
-	// Exhaustive over every model.StatusValue. The contract: terminal bad
-	// outcomes map to GitHub "failure"/"error"; success maps to "success";
-	// every not-yet-terminal or internal state maps to "pending".
-	// convertStatus must never turn a transient or unrecognized status into a
-	// spurious red "error" commit status — the internal-only StatusCreated in
-	// particular previously fell through the default to "error".
 	tests := []struct {
 		name   string
 		status model.StatusValue
@@ -46,10 +40,8 @@ func Test_convertStatus(t *testing.T) {
 		{name: "blocked", status: model.StatusBlocked, want: statusPending},
 		{name: "skipped", status: model.StatusSkipped, want: statusPending},
 		{name: "canceled", status: model.StatusCanceled, want: statusPending},
-		// StatusCreated is internal-only and never terminal, so it belongs with
-		// the pending states rather than falling through to statusError.
+		// StatusCreated is internal-only and never terminal.
 		{name: "created", status: model.StatusCreated, want: statusPending},
-		// A value outside the enum is a bug and stays loud.
 		{name: "out of enum", status: model.StatusValue("bogus"), want: statusError},
 	}
 

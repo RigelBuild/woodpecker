@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package gitlab
+package gitea
 
 import (
 	"testing"
 
+	"code.gitea.io/sdk/gitea"
 	"github.com/stretchr/testify/assert"
-	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
@@ -28,18 +28,18 @@ func TestGetStatus(t *testing.T) {
 
 	tests := []struct {
 		status model.StatusValue
-		want   gitlab.BuildStateValue
+		want   gitea.StatusState
 	}{
-		{model.StatusPending, gitlab.Pending},
-		{model.StatusBlocked, gitlab.Pending},
-		{model.StatusCreated, gitlab.Pending},
-		{model.StatusRunning, gitlab.Running},
-		{model.StatusSuccess, gitlab.Success},
-		{model.StatusFailure, gitlab.Failed},
-		{model.StatusError, gitlab.Failed},
-		{model.StatusKilled, gitlab.Canceled},
-		// unknown statuses fall back to failed
-		{model.StatusDeclined, gitlab.Failed},
+		{model.StatusPending, gitea.StatusPending},
+		{model.StatusBlocked, gitea.StatusPending},
+		{model.StatusCreated, gitea.StatusPending},
+		{model.StatusRunning, gitea.StatusPending},
+		{model.StatusSuccess, gitea.StatusSuccess},
+		{model.StatusFailure, gitea.StatusFailure},
+		{model.StatusKilled, gitea.StatusFailure},
+		{model.StatusDeclined, gitea.StatusWarning},
+		{model.StatusError, gitea.StatusError},
+		{model.StatusValue("bogus"), gitea.StatusFailure},
 	}
 
 	for _, tt := range tests {

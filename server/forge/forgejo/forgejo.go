@@ -615,7 +615,7 @@ func (c *Forgejo) newClientToken(ctx context.Context, token string) (*forgejo.Cl
 // status to a Forgejo status.
 func getStatus(status model.StatusValue) forgejo.StatusState {
 	switch status {
-	case model.StatusPending, model.StatusBlocked:
+	case model.StatusPending, model.StatusBlocked, model.StatusCreated:
 		return forgejo.StatusPending
 	case model.StatusRunning:
 		return forgejo.StatusPending

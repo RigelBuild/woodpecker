@@ -40,6 +40,10 @@ func Test_convertStatus(t *testing.T) {
 			to:   bitbucket.BuildStatusStateInProgress,
 		},
 		{
+			from: model.StatusCreated,
+			to:   bitbucket.BuildStatusStateInProgress,
+		},
+		{
 			from: model.StatusSuccess,
 			to:   bitbucket.BuildStatusStateSuccessful,
 		},

@@ -28,7 +28,7 @@ import (
 
 func convertStatus(status model.StatusValue) bitbucket.BuildStatusState {
 	switch status {
-	case model.StatusPending, model.StatusRunning:
+	case model.StatusPending, model.StatusRunning, model.StatusCreated:
 		return bitbucket.BuildStatusStateInProgress
 	case model.StatusSuccess:
 		return bitbucket.BuildStatusStateSuccessful

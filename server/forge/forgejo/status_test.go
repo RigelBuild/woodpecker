@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package gitlab
+package forgejo
 
 import (
 	"testing"
 
+	"codeberg.org/mvdkleijn/forgejo-sdk/forgejo/v3"
 	"github.com/stretchr/testify/assert"
-	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
@@ -28,18 +28,18 @@ func TestGetStatus(t *testing.T) {
 
 	tests := []struct {
 		status model.StatusValue
-		want   gitlab.BuildStateValue
+		want   forgejo.StatusState
 	}{
-		{model.StatusPending, gitlab.Pending},
-		{model.StatusBlocked, gitlab.Pending},
-		{model.StatusCreated, gitlab.Pending},
-		{model.StatusRunning, gitlab.Running},
-		{model.StatusSuccess, gitlab.Success},
-		{model.StatusFailure, gitlab.Failed},
-		{model.StatusError, gitlab.Failed},
-		{model.StatusKilled, gitlab.Canceled},
-		// unknown statuses fall back to failed
-		{model.StatusDeclined, gitlab.Failed},
+		{model.StatusPending, forgejo.StatusPending},
+		{model.StatusBlocked, forgejo.StatusPending},
+		{model.StatusCreated, forgejo.StatusPending},
+		{model.StatusRunning, forgejo.StatusPending},
+		{model.StatusSuccess, forgejo.StatusSuccess},
+		{model.StatusFailure, forgejo.StatusFailure},
+		{model.StatusKilled, forgejo.StatusFailure},
+		{model.StatusDeclined, forgejo.StatusWarning},
+		{model.StatusError, forgejo.StatusError},
+		{model.StatusValue("bogus"), forgejo.StatusFailure},
 	}
 
 	for _, tt := range tests {

@@ -81,9 +81,6 @@ func TestNormalizeEventReason(t *testing.T) {
 func TestGetPipelineStatusDescription(t *testing.T) {
 	t.Parallel()
 
-	// Every defined status gets a description matching its actual outcome.
-	// StatusCreated is internal-only and never terminal, so it reads as
-	// pending; the terminal states say what happened.
 	tests := map[model.StatusValue]string{
 		model.StatusPending:  "Pipeline is pending",
 		model.StatusRunning:  "Pipeline is running",
@@ -95,8 +92,7 @@ func TestGetPipelineStatusDescription(t *testing.T) {
 		model.StatusDeclined: "Pipeline was rejected",
 		model.StatusCanceled: "Pipeline was canceled",
 		model.StatusSkipped:  "Pipeline was skipped",
-		// Regression: StatusCreated used to yield the "unknown status" default.
-		model.StatusCreated: "Pipeline is pending",
+		model.StatusCreated:  "Pipeline is pending",
 	}
 
 	for status, want := range tests {
