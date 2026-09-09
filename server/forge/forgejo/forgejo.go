@@ -621,15 +621,14 @@ func getStatus(status model.StatusValue) forgejo.StatusState {
 		return forgejo.StatusPending
 	case model.StatusSuccess:
 		return forgejo.StatusSuccess
-	case model.StatusFailure:
-		return forgejo.StatusFailure
-	case model.StatusKilled:
+	case model.StatusFailure, model.StatusKilled, model.StatusSkipped, model.StatusCanceled:
 		return forgejo.StatusFailure
 	case model.StatusDeclined:
 		return forgejo.StatusWarning
 	case model.StatusError:
 		return forgejo.StatusError
 	default:
+		log.Warn().Str("status", string(status)).Msg("unknown pipeline status")
 		return forgejo.StatusFailure
 	}
 }

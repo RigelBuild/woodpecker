@@ -15,6 +15,7 @@
 package gitlab
 
 import (
+	"github.com/rs/zerolog/log"
 	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -29,11 +30,12 @@ func getStatus(status model.StatusValue) gitlab.BuildStateValue {
 		return gitlab.Running
 	case model.StatusSuccess:
 		return gitlab.Success
-	case model.StatusFailure, model.StatusError:
+	case model.StatusFailure, model.StatusError, model.StatusSkipped, model.StatusCanceled, model.StatusDeclined:
 		return gitlab.Failed
 	case model.StatusKilled:
 		return gitlab.Canceled
 	default:
+		log.Warn().Str("status", string(status)).Msg("unknown pipeline status")
 		return gitlab.Failed
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/bitbucket/internal"
@@ -41,7 +42,10 @@ func convertStatus(status model.StatusValue) string {
 		return statusPending
 	case model.StatusSuccess:
 		return statusSuccess
+	case model.StatusFailure, model.StatusKilled, model.StatusError, model.StatusDeclined, model.StatusSkipped, model.StatusCanceled:
+		return statusFailure
 	default:
+		log.Warn().Str("status", string(status)).Msg("unknown pipeline status")
 		return statusFailure
 	}
 }

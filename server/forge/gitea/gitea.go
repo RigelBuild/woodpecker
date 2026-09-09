@@ -623,15 +623,14 @@ func getStatus(status model.StatusValue) gitea.StatusState {
 		return gitea.StatusPending
 	case model.StatusSuccess:
 		return gitea.StatusSuccess
-	case model.StatusFailure:
-		return gitea.StatusFailure
-	case model.StatusKilled:
+	case model.StatusFailure, model.StatusKilled, model.StatusSkipped, model.StatusCanceled:
 		return gitea.StatusFailure
 	case model.StatusDeclined:
 		return gitea.StatusWarning
 	case model.StatusError:
 		return gitea.StatusError
 	default:
+		log.Warn().Str("status", string(status)).Msg("unknown pipeline status")
 		return gitea.StatusFailure
 	}
 }
