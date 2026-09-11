@@ -8,17 +8,20 @@ name: publish-agent-image
 # BUILDPLATFORM and Go-cross-compiles to TARGETARCH, and its final stage is
 # FROM scratch (COPY-only), so linux/arm64 is produced by cross-compile without
 # QEMU execution.
+#
+# The version comes from the `version = "..."` literal in flake.nix — the same
+# string the server build stamps in — so server and agent cannot carry
+# different versions from one fork commit. This fires on every push to main
+# rather than on a tag: the fork keeps no tags, so a tag trigger published
+# exactly once in its lifetime and left the pool a minor version behind the
+# server (RIG-2217). Re-pushing an unchanged version is a no-op at the
+# registry, which dedups by content digest.
 
-on:
+'on':
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Agent image version tag (e.g. 3.16.0-rigel.1)'
-        required: true
-        default: '3.16.0-rigel.1'
   push:
-    tags:
-      - 'v*.*.*-rigel.*'
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -38,11 +41,11 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            ref="${GITHUB_REF#refs/tags/}"
-            version="${ref#v}"
-          else
-            version="${{ github.event.inputs.version }}"
+          set -euo pipefail
+          version="$(sed -n 's/^[[:space:]]*version = "\(.*\)";$/\1/p' flake.nix | head -1)"
+          if [ -z "$version" ]; then
+            echo "could not read the version literal from flake.nix" >&2
+            exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Publishing agent image version: ${version}"
