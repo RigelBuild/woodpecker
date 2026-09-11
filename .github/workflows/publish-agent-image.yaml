@@ -1,8 +1,9 @@
 name: publish-agent-image
 
 # Publishes the multi-arch woodpecker-agent image to GHCR for the Rigel
-# elastic-runner pool. The pool's AGENT_IMAGE pins the exact version tag this
-# workflow produces (ghcr.io/rigelbuild/woodpecker-agent:<version>).
+# elastic-runner pool. The pool's AGENT_IMAGE pins the image this workflow
+# produces by DIGEST (ghcr.io/rigelbuild/woodpecker-agent@sha256:...), never
+# by the mutable `:<version>` tag — see the note below.
 #
 # The agent Dockerfile (docker/Dockerfile.agent.multiarch) builds on the native
 # BUILDPLATFORM and Go-cross-compiles to TARGETARCH, and its final stage is
@@ -20,10 +21,11 @@ name: publish-agent-image
 # .dockerignore, the Go build sets neither -trimpath nor -buildvcs=false, and
 # CI_COMMIT_SHA busts the build layer — so a rebuild at the same version
 # produces a NEW digest and moves the mutable `:<version>` tag onto it. GHCR
-# has no server-side tag immutability. That is why the path filter matters:
-# it keeps the version tag from being reassigned by commits that cannot have
-# changed the version. Consumers must pin the image by DIGEST, never by the
-# version tag.
+# has no server-side tag immutability. The path filter narrows publishing to
+# commits that touch flake.nix, where the version lives; a flake.nix edit
+# that leaves the version literal alone (a vendorHash refresh, say) still
+# republishes the same version onto a new digest. That is exactly why
+# consumers must pin by DIGEST, never by the version tag.
 
 'on':
   workflow_dispatch:
