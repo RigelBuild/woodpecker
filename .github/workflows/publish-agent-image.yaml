@@ -74,6 +74,9 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Publishing agent image version: ${version}"
 
+      # A no-op for today's build, which cross-compiles and ships FROM
+      # scratch, so no foreign-arch code runs. Kept so a future stage that
+      # does run arm64 code fails loudly elsewhere rather than here.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
