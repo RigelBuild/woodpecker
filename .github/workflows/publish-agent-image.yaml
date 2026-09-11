@@ -11,17 +11,33 @@ name: publish-agent-image
 #
 # The version comes from the `version = "..."` literal in flake.nix — the same
 # string the server build stamps in — so server and agent cannot carry
-# different versions from one fork commit. This fires on every push to main
-# rather than on a tag: the fork keeps no tags, so a tag trigger published
-# exactly once in its lifetime and left the pool a minor version behind the
-# server (RIG-2217). Re-pushing an unchanged version is a no-op at the
-# registry, which dedups by content digest.
+# different versions from one fork commit. This fires on a push to main
+# touching flake.nix rather than on a tag: the fork keeps no tags, so a tag
+# trigger published exactly once in its lifetime and left the pool a minor
+# version behind the server (RIG-2217).
+#
+# The build is NOT reproducible — the Dockerfile does `COPY . .` with no
+# .dockerignore, the Go build sets neither -trimpath nor -buildvcs=false, and
+# CI_COMMIT_SHA busts the build layer — so a rebuild at the same version
+# produces a NEW digest and moves the mutable `:<version>` tag onto it. GHCR
+# has no server-side tag immutability. That is why the path filter matters:
+# it keeps the version tag from being reassigned by commits that cannot have
+# changed the version. Consumers must pin the image by DIGEST, never by the
+# version tag.
 
 'on':
   workflow_dispatch:
   push:
     branches:
       - main
+    paths:
+      - flake.nix
+
+# One publish at a time: two rapid pushes would otherwise race to own the
+# `:<version>` tag, and the loser could land last.
+concurrency:
+  group: publish-agent-image
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -42,11 +58,17 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^[[:space:]]*version = "\(.*\)";$/\1/p' flake.nix | head -1)"
-          if [ -z "$version" ]; then
-            echo "could not read the version literal from flake.nix" >&2
+          # Exactly one match, or fail: picking the first would silently
+          # publish the wrong version if a second literal is ever added.
+          mapfile -t versions < <(
+            sed -n 's/^[[:space:]]*version = "\(.*\)";$/\1/p' flake.nix
+          )
+          if [ "${#versions[@]}" -ne 1 ]; then
+            echo "expected exactly one version literal in flake.nix, found ${#versions[@]}" >&2
+            printf '  %s\n' "${versions[@]}" >&2
             exit 1
           fi
+          version="${versions[0]}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Publishing agent image version: ${version}"
 
