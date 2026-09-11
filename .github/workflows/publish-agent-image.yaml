@@ -1,0 +1,107 @@
+name: publish-agent-image
+
+# Publishes the multi-arch woodpecker-agent image to GHCR for the Rigel
+# elastic-runner pool. The pool's AGENT_IMAGE pins the image this workflow
+# produces by DIGEST (ghcr.io/rigelbuild/woodpecker-agent@sha256:...), never
+# by the mutable `:<version>` tag — see the note below.
+#
+# The agent Dockerfile (docker/Dockerfile.agent.multiarch) builds on the native
+# BUILDPLATFORM and Go-cross-compiles to TARGETARCH, and its final stage is
+# FROM scratch (COPY-only), so linux/arm64 is produced by cross-compile without
+# QEMU execution.
+#
+# The version comes from the `version = "..."` literal in flake.nix — the same
+# string the server build stamps in — so server and agent cannot carry
+# different versions from one fork commit. This fires on a push to main
+# touching flake.nix rather than on a tag: the fork keeps no tags, so a tag
+# trigger published exactly once in its lifetime and left the pool a minor
+# version behind the server (RIG-2217).
+#
+# The build is NOT reproducible — the Dockerfile does `COPY . .` with no
+# .dockerignore, the Go build sets neither -trimpath nor -buildvcs=false, and
+# CI_COMMIT_SHA busts the build layer — so a rebuild at the same version
+# produces a NEW digest and moves the mutable `:<version>` tag onto it. GHCR
+# has no server-side tag immutability. The path filter narrows publishing to
+# commits that touch flake.nix, where the version lives; a flake.nix edit
+# that leaves the version literal alone (a vendorHash refresh, say) still
+# republishes the same version onto a new digest. That is exactly why
+# consumers must pin by DIGEST, never by the version tag.
+
+'on':
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - flake.nix
+
+# One publish at a time: two rapid pushes would otherwise race to own the
+# `:<version>` tag, and the loser could land last.
+concurrency:
+  group: publish-agent-image
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: rigelbuild/woodpecker-agent
+
+jobs:
+  publish-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          # Exactly one match, or fail: picking the first would silently
+          # publish the wrong version if a second literal is ever added.
+          mapfile -t versions < <(
+            sed -n 's/^[[:space:]]*version = "\(.*\)";$/\1/p' flake.nix
+          )
+          if [ "${#versions[@]}" -ne 1 ]; then
+            echo "expected exactly one version literal in flake.nix, found ${#versions[@]}" >&2
+            printf '  %s\n' "${versions[@]}" >&2
+            exit 1
+          fi
+          version="${versions[0]}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Publishing agent image version: ${version}"
+
+      # A no-op for today's build, which cross-compiles and ships FROM
+      # scratch, so no foreign-arch code runs. Kept so a future stage that
+      # does run arm64 code fails loudly elsewhere rather than here.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.agent.multiarch
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            CI_COMMIT_TAG=v${{ steps.version.outputs.version }}
+            CI_COMMIT_SHA=${{ github.sha }}
+            CI_COMMIT_BRANCH=${{ github.ref_name }}
