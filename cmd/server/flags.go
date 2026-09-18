@@ -116,6 +116,12 @@ var flags = append([]cli.Flag{
 		Usage:   "max time to wait for pipeline creation triggered by an incoming webhook before responding 202 Accepted and finishing it in the background; 0 disables the fallback and always responds synchronously",
 		Value:   5 * time.Second,
 	},
+	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_HOOK_DEDUP_WINDOW"),
+		Name:    "hook-dedup-window",
+		Usage:   "coalesce duplicate pull-request webhooks for the same (repo, refspec, head commit) arriving within this window into a single pipeline. Some clients (e.g. a Graphite 'gt submit' force-push) make the forge emit two pull_request deliveries ~1s apart for one push; each would otherwise spawn a pipeline, and the two mutually cancel and race their status posts, wedging the required check pending. A reopened delivery is never dropped. 0 disables (default, upstream-compatible behavior).",
+		Value:   0,
+	},
 	&cli.StringFlag{
 		Sources: cli.EnvVars("WOODPECKER_GRPC_ADDR"),
 		Name:    "grpc-addr",

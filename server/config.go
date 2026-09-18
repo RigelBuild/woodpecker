@@ -60,6 +60,7 @@ var Config = struct {
 		CustomJsFile           string
 		AsyncRepositoryUpdate  bool
 		WebhookSyncTimeout     time.Duration
+		HookDedupWindow        time.Duration
 	}
 	Agent struct {
 		DisableUserRegisteredAgentRegistration bool

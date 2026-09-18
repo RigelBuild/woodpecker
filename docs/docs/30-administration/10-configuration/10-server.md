@@ -1055,6 +1055,18 @@ Template for the aggregate status context. Supported variables: `context`, `even
 
 ---
 
+### HOOK_DEDUP_WINDOW
+
+- Name: `WOODPECKER_HOOK_DEDUP_WINDOW`
+- Default: `0`
+
+Coalesce duplicate `pull_request` webhook deliveries for the same head commit into a single pipeline when they arrive within this window.
+Some push flows deliver two webhooks for one push (for example a force-push that both updates the branch and re-targets the pull request), which otherwise creates two pipelines for the same commit, the second superseding the first and leaving the required status check stranded.
+`0` disables the window; deliveries are keyed by repository, refspec and head commit, so a genuinely new head commit always creates its own pipeline.
+Closing a pull request clears the window for its refspec, so reopening one is never swallowed.
+
+---
+
 ### REPORT_SKIPPED_WORKFLOWS
 
 - Name: `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`
