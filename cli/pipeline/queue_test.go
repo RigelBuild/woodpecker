@@ -16,33 +16,33 @@ package pipeline
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"testing"
-	"text/template"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v3"
 
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
+	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker/mocks"
 )
 
-func TestPipelineQueueDefaultTemplateRendersFeed(t *testing.T) {
-	tmpl, err := template.New("_").Parse(tmplPipelineQueue)
-	require.NoError(t, err)
+func TestPipelineQueue(t *testing.T) {
+	mockClient := mocks.NewMockClient(t)
+	mockClient.On("PipelineQueue").Return([]*woodpecker.Feed{{
+		RepoID: 2,
+		Number: 7,
+	}}, nil)
 
-	var out bytes.Buffer
-	err = tmpl.Execute(&out, &woodpecker.Feed{
-		FullName: "octocat/hello-world",
-		Number:   42,
-		Status:   "running",
-		Event:    "push",
-		Commit:   "abc123",
-		Branch:   "main",
-		Ref:      "refs/heads/main",
-		Author:   "Mona",
-		Email:    "mona@example.com",
-		Message:  "build it",
-	})
+	command := *pipelineQueueCmd
+	command.Writer = io.Discard
+	command.Action = func(_ context.Context, c *cli.Command) error {
+		var out bytes.Buffer
+		err := pipelineQueueOutput(c, mockClient, &out)
+		assert.NoError(t, err)
+		assert.Contains(t, out.String(), "repo:2 #7")
+		return nil
+	}
 
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "octocat/hello-world #42")
+	assert.NoError(t, command.Run(t.Context(), []string{"queue"}))
 }

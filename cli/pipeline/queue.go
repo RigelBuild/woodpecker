@@ -17,6 +17,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"text/template"
 
@@ -24,6 +25,7 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v3/cli/common"
 	"go.woodpecker-ci.org/woodpecker/v3/cli/internal"
+	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
 
 var pipelineQueueCmd = &cli.Command{
@@ -40,14 +42,18 @@ func pipelineQueue(ctx context.Context, c *cli.Command) error {
 		return err
 	}
 
+	return pipelineQueueOutput(c, client, os.Stdout)
+}
+
+func pipelineQueueOutput(c *cli.Command, client woodpecker.Client, out io.Writer) error {
 	pipelines, err := client.PipelineQueue()
 	if err != nil {
 		return err
 	}
 
 	if len(pipelines) == 0 {
-		fmt.Println("there are no pending or running pipelines")
-		return nil
+		_, err := fmt.Fprintln(out, "there are no pending or running pipelines")
+		return err
 	}
 
 	tmpl, err := template.New("_").Parse(c.String("format") + "\n")
@@ -56,7 +62,7 @@ func pipelineQueue(ctx context.Context, c *cli.Command) error {
 	}
 
 	for _, pipeline := range pipelines {
-		if err := tmpl.Execute(os.Stdout, pipeline); err != nil {
+		if err := tmpl.Execute(out, pipeline); err != nil {
 			return err
 		}
 	}
@@ -64,7 +70,7 @@ func pipelineQueue(ctx context.Context, c *cli.Command) error {
 }
 
 // Template for pipeline list information.
-var tmplPipelineQueue = "\x1b[33m{{ .FullName }} #{{ .Number }} \x1b[0m" + `
+var tmplPipelineQueue = "\x1b[33mrepo:{{ .RepoID }} #{{ .Number }} \x1b[0m" + `
 Status: {{ .Status }}
 Event: {{ .Event }}
 Commit: {{ .Commit }}
