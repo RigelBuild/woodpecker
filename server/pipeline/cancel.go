@@ -115,6 +115,10 @@ func cancelPreviousPipelines(
 	}
 
 	pipelineNeedsCancel := func(active *model.Pipeline) bool {
+		if active.Number >= pipeline.Number {
+			return false
+		}
+
 		// always filter on same event
 		if active.Event != pipeline.Event {
 			return false
