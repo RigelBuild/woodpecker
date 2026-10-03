@@ -151,11 +151,16 @@ func cancelPipelineFromStep(ctx context.Context, store store.Store, step *model.
 	})
 }
 
-func UpdateStepToStatusSkipped(store store.Store, step model.Step, finished int64, status model.StatusValue) (*model.Step, error) {
+// UpdateStepToStatusSkipped finalizes a step its workflow left unfinished. A started
+// service or detached step normally ends at teardown, so it reads success, unless the
+// workflow was interrupted: then only a service, which never ends on its own, does.
+func UpdateStepToStatusSkipped(store store.Store, step model.Step, finished int64, status model.StatusValue, interrupted bool) (*model.Step, error) {
 	step.State = status
 	if step.Started != 0 {
-		step.State = model.StatusSuccess // for daemons that are killed
 		step.Finished = finished
+		if !interrupted || step.Type == model.StepTypeService {
+			step.State = model.StatusSuccess
+		}
 	}
 	return &step, store.StepUpdate(&step)
 }
