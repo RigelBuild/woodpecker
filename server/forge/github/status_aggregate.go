@@ -157,22 +157,8 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 // terminal, prefer the pipeline status; otherwise keep the (more specific)
 // rolled-up verdict.
 func reconcileTerminalStatus(rolled, pipelineStatus model.StatusValue) model.StatusValue {
-	if isTerminalStatus(rolled) || !isTerminalStatus(pipelineStatus) {
+	if model.IsTerminalStatus(rolled) || !model.IsTerminalStatus(pipelineStatus) {
 		return rolled
 	}
 	return pipelineStatus
-}
-
-// isTerminalStatus reports whether a status is a final pipeline verdict — one
-// that convertStatus maps to a terminal GitHub commit state (success/failure)
-// rather than pending. StatusBlocked (awaiting approval) and StatusCreated are
-// deliberately NOT terminal: they are legitimately still pending.
-func isTerminalStatus(s model.StatusValue) bool {
-	switch s {
-	case model.StatusSuccess, model.StatusFailure, model.StatusKilled,
-		model.StatusError, model.StatusDeclined, model.StatusCanceled:
-		return true
-	default:
-		return false
-	}
 }

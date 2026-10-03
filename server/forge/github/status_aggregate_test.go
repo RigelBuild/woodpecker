@@ -510,13 +510,9 @@ func TestStatusMetaRollsUpOnlyMetaGates(t *testing.T) {
 		"a failing meta gate must red the meta context even when code workflows and the overall pipeline are green")
 }
 
-// TestIsTerminalStatusMatchesConvertStatus locks isTerminalStatus in lockstep
+// TestIsTerminalStatusMatchesConvertStatus locks model.IsTerminalStatus in lockstep
 // with convertStatus: a status is terminal exactly when convertStatus maps it to
-// something other than statusPending — the equivalence reconcileTerminalStatus
-// relies on to decide when a rolled-up verdict may override a still-running
-// workflow status, so the two must never drift. A future model.StatusValue wired
-// into convertStatus's terminal branches without being added to isTerminalStatus
-// (or vice versa) fails this test — which is the point.
+// something other than statusPending, which reconcileTerminalStatus relies on.
 func TestIsTerminalStatusMatchesConvertStatus(t *testing.T) {
 	all := []model.StatusValue{
 		model.StatusSkipped,
@@ -532,7 +528,7 @@ func TestIsTerminalStatusMatchesConvertStatus(t *testing.T) {
 		model.StatusCreated,
 	}
 	for _, s := range all {
-		assert.Equalf(t, convertStatus(s) != statusPending, isTerminalStatus(s),
-			"isTerminalStatus(%q) must equal (convertStatus(%q) != statusPending); the terminal set and the GitHub-state mapping have drifted", s, s)
+		assert.Equalf(t, convertStatus(s) != statusPending, model.IsTerminalStatus(s),
+			"model.IsTerminalStatus(%q) must equal (convertStatus(%q) != statusPending); the terminal set and the GitHub-state mapping have drifted", s, s)
 	}
 }

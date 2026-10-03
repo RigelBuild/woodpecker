@@ -79,6 +79,17 @@ func (s StatusValue) Validate() error {
 	}
 }
 
+// IsTerminalStatus reports whether s is a final pipeline verdict. Blocked and
+// created are not terminal: they are legitimately still pending.
+func IsTerminalStatus(s StatusValue) bool {
+	switch s {
+	case StatusSuccess, StatusFailure, StatusKilled, StatusError, StatusDeclined, StatusCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
 // RepoVisibility represent to what state a repo in woodpecker is visible to others.
 type RepoVisibility string //	@name	RepoVisibility
 
