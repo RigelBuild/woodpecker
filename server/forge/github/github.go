@@ -89,6 +89,7 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		r.url = strings.TrimSuffix(opts.URL, "/")
 		r.API = r.url + "/api/v3/"
 	}
+	r.delivered = statusDedupeFor(r.API)
 
 	if opts.AppPrivateKey != "" {
 		key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(opts.AppPrivateKey))
@@ -117,6 +118,7 @@ type client struct {
 	appTokenMu sync.Mutex
 	checkRuns  map[string]checkRunRef
 	checkRunMu sync.Mutex
+	delivered  *statusDedupe
 }
 
 // Name returns the string name of this driver.
