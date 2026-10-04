@@ -170,6 +170,9 @@ func TestStatusDedupeSerializesOneKey(t *testing.T) {
 			return github.RepoStatus{State: github.Ptr(statusSuccess)}, nil
 		}, func(github.RepoStatus) (*github.Response, error) { return nil, nil })
 	}()
+	// Wait until the second report is queued on the key, so a broken lock
+	// would let its build run before the assertion below.
+	require.Eventually(t, func() bool { return lockRefs(d, "k") == 2 }, time.Second, time.Millisecond)
 	// Another key is not blocked by the held one.
 	_, err := d.post(ctx, "other", func() (github.RepoStatus, error) {
 		return github.RepoStatus{State: github.Ptr(statusPending)}, nil
@@ -188,7 +191,6 @@ func TestStatusDedupeLockHonorsContext(t *testing.T) {
 	d := newStatusDedupe()
 	unlock, err := d.lock(context.Background(), "k")
 	require.NoError(t, err)
-	defer unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -197,4 +199,16 @@ func TestStatusDedupeLockHonorsContext(t *testing.T) {
 		return github.RepoStatus{}, nil
 	}, nil)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, 1, lockRefs(d, "k"), "a timed-out waiter must drop its ref")
+	unlock()
+	assert.Equal(t, 0, lockRefs(d, "k"))
+}
+
+func lockRefs(d *statusDedupe, key string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if l := d.locks[key]; l != nil {
+		return l.refs
+	}
+	return 0
 }
