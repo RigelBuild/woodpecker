@@ -4769,7 +4769,8 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "enabled": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "default": true
                 },
                 "id": {
                     "type": "integer"
