@@ -2,28 +2,11 @@ import { shallowMount } from '@vue/test-utils';
 import { describe, expect, it } from 'vitest';
 import { createI18n } from 'vue-i18n';
 
+import en from '~/assets/locales/en.json';
 import PipelineCancelInfo from '~/components/repo/pipeline/PipelineCancelInfo.vue';
 import type { CancelInfo, Pipeline } from '~/lib/api/types';
 
-const i18n = createI18n({
-  legacy: false,
-  locale: 'en',
-  missingWarn: false,
-  fallbackWarn: false,
-  messages: {
-    en: {
-      repo: {
-        pipeline: {
-          cancel_info: {
-            superseded_by: 'Superseded by #{pipelineId}',
-            canceled_by_user: 'Canceled by {user}',
-            canceled_by_step: 'Canceled by step {user}',
-          },
-        },
-      },
-    },
-  },
-});
+const i18n = createI18n({ legacy: false, locale: 'en', messages: { en } });
 
 function mountFor(status: Pipeline['status'], cancelInfo: Partial<CancelInfo>) {
   const pipeline = { status, cancel_info: cancelInfo } as unknown as Pipeline;
@@ -40,6 +23,10 @@ describe('pipelineCancelInfo', () => {
 
   it('shows a user cancel on a killed pipeline', () => {
     expect(mountFor('killed', { canceled_by_user: 'matt' }).text()).toContain('Canceled by matt');
+  });
+
+  it('names the step that canceled the pipeline', () => {
+    expect(mountFor('failure', { canceled_by_step: 'lint' }).text()).toContain('Canceled due to lint');
   });
 
   it('renders nothing without cancel info', () => {
