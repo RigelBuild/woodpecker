@@ -1,2 +1,6 @@
 allowBuilds:
   esbuild: false
+
+overrides:
+  # CVE-2026-85008 floor; jsdom allows ^8.9.0 but the lock pinned 8.10.0.
+  undici: '^8.11.2'
