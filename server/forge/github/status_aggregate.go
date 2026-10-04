@@ -16,12 +16,15 @@ package github
 
 import (
 	"context"
+	"slices"
 
 	"github.com/google/go-github/v90/github"
+	"github.com/rs/zerolog/log"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
 // StatusAggregate reports the pipeline's overall CODE state as a single commit
@@ -48,23 +51,7 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 	// — rolling up an empty set would post a vacuous success and mask the error,
 	// stranding the required check green. (A real PR pipeline always carries code
 	// workflows, so the filtered aggregate is the live path there.)
-	status := p.Status
-	code := make([]*model.Workflow, 0, len(workflows))
-	for _, workflow := range workflows {
-		if !workflow.OnMetadataEdit {
-			code = append(code, workflow)
-		}
-	}
-	if len(code) > 0 {
-		status = pipeline.PipelineStatus(code)
-		// Terminal-never-pending: a cancel sets a terminal pipeline status but
-		// leaves the still-running workflows untouched (they finish on the agent's
-		// stop signal — cancel.go), so the filtered aggregate can be StatusRunning
-		// (→ pending) while the pipeline is already StatusKilled. The required
-		// check must reflect the terminal pipeline verdict, never a stale pending
-		// that could strand the merge gate if the agent never reports Done.
-		status = reconcileTerminalStatus(status, p.Status)
-	}
+	status := codeStatus(p, workflows)
 
 	// Decouple from the caller's (agent gRPC) deadline and bound the report on
 	// its own budget: the aggregate status is the required branch-protection
@@ -79,10 +66,11 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 	}
 
 	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
+		state := attemptStatus(ctx, p, status, codeStatus)
 		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
 			Context:     github.Ptr(common.GetPipelineAggregateStatusContext(repo, p)),
-			State:       github.Ptr(convertStatus(status)),
-			Description: github.Ptr(common.GetPipelineStatusDescription(status)),
+			State:       github.Ptr(convertStatus(state)),
+			Description: github.Ptr(common.GetPipelineStatusDescription(state)),
 			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, p, nil)),
 		})
 		return resp, e
@@ -101,26 +89,11 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 // It no-ops (posts nothing) when none of the pipeline's workflows are meta
 // gates, so a pipeline that carries no meta gate never touches the context.
 func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.Repo, p *model.Pipeline, workflows []*model.Workflow) error {
-	// Filter to the meta gates: workflows whose `when` listens on the
-	// pull_request_metadata event, persisted at build time. Matching nothing
-	// means this pipeline carries no meta gate, so there is nothing to report.
-	matched := make([]*model.Workflow, 0, len(workflows))
-	for _, workflow := range workflows {
-		if workflow.OnMetadataEdit {
-			matched = append(matched, workflow)
-		}
-	}
-	if len(matched) == 0 {
+	// Matching no meta gate means this pipeline has nothing to report.
+	if !slices.ContainsFunc(workflows, func(w *model.Workflow) bool { return w.OnMetadataEdit }) {
 		return nil
 	}
-
-	// Roll up ONLY the matched workflows, reusing the same state-merge the code
-	// aggregate uses over its full set. This is the meta verdict. Reconcile
-	// against the terminal pipeline status for the same cancel-while-running
-	// reason as StatusAggregate: a canceled pipeline can leave a meta gate
-	// StatusRunning (→ pending) while p.Status is already terminal, and this is a
-	// required check that must never strand pending.
-	metaStatus := reconcileTerminalStatus(pipeline.PipelineStatus(matched), p.Status)
+	metaStatus := metaGateStatus(p, workflows)
 
 	// Decouple from the caller's (agent gRPC) deadline and bound the report on
 	// its own budget, exactly like StatusAggregate: the meta status is a required
@@ -135,10 +108,11 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 	}
 
 	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
+		state := attemptStatus(ctx, p, metaStatus, metaGateStatus)
 		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
 			Context:     github.Ptr(common.GetPipelineMetaStatusContext(repo, p)),
-			State:       github.Ptr(convertStatus(metaStatus)),
-			Description: github.Ptr(common.GetPipelineStatusDescription(metaStatus)),
+			State:       github.Ptr(convertStatus(state)),
+			Description: github.Ptr(common.GetPipelineStatusDescription(state)),
 			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, p, nil)),
 		})
 		return resp, e
@@ -161,4 +135,58 @@ func reconcileTerminalStatus(rolled, pipelineStatus model.StatusValue) model.Sta
 		return rolled
 	}
 	return pipelineStatus
+}
+
+// codeStatus rolls up the code (non-meta) workflows. With none it falls back to
+// the pipeline status: a config-errored pipeline persists no tree, and rolling up
+// an empty set would post a vacuous success.
+func codeStatus(p *model.Pipeline, workflows []*model.Workflow) model.StatusValue {
+	code := make([]*model.Workflow, 0, len(workflows))
+	for _, workflow := range workflows {
+		if !workflow.OnMetadataEdit {
+			code = append(code, workflow)
+		}
+	}
+	if len(code) == 0 {
+		return p.Status
+	}
+	return reconcileTerminalStatus(pipeline.PipelineStatus(code), p.Status)
+}
+
+// metaGateStatus rolls up only the meta-gate workflows.
+func metaGateStatus(p *model.Pipeline, workflows []*model.Workflow) model.StatusValue {
+	matched := make([]*model.Workflow, 0, len(workflows))
+	for _, workflow := range workflows {
+		if workflow.OnMetadataEdit {
+			matched = append(matched, workflow)
+		}
+	}
+	return reconcileTerminalStatus(pipeline.PipelineStatus(matched), p.Status)
+}
+
+// attemptStatus re-reads the pipeline before each write attempt. Reports run
+// unordered and may sit in backoff, so a pending verdict from an older snapshot
+// is recomputed from the stored tree once the pipeline has finished.
+func attemptStatus(ctx context.Context, p *model.Pipeline, status model.StatusValue,
+	rollup func(*model.Pipeline, []*model.Workflow) model.StatusValue,
+) model.StatusValue {
+	if model.IsTerminalStatus(status) {
+		return status
+	}
+	s, ok := store.TryFromContext(ctx)
+	if !ok || p.ID == 0 {
+		return status
+	}
+	stored, err := s.GetPipeline(p.ID)
+	if err == nil && model.IsTerminalStatus(stored.Status) {
+		var tree []*model.Workflow
+		if tree, err = s.WorkflowGetTree(stored); err == nil {
+			return rollup(stored, tree)
+		}
+	}
+	if err != nil {
+		// The snapshot verdict is still a valid report; only the freshness check is lost.
+		log.Warn().Err(err).Int64("pipeline", p.ID).Msg("cannot re-read pipeline before status write; posting snapshot verdict")
+	}
+	return status
 }

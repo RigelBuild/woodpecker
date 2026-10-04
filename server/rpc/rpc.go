@@ -58,11 +58,6 @@ type RPC struct {
 	// reportWG, when non-nil, tracks in-flight background forge reports so tests
 	// can await them deterministically. Nil in production (fire-and-forget).
 	reportWG *sync.WaitGroup
-	// reports counts in-flight forge reports per pipeline, so a terminal report can
-	// re-post after an older, slower one that would otherwise land last. Nil disables it.
-	reports *inflightReports
-	// postStatus overrides updateForgeStatus in tests.
-	postStatus func(ctx context.Context, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow)
 }
 
 // Next blocks until it provides the next workflow to execute.
@@ -603,6 +598,9 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 	}
 
 	forge.Refresh(ctx, _forge, s.store, user)
+	// Forge writers re-read the pipeline per attempt so a stale report cannot
+	// post pending over a terminal verdict.
+	ctx = store.InjectToContext(ctx, s.store)
 
 	// only do status updates for parent steps; per-workflow reporting is opt-out
 	// (StatusPerWorkflow, default on) — off, only the aggregate below is posted,
@@ -648,7 +646,6 @@ func (s *RPC) reportForgeStatusAsync(ctx context.Context, repo *model.Repo, pipe
 	if s.reportWG != nil {
 		s.reportWG.Add(1)
 	}
-	s.reports.start(pipelineCopy.ID)
 	detached := context.WithoutCancel(ctx)
 	go func() {
 		if s.reportWG != nil {
@@ -656,84 +653,8 @@ func (s *RPC) reportForgeStatusAsync(ctx context.Context, repo *model.Repo, pipe
 		}
 		ctx, cancel := context.WithTimeout(detached, forgeReportTimeout)
 		defer cancel()
-		p := s.freshestPipeline(&pipelineCopy)
-		s.post(ctx, repo, p, workflowCopy)
-
-		older := s.reports.finish(pipelineCopy.ID)
-		if older == nil || !model.IsTerminalStatus(p.Status) {
-			return
-		}
-		// An older report may still land a stale pending after ours; once every one
-		// has returned (each is bounded by forgeReportTimeout), post the verdict again.
-		<-older
-		reassert, cancelReassert := context.WithTimeout(detached, forgeReportTimeout)
-		defer cancelReassert()
-		s.post(reassert, repo, p, nil)
+		s.updateForgeStatus(ctx, repo, &pipelineCopy, workflowCopy)
 	}()
-}
-
-func (s *RPC) post(ctx context.Context, repo *model.Repo, p *model.Pipeline, workflow *model.Workflow) {
-	if s.postStatus != nil {
-		s.postStatus(ctx, repo, p, workflow)
-		return
-	}
-	s.updateForgeStatus(ctx, repo, p, workflow)
-}
-
-// freshestPipeline returns the stored pipeline once it is terminal, so a report
-// snapshotted mid-run never posts a non-terminal state for a finished pipeline.
-func (s *RPC) freshestPipeline(snapshot *model.Pipeline) *model.Pipeline {
-	if model.IsTerminalStatus(snapshot.Status) {
-		return snapshot
-	}
-	stored, err := s.store.GetPipeline(snapshot.ID)
-	if err != nil || !model.IsTerminalStatus(stored.Status) {
-		return snapshot
-	}
-	stored.Workflows = snapshot.Workflows
-	return stored
-}
-
-// inflightReports counts background forge reports per pipeline ID.
-type inflightReports struct {
-	mu      sync.Mutex
-	count   map[int64]int
-	drained map[int64]chan struct{}
-}
-
-func newInflightReports() *inflightReports {
-	return &inflightReports{count: map[int64]int{}, drained: map[int64]chan struct{}{}}
-}
-
-func (r *inflightReports) start(pipelineID int64) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.count[pipelineID] == 0 {
-		r.drained[pipelineID] = make(chan struct{})
-	}
-	r.count[pipelineID]++
-}
-
-// finish ends one report. It returns nil when no other report for the pipeline
-// is in flight, else a channel closed once all of them have finished.
-func (r *inflightReports) finish(pipelineID int64) <-chan struct{} {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.count[pipelineID]--
-	drained := r.drained[pipelineID]
-	if r.count[pipelineID] > 0 {
-		return drained
-	}
-	delete(r.count, pipelineID)
-	delete(r.drained, pipelineID)
-	close(drained)
-	return nil
 }
 
 func (s *RPC) getAgentFromContext(ctx context.Context) (*model.Agent, error) {

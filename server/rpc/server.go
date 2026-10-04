@@ -62,7 +62,6 @@ func NewWoodpeckerServer(scheduler scheduler.Scheduler, logger logging.Log, stor
 		logger:        logger,
 		pipelineTime:  pipelineTime,
 		pipelineCount: pipelineCount,
-		reports:       newInflightReports(),
 	}
 	return &WoodpeckerServer{peer: peer}
 }
