@@ -65,19 +65,7 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 		return err
 	}
 
-	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
-		state, err := attemptStatus(ctx, status, codeStatus)
-		if err != nil {
-			return nil, err
-		}
-		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
-			Context:     github.Ptr(common.GetPipelineAggregateStatusContext(repo, p)),
-			State:       github.Ptr(convertStatus(state)),
-			Description: github.Ptr(common.GetPipelineStatusDescription(state)),
-			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, p, nil)),
-		})
-		return resp, e
-	})
+	_, err = c.postAggregate(ctx, client, repo, p, common.GetPipelineAggregateStatusContext(repo, p), status, codeStatus)
 	return ignoreSkip(err)
 }
 
@@ -110,19 +98,7 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 		return err
 	}
 
-	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
-		state, err := attemptStatus(ctx, metaStatus, metaGateStatus)
-		if err != nil {
-			return nil, err
-		}
-		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
-			Context:     github.Ptr(common.GetPipelineMetaStatusContext(repo, p)),
-			State:       github.Ptr(convertStatus(state)),
-			Description: github.Ptr(common.GetPipelineStatusDescription(state)),
-			TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, p, nil)),
-		})
-		return resp, e
-	})
+	_, err = c.postAggregate(ctx, client, repo, p, common.GetPipelineMetaStatusContext(repo, p), metaStatus, metaGateStatus)
 	return ignoreSkip(err)
 }
 
@@ -174,10 +150,35 @@ func metaGateStatus(p *model.Pipeline, workflows []*model.Workflow) model.Status
 var errSupersededReport = errors.New("a later pipeline owns this status context")
 
 func ignoreSkip(err error) error {
-	if errors.Is(err, errSupersededReport) {
+	if errors.Is(err, errSupersededReport) || errors.Is(err, errUnchangedStatus) {
 		return nil
 	}
 	return err
+}
+
+// postAggregate writes one aggregate context with retries, skipping a write
+// that would repeat the state this server last delivered for it.
+func (c *client) postAggregate(ctx context.Context, client *github.Client, repo *model.Repo, p *model.Pipeline,
+	statusContext string, status model.StatusValue, rollup func(*model.Pipeline, []*model.Workflow) model.StatusValue,
+) (*github.Response, error) {
+	key := deliveredStatusKey(repo.Owner, repo.Name, p.Commit, statusContext)
+	return doForgeWrite(ctx, func() (*github.Response, error) {
+		return c.delivered.post(ctx, key, func() (github.RepoStatus, error) {
+			state, err := attemptStatus(ctx, status, rollup)
+			if err != nil {
+				return github.RepoStatus{}, err
+			}
+			return github.RepoStatus{
+				Context:     github.Ptr(statusContext),
+				State:       github.Ptr(convertStatus(state)),
+				Description: github.Ptr(common.GetPipelineStatusDescription(state)),
+				TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, p, nil)),
+			}, nil
+		}, func(s github.RepoStatus) (*github.Response, error) {
+			_, resp, err := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, s)
+			return resp, err
+		})
+	})
 }
 
 // attemptStatus re-checks the report before each write attempt. Reports run
