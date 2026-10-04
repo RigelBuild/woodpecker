@@ -30,6 +30,10 @@ func TestSupersedes(t *testing.T) {
 		return &model.Pipeline{ID: id, Number: number, Commit: commit, Event: model.EventPush, Branch: branch}
 	}
 	other := pr(2, 2, "bbb")
+	restart := pr(3, 3, "aaa")
+	restart.Parent = 1
+	staleRestart := pr(1, 1, "aaa")
+	staleRestart.Parent = 1
 	other.Refspec = "other:main"
 
 	tests := []struct {
@@ -41,6 +45,8 @@ func TestSupersedes(t *testing.T) {
 		{"older pipeline never cancels a newer one", pr(1, 1, "aaa"), pr(2, 2, "bbb"), false},
 		{"two pipelines for one commit both run", pr(2, 2, "aaa"), pr(1, 1, "aaa"), false},
 		{"the reverse pair also leaves both running", pr(1, 1, "aaa"), pr(2, 2, "aaa"), false},
+		{"a restart cancels the older run of its commit", restart, pr(1, 1, "aaa"), true},
+		{"an older restart never cancels a newer run", staleRestart, pr(2, 2, "aaa"), false},
 		{"itself", pr(1, 1, "aaa"), pr(1, 1, "aaa"), false},
 		{"a different PR", other, pr(1, 1, "aaa"), false},
 		{"a different event", pr(2, 2, "bbb"), push(1, 1, "aaa", "main"), false},

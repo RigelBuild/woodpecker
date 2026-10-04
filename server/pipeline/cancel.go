@@ -133,11 +133,13 @@ func cancelPreviousPipelines(
 }
 
 // supersedes reports whether pipeline should cancel active. Only an older
-// pipeline for a different commit is canceled: two pipelines created for one
-// push would otherwise each cancel the other, and neither would run.
+// pipeline is canceled, and on the same commit only by a restart: two pipelines
+// created for one push would otherwise each cancel the other.
 func supersedes(pipeline, active *model.Pipeline) bool {
-	if active.ID == pipeline.ID || active.Event != pipeline.Event ||
-		active.Number >= pipeline.Number || active.Commit == pipeline.Commit {
+	if active.ID == pipeline.ID || active.Event != pipeline.Event || active.Number >= pipeline.Number {
+		return false
+	}
+	if active.Commit == pipeline.Commit && pipeline.Parent == 0 {
 		return false
 	}
 	if pipeline.Event == model.EventPush {
