@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog/log"
 )
@@ -28,6 +29,9 @@ import (
 const (
 	initialEnvMapSize = 100
 	maxChangedFiles   = 500
+	// Every step gets the body in its env: stay well under the 128 KiB
+	// per-string exec limit and keep the workflow RPC small.
+	maxPullRequestBodyBytes = 64 << 10
 )
 
 var pullRegexp = regexp.MustCompile(`\d+`)
@@ -117,6 +121,8 @@ func (m *Metadata) Environ() map[string]string {
 		setNonEmptyEnvVar(params, "CI_COMMIT_PULL_REQUEST", pullRegexp.FindString(pipeline.Commit.Ref))
 		setNonEmptyEnvVar(params, "CI_COMMIT_PULL_REQUEST_LABELS", strings.Join(pipeline.Commit.PullRequestLabels, ","))
 		setNonEmptyEnvVar(params, "CI_COMMIT_PULL_REQUEST_MILESTONE", pipeline.Commit.PullRequestMilestone)
+		// The gates treat an unset variable as an old server.
+		params["CI_COMMIT_PULL_REQUEST_BODY"] = truncateUTF8(pipeline.Commit.PullRequestBody, maxPullRequestBodyBytes)
 		setNonEmptyEnvVar(params, "CI_COMMIT_PULL_REQUEST_DRAFT", strconv.FormatBool(pipeline.Commit.PullRequestDraft))
 	}
 
@@ -201,4 +207,15 @@ func setNonEmptyEnvVar(env map[string]string, key, value string) {
 	} else {
 		log.Trace().Str("variable", key).Msg("env var is filtered as it's empty")
 	}
+}
+
+// truncateUTF8 returns at most limit bytes of s, cut on a rune boundary.
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
 }
