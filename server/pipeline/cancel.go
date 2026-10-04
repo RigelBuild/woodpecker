@@ -114,33 +114,10 @@ func cancelPreviousPipelines(
 		return err
 	}
 
-	pipelineNeedsCancel := func(active *model.Pipeline) bool {
-		// always filter on same event
-		if active.Event != pipeline.Event {
-			return false
-		}
-
-		// find events for the same context
-		switch pipeline.Event {
-		case model.EventPush:
-			return pipeline.Branch == active.Branch
-		default:
-			return pipeline.Refspec == active.Refspec
-		}
-	}
-
 	for _, active := range activeBuilds {
-		if active.ID == pipeline.ID {
-			// same pipeline. e.g. self
+		if !supersedes(pipeline, active) {
 			continue
 		}
-
-		cancel := pipelineNeedsCancel(active)
-
-		if !cancel {
-			continue
-		}
-
 		if err = Cancel(ctx, _forge, _store, repo, user, active, &model.CancelInfo{
 			SupersededBy: pipeline.Number,
 		}); err != nil {
@@ -153,4 +130,18 @@ func cancelPreviousPipelines(
 	}
 
 	return nil
+}
+
+// supersedes reports whether pipeline should cancel active. Only an older
+// pipeline for a different commit is canceled: two pipelines created for one
+// push would otherwise each cancel the other, and neither would run.
+func supersedes(pipeline, active *model.Pipeline) bool {
+	if active.ID == pipeline.ID || active.Event != pipeline.Event ||
+		active.Number >= pipeline.Number || active.Commit == pipeline.Commit {
+		return false
+	}
+	if pipeline.Event == model.EventPush {
+		return pipeline.Branch == active.Branch
+	}
+	return pipeline.Refspec == active.Refspec
 }
