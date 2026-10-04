@@ -15,84 +15,186 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-github/v90/github"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
-func TestStatusAggregateSkipsRepeatedState(t *testing.T) {
+// recordStates returns a handler that records each posted state and the
+// number of POSTs to fail with 502 before succeeding.
+func recordStates(states *[]string, failFirst int32) http.HandlerFunc {
 	var mu sync.Mutex
-	var states []string
-	c, ctx, repo, user, p := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+	var calls atomic.Int32
+	return func(w http.ResponseWriter, r *http.Request) {
 		var s github.RepoStatus
 		_ = json.NewDecoder(r.Body).Decode(&s)
 		mu.Lock()
-		states = append(states, s.GetState())
+		*states = append(*states, s.GetState())
 		mu.Unlock()
+		if calls.Add(1) <= failFirst {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
-	})
+	}
+}
+
+var (
+	runningTree = []*model.Workflow{{Name: "a", State: model.StatusRunning}, {Name: "b", State: model.StatusPending}}
+	successTree = []*model.Workflow{{Name: "a", State: model.StatusSuccess}, {Name: "b", State: model.StatusSuccess}}
+)
+
+func TestStatusAggregateSkipsRepeatedPending(t *testing.T) {
+	var states []string
+	c, ctx, repo, user, p := statusAggregateFixture(t, recordStates(&states, 0))
 	c.delivered = newStatusDedupe()
 	p.Status = model.StatusRunning
-	running := []*model.Workflow{{Name: "a", State: model.StatusRunning}, {Name: "b", State: model.StatusPending}}
 
-	// Every workflow transition re-reports; only the rolled-up change is posted.
+	// Every workflow transition re-reports; repeated pending is posted once.
 	for range 5 {
-		require.NoError(t, c.StatusAggregate(ctx, user, repo, p, running))
+		require.NoError(t, c.StatusAggregate(ctx, user, repo, p, runningTree))
 	}
+	// Terminal states always post, so a check another writer changed heals.
 	p.Status = model.StatusSuccess
-	done := []*model.Workflow{{Name: "a", State: model.StatusSuccess}, {Name: "b", State: model.StatusSuccess}}
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, done))
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, done))
+	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, successTree))
+	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, successTree))
 
-	assert.Equal(t, []string{statusPending, statusSuccess}, states)
+	assert.Equal(t, []string{statusPending, statusSuccess, statusSuccess}, states)
 }
 
 func TestStatusAggregateRepostsAfterFailedWrite(t *testing.T) {
+	// First report succeeds; every attempt of the second fails (GitHub may
+	// still have applied it); the third repeats the first and must post.
 	var calls atomic.Int32
 	c, ctx, repo, user, p := statusAggregateFixture(t, func(w http.ResponseWriter, _ *http.Request) {
-		// Every POST of the first report fails; later ones succeed.
-		if calls.Add(1) <= forgeWriteMaxAttempts {
+		if n := calls.Add(1); n >= 2 && n <= 1+forgeWriteMaxAttempts {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
 	})
 	c.delivered = newStatusDedupe()
-	wf := []*model.Workflow{{Name: "a", State: model.StatusSuccess}}
+	p.Status = model.StatusRunning
+	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, runningTree))
+	failing := *p
+	failing.Number++
+	require.Error(t, c.StatusAggregate(ctx, user, repo, &failing, runningTree))
+	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, runningTree))
 
-	require.Error(t, c.StatusAggregate(ctx, user, repo, p, wf))
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, wf))
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, wf))
-
-	assert.Equal(t, int32(forgeWriteMaxAttempts+1), calls.Load(),
-		"a failed write must not be remembered; the next report posts once, the one after is skipped")
+	assert.Equal(t, int32(2+forgeWriteMaxAttempts), calls.Load(),
+		"a failed write must clear the remembered state so the repeat posts")
 }
 
-func TestStatusAggregateKeysByPipeline(t *testing.T) {
-	var calls atomic.Int32
-	c, ctx, repo, user, p := statusAggregateFixture(t, func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusCreated)
-	})
+func TestStatusAggregateKeysByCommitAndPipeline(t *testing.T) {
+	var states []string
+	c, ctx, repo, user, p := statusAggregateFixture(t, recordStates(&states, 0))
 	c.delivered = newStatusDedupe()
-	wf := []*model.Workflow{{Name: "a", State: model.StatusSuccess}}
+	p.Status = model.StatusRunning
 
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, wf))
+	require.NoError(t, c.StatusAggregate(ctx, user, repo, p, runningTree))
 	other := *p
 	other.Commit = "def456"
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, &other, wf))
+	require.NoError(t, c.StatusAggregate(ctx, user, repo, &other, runningTree))
 	// A restart on the same commit links a new pipeline, so it must post.
 	restarted := *p
 	restarted.Number++
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, &restarted, wf))
+	require.NoError(t, c.StatusAggregate(ctx, user, repo, &restarted, runningTree))
 
-	assert.Equal(t, int32(3), calls.Load())
+	assert.Len(t, states, 3)
+}
+
+func TestStatusMetaSkipsRepeatedPending(t *testing.T) {
+	var states []string
+	c, ctx, repo, user, p := statusAggregateFixture(t, recordStates(&states, 0))
+	orig := server.Config.Server.StatusMetaContext
+	server.Config.Server.StatusMetaContext = "{{ .context }} (meta)"
+	t.Cleanup(func() { server.Config.Server.StatusMetaContext = orig })
+	c.delivered = newStatusDedupe()
+	p.Status = model.StatusRunning
+	meta := []*model.Workflow{{Name: "m", State: model.StatusRunning, OnMetadataEdit: true}}
+
+	require.NoError(t, c.StatusMeta(ctx, user, repo, p, meta))
+	require.NoError(t, c.StatusMeta(ctx, user, repo, p, meta))
+	// A metadata pipeline on the same commit has its own URL, so it posts.
+	edit := *p
+	edit.Number++
+	require.NoError(t, c.StatusMeta(ctx, user, repo, &edit, meta))
+
+	assert.Equal(t, []string{statusPending, statusPending}, states)
+}
+
+func TestStatusDedupeSharedAcrossForgeRebuilds(t *testing.T) {
+	a, err := New(1, Opts{URL: "https://ghe.dedupe.test"})
+	require.NoError(t, err)
+	b, err := New(1, Opts{URL: "https://ghe.dedupe.test"})
+	require.NoError(t, err)
+	assert.Same(t, a.(*client).delivered, b.(*client).delivered) //nolint:forcetypeassert
+}
+
+func TestStatusDedupeSerializesOneKey(t *testing.T) {
+	d := newStatusDedupe()
+	ctx := context.Background()
+	inSend := make(chan struct{})
+	release := make(chan struct{})
+	var secondBuilt atomic.Bool
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = d.post(ctx, "k", func() (github.RepoStatus, error) {
+			return github.RepoStatus{State: github.Ptr(statusPending)}, nil
+		}, func(github.RepoStatus) (*github.Response, error) {
+			close(inSend)
+			<-release
+			return nil, nil
+		})
+	}()
+	<-inSend
+
+	second := make(chan struct{})
+	go func() {
+		defer close(second)
+		_, _ = d.post(ctx, "k", func() (github.RepoStatus, error) {
+			secondBuilt.Store(true)
+			return github.RepoStatus{State: github.Ptr(statusSuccess)}, nil
+		}, func(github.RepoStatus) (*github.Response, error) { return nil, nil })
+	}()
+	// Another key is not blocked by the held one.
+	_, err := d.post(ctx, "other", func() (github.RepoStatus, error) {
+		return github.RepoStatus{State: github.Ptr(statusPending)}, nil
+	}, func(github.RepoStatus) (*github.Response, error) { return nil, nil })
+	require.NoError(t, err)
+	assert.False(t, secondBuilt.Load(), "a second report for the key must wait for the first send")
+
+	close(release)
+	<-done
+	<-second
+	assert.True(t, secondBuilt.Load())
+	assert.Empty(t, d.locks, "released key locks must be dropped")
+}
+
+func TestStatusDedupeLockHonorsContext(t *testing.T) {
+	d := newStatusDedupe()
+	unlock, err := d.lock(context.Background(), "k")
+	require.NoError(t, err)
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = d.post(ctx, "k", func() (github.RepoStatus, error) {
+		t.Fatal("build must not run without the lock")
+		return github.RepoStatus{}, nil
+	}, nil)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }

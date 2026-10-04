@@ -84,12 +84,12 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		MergeRef:   opts.MergeRef,
 		OnlyPublic: opts.OnlyPublic,
 		appID:      opts.AppID,
-		delivered:  newStatusDedupe(),
 	}
 	if opts.URL != defaultURL {
 		r.url = strings.TrimSuffix(opts.URL, "/")
 		r.API = r.url + "/api/v3/"
 	}
+	r.delivered = statusDedupeFor(r.API)
 
 	if opts.AppPrivateKey != "" {
 		key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(opts.AppPrivateKey))

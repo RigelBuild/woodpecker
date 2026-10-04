@@ -163,7 +163,7 @@ func (c *client) postAggregate(ctx context.Context, client *github.Client, repo 
 ) (*github.Response, error) {
 	key := deliveredStatusKey(repo.Owner, repo.Name, p.Commit, statusContext)
 	return doForgeWrite(ctx, func() (*github.Response, error) {
-		return c.delivered.post(key, func() (github.RepoStatus, error) {
+		return c.delivered.post(ctx, key, func() (github.RepoStatus, error) {
 			state, err := attemptStatus(ctx, status, rollup)
 			if err != nil {
 				return github.RepoStatus{}, err
