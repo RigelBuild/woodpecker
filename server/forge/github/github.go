@@ -84,6 +84,7 @@ func New(id int64, opts Opts) (forge.Forge, error) {
 		MergeRef:   opts.MergeRef,
 		OnlyPublic: opts.OnlyPublic,
 		appID:      opts.AppID,
+		delivered:  newStatusDedupe(),
 	}
 	if opts.URL != defaultURL {
 		r.url = strings.TrimSuffix(opts.URL, "/")
@@ -117,6 +118,7 @@ type client struct {
 	appTokenMu sync.Mutex
 	checkRuns  map[string]checkRunRef
 	checkRunMu sync.Mutex
+	delivered  *statusDedupe
 }
 
 // Name returns the string name of this driver.
