@@ -83,6 +83,11 @@ func forgeRetryWait(err error, backoff time.Duration) (wait time.Duration, retri
 		}
 		return backoff, true
 	}
+	// Store reads before a write: plain backoff.
+	var refreshErr *refreshError
+	if errors.As(err, &refreshErr) {
+		return backoff, true
+	}
 	// Transient server-side failures: plain backoff.
 	var resp *github.ErrorResponse
 	if errors.As(err, &resp) && resp.Response != nil && resp.Response.StatusCode >= 500 {
