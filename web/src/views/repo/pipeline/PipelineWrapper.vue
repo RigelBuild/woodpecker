@@ -78,7 +78,7 @@
           <Icon name="duration" />
           <span>{{ duration }}</span>
         </div>
-        <div v-if="pipeline.status === 'killed' && pipeline.cancel_info" class="flex shrink-0 items-center gap-2">
+        <div v-if="hasCancelInfo(pipeline)" class="flex shrink-0 items-center gap-2">
           <Icon name="status-killed" />
           <span class="truncate">
             <router-link
@@ -149,7 +149,7 @@ import useNotifications from '~/compositions/useNotifications';
 import usePipeline from '~/compositions/usePipeline';
 import { useRouteBack } from '~/compositions/useRouteBack';
 import type { Pipeline, PipelineConfig } from '~/lib/api/types';
-import { pipelineHasErrorsToShow, workflowsWithErrors } from '~/lib/pipeline';
+import { hasCancelInfo, pipelineHasErrorsToShow, workflowsWithErrors } from '~/lib/pipeline';
 import { usePipelineStore } from '~/store/pipelines';
 
 const props = defineProps<{
