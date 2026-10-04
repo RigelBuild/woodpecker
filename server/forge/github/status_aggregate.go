@@ -16,6 +16,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"slices"
 
 	"github.com/google/go-github/v90/github"
@@ -65,7 +66,10 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 	}
 
 	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
-		state := attemptStatus(ctx, status, codeStatus)
+		state, err := attemptStatus(ctx, status, codeStatus)
+		if err != nil {
+			return nil, err
+		}
 		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
 			Context:     github.Ptr(common.GetPipelineAggregateStatusContext(repo, p)),
 			State:       github.Ptr(convertStatus(state)),
@@ -74,7 +78,7 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 		})
 		return resp, e
 	})
-	return err
+	return ignoreSkip(err)
 }
 
 // StatusMeta reports a SECOND, selective aggregate status that rolls up ONLY the
@@ -107,7 +111,10 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 	}
 
 	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
-		state := attemptStatus(ctx, metaStatus, metaGateStatus)
+		state, err := attemptStatus(ctx, metaStatus, metaGateStatus)
+		if err != nil {
+			return nil, err
+		}
 		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
 			Context:     github.Ptr(common.GetPipelineMetaStatusContext(repo, p)),
 			State:       github.Ptr(convertStatus(state)),
@@ -116,7 +123,7 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 		})
 		return resp, e
 	})
-	return err
+	return ignoreSkip(err)
 }
 
 // reconcileTerminalStatus keeps a required commit status from posting a
@@ -163,18 +170,42 @@ func metaGateStatus(p *model.Pipeline, workflows []*model.Workflow) model.Status
 	return reconcileTerminalStatus(pipeline.PipelineStatus(matched), p.Status)
 }
 
-// attemptStatus re-reads the pipeline before each write attempt. Reports run
-// unordered and may sit in backoff, so a pending verdict from an older snapshot
-// is recomputed once the pipeline has finished.
+// errSupersededReport stops a write when a later pipeline owns the context.
+var errSupersededReport = errors.New("a later pipeline owns this status context")
+
+func ignoreSkip(err error) error {
+	if errors.Is(err, errSupersededReport) {
+		return nil
+	}
+	return err
+}
+
+// attemptStatus re-checks the report before each write attempt. Reports run
+// unordered and may sit in backoff: a superseded report posts nothing, and a
+// pending verdict is recomputed once the pipeline has finished. If current
+// state cannot be read, nothing is posted rather than a possibly stale pending.
 func attemptStatus(ctx context.Context, status model.StatusValue,
 	rollup func(*model.Pipeline, []*model.Workflow) model.StatusValue,
-) model.StatusValue {
+) (model.StatusValue, error) {
 	refresh := forge.RefresherFromContext(ctx)
-	if model.IsTerminalStatus(status) || refresh == nil {
-		return status
+	if refresh == nil {
+		return status, nil
 	}
-	if stored, tree, ok := refresh(); ok {
-		return rollup(stored, tree)
+	stored, tree, skip, err := refresh(model.IsTerminalStatus(status))
+	switch {
+	case err != nil:
+		return "", &refreshError{err}
+	case skip:
+		return "", errSupersededReport
+	case stored != nil:
+		return rollup(stored, tree), nil
 	}
-	return status
+	return status, nil
 }
+
+// refreshError marks a store read failure before a write; doForgeWrite retries
+// it with backoff like a transient forge failure.
+type refreshError struct{ err error }
+
+func (e *refreshError) Error() string { return e.err.Error() }
+func (e *refreshError) Unwrap() error { return e.err }

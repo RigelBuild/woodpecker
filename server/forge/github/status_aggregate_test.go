@@ -606,28 +606,42 @@ func TestReportAggregateRefreshOnPushUsesPipelineStatus(t *testing.T) {
 	assert.Equal(t, []string{statusFailure}, *states)
 }
 
-// A refresh that fails to read the store, or finds the pipeline still running,
-// keeps the snapshot verdict.
-func TestReportAggregateRefreshKeepsSnapshotWhenNotTerminal(t *testing.T) {
-	for name, stored := range map[string]func(*store_mocks.MockStore){
-		"store error": func(s *store_mocks.MockStore) {
-			s.On("GetPipeline", int64(20)).Return(nil, errors.New("db down"))
-		},
-		"still running": func(s *store_mocks.MockStore) {
-			s.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, Event: model.EventPush, Status: model.StatusRunning}, nil)
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			states, h := postedStates(0)
-			c, ctx, repo, user, p := statusAggregateFixture(t, h)
-			p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
-			s := store_mocks.NewMockStore(t)
-			stored(s)
+// A refresh that finds the pipeline still running keeps the pending snapshot.
+func TestReportAggregateRefreshKeepsSnapshotWhileRunning(t *testing.T) {
+	states, h := postedStates(0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, h)
+	p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, Event: model.EventPush, Status: model.StatusRunning}, nil)
 
-			require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
-			assert.Equal(t, []string{statusPending}, *states)
-		})
-	}
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusPending}, *states)
+}
+
+// A store read failure must not post the pending snapshot: the pipeline may
+// have finished. The refresh retries, and posts nothing if the store stays down.
+func TestReportAggregateRefreshErrorPostsNoStalePending(t *testing.T) {
+	t.Run("recovers", func(t *testing.T) {
+		states, h := postedStates(0)
+		c, ctx, repo, user, p := statusAggregateFixture(t, h)
+		p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
+		s := store_mocks.NewMockStore(t)
+		s.On("GetPipeline", int64(20)).Return(nil, errors.New("db down")).Once()
+		s.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, Event: model.EventPush, Status: model.StatusSuccess}, nil).Once()
+
+		require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+		assert.Equal(t, []string{statusSuccess}, *states)
+	})
+	t.Run("stays down", func(t *testing.T) {
+		states, h := postedStates(0)
+		c, ctx, repo, user, p := statusAggregateFixture(t, h)
+		p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
+		s := store_mocks.NewMockStore(t)
+		s.On("GetPipeline", int64(20)).Return(nil, errors.New("db down"))
+
+		require.Error(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+		assert.Empty(t, *states)
+	})
 }
 
 // The meta context gets the same per-attempt refresh.
@@ -647,8 +661,8 @@ func TestReportMetaRefreshPostsStoredTerminalVerdict(t *testing.T) {
 	assert.Equal(t, []string{statusFailure}, *states)
 }
 
-// A refresh must not promote a stale meta verdict once a later meta pipeline
-// for the commit exists: that pipeline owns CI (meta).
+// A later meta pipeline that appears after the wrapper's check owns CI (meta):
+// the older report posts nothing.
 func TestReportMetaRefreshDefersToLaterMetaPipeline(t *testing.T) {
 	states, h := postedStates(0)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
@@ -656,12 +670,31 @@ func TestReportMetaRefreshDefersToLaterMetaPipeline(t *testing.T) {
 	p.Workflows = []*model.Workflow{{Name: "spec-impact", State: model.StatusRunning, OnMetadataEdit: true}}
 	later := &model.Pipeline{ID: 21, Number: 2, Commit: p.Commit, Event: model.EventPullMetadata, Status: model.StatusFailure}
 	s := store_mocks.NewMockStore(t)
-	// First freshness check (before the write) sees no later pipeline; the
-	// title edit lands before the refresh runs.
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).Return([]*model.Pipeline{}, nil).Once()
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).Return([]*model.Pipeline{later}, nil).Once()
-	s.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, Number: 1, Commit: p.Commit, Event: model.EventPull, Status: model.StatusSuccess}, nil)
 
 	require.NoError(t, forge.ReportMetaStatus(ctx, c, s, user, repo, p))
-	assert.Equal(t, []string{statusPending}, *states)
+	assert.Empty(t, *states)
+}
+
+// A meta report whose snapshot is already terminal still re-checks freshness
+// before a retry: a later meta pipeline that appears during backoff owns
+// CI (meta), so the older green verdict must not be re-posted.
+func TestReportMetaTerminalRetryDefersToLaterMetaPipeline(t *testing.T) {
+	states, h := postedStates(1)
+	c, ctx, repo, user, p := statusAggregateFixture(t, h)
+	p.ID, p.Number, p.Status = 20, 1, model.StatusRunning
+	p.Workflows = []*model.Workflow{
+		{Name: "build", State: model.StatusRunning},
+		{Name: "spec-impact", State: model.StatusSuccess, OnMetadataEdit: true},
+	}
+	later := &model.Pipeline{ID: 21, Number: 2, Commit: p.Commit, Event: model.EventPullMetadata, Status: model.StatusFailure}
+	s := store_mocks.NewMockStore(t)
+	// Wrapper check and first attempt see no later pipeline; the edit lands
+	// during backoff after the failed POST.
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).Return([]*model.Pipeline{}, nil).Twice()
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).Return([]*model.Pipeline{later}, nil).Once()
+
+	require.NoError(t, forge.ReportMetaStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusSuccess}, *states, "only the failed first POST; the retry is dropped")
 }
