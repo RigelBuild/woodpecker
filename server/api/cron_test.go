@@ -377,6 +377,27 @@ func TestPatchCron(t *testing.T) {
 		assert.Equal(t, "@every 2h", got.Schedule)
 	})
 
+	t.Run("omitted enabled keeps a disabled cron disabled", func(t *testing.T) {
+		cron := seedCron(t, s, repo.ID, "paused")
+		cron.Enabled = false
+		require.NoError(t, s.CronUpdate(repo, cron))
+		cronForgeManager(t)
+
+		newName := "paused-renamed"
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+		withRepo(repo, &model.Perm{})(tc)
+		withParam("cron", strItoa(cron.ID))(tc)
+		withRequest(http.MethodPatch, &model.CronPatch{Name: &newName})(tc)
+
+		PatchCron(tc.Ctx)
+
+		require.Equal(t, http.StatusOK, tc.Recorder.Code)
+		stored, err := s.CronFind(repo, cron.ID)
+		require.NoError(t, err)
+		assert.False(t, stored.Enabled)
+	})
+
 	t.Run("invalid id returns bad request", func(t *testing.T) {
 		cronForgeManager(t)
 		tc := newTestContext(t, s)
