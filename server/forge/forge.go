@@ -24,6 +24,8 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/rs/zerolog/log"
+
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -224,6 +226,7 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 		}
 	}
 
+	ctx = context.WithValue(ctx, refresherKey{}, newRefresher(s, b, nil))
 	return reporter.StatusAggregate(ctx, u, r, b, workflows)
 }
 
@@ -287,6 +290,8 @@ func ReportMetaStatus(ctx context.Context, f Forge, s store.Store, u *model.User
 		}
 	}
 
+	later := func(stored *model.Pipeline) (bool, error) { return hasLaterMetaPipeline(s, r, stored) }
+	ctx = context.WithValue(ctx, refresherKey{}, newRefresher(s, b, later))
 	return reporter.StatusMeta(ctx, u, r, b, workflows)
 }
 
@@ -316,4 +321,52 @@ func hasLaterMetaPipeline(s store.Store, r *model.Repo, b *model.Pipeline) (bool
 		}
 	}
 	return false, nil
+}
+
+// PipelineRefresher re-reads a pipeline right before a status write attempt.
+// It returns the stored pipeline and the workflows to roll up (nil outside PR
+// events) once the pipeline is terminal, and ok=false when the reporter should
+// keep its snapshot verdict.
+type PipelineRefresher func() (stored *model.Pipeline, workflows []*model.Workflow, ok bool)
+
+type refresherKey struct{}
+
+// RefresherFromContext returns the refresher ReportAggregateStatus or
+// ReportMetaStatus attached for this report, if any.
+func RefresherFromContext(ctx context.Context) PipelineRefresher {
+	r, _ := ctx.Value(refresherKey{}).(PipelineRefresher) // a missing refresher is the nil zero value
+	return r
+}
+
+// newRefresher builds the per-attempt refresh for b. Event scope matches the
+// snapshot path; skip reports false when a later report owns the context.
+func newRefresher(s store.Store, b *model.Pipeline, skip func(*model.Pipeline) (bool, error)) PipelineRefresher {
+	return func() (*model.Pipeline, []*model.Workflow, bool) {
+		stored, err := s.GetPipeline(b.ID)
+		if err != nil {
+			log.Warn().Err(err).Int64("pipeline", b.ID).Msg("cannot re-read pipeline before status write; posting snapshot verdict")
+			return nil, nil, false
+		}
+		if !model.IsTerminalStatus(stored.Status) {
+			return nil, nil, false
+		}
+		if skip != nil {
+			later, err := skip(stored)
+			if err != nil || later {
+				if err != nil {
+					log.Warn().Err(err).Int64("pipeline", b.ID).Msg("cannot check for a later pipeline before status write; posting snapshot verdict")
+				}
+				return nil, nil, false
+			}
+		}
+		if stored.Event != model.EventPull && stored.Event != model.EventPullMetadata {
+			return stored, nil, true
+		}
+		tree, err := s.WorkflowGetTree(stored)
+		if err != nil {
+			log.Warn().Err(err).Int64("pipeline", b.ID).Msg("cannot re-read workflows before status write; posting snapshot verdict")
+			return nil, nil, false
+		}
+		return stored, tree, true
+	}
 }

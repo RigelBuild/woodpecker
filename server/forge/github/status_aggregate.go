@@ -19,12 +19,11 @@ import (
 	"slices"
 
 	"github.com/google/go-github/v90/github"
-	"github.com/rs/zerolog/log"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
-	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
 // StatusAggregate reports the pipeline's overall CODE state as a single commit
@@ -66,7 +65,7 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 	}
 
 	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
-		state := attemptStatus(ctx, p, status, codeStatus)
+		state := attemptStatus(ctx, status, codeStatus)
 		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
 			Context:     github.Ptr(common.GetPipelineAggregateStatusContext(repo, p)),
 			State:       github.Ptr(convertStatus(state)),
@@ -108,7 +107,7 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 	}
 
 	_, err = doForgeWrite(ctx, func() (*github.Response, error) {
-		state := attemptStatus(ctx, p, metaStatus, metaGateStatus)
+		state := attemptStatus(ctx, metaStatus, metaGateStatus)
 		_, resp, e := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, github.RepoStatus{
 			Context:     github.Ptr(common.GetPipelineMetaStatusContext(repo, p)),
 			State:       github.Ptr(convertStatus(state)),
@@ -166,27 +165,16 @@ func metaGateStatus(p *model.Pipeline, workflows []*model.Workflow) model.Status
 
 // attemptStatus re-reads the pipeline before each write attempt. Reports run
 // unordered and may sit in backoff, so a pending verdict from an older snapshot
-// is recomputed from the stored tree once the pipeline has finished.
-func attemptStatus(ctx context.Context, p *model.Pipeline, status model.StatusValue,
+// is recomputed once the pipeline has finished.
+func attemptStatus(ctx context.Context, status model.StatusValue,
 	rollup func(*model.Pipeline, []*model.Workflow) model.StatusValue,
 ) model.StatusValue {
-	if model.IsTerminalStatus(status) {
+	refresh := forge.RefresherFromContext(ctx)
+	if model.IsTerminalStatus(status) || refresh == nil {
 		return status
 	}
-	s, ok := store.TryFromContext(ctx)
-	if !ok || p.ID == 0 {
-		return status
-	}
-	stored, err := s.GetPipeline(p.ID)
-	if err == nil && model.IsTerminalStatus(stored.Status) {
-		var tree []*model.Workflow
-		if tree, err = s.WorkflowGetTree(stored); err == nil {
-			return rollup(stored, tree)
-		}
-	}
-	if err != nil {
-		// The snapshot verdict is still a valid report; only the freshness check is lost.
-		log.Warn().Err(err).Int64("pipeline", p.ID).Msg("cannot re-read pipeline before status write; posting snapshot verdict")
+	if stored, tree, ok := refresh(); ok {
+		return rollup(stored, tree)
 	}
 	return status
 }

@@ -598,9 +598,6 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 	}
 
 	forge.Refresh(ctx, _forge, s.store, user)
-	// Forge writers re-read the pipeline per attempt so a stale report cannot
-	// post pending over a terminal verdict.
-	ctx = store.InjectToContext(ctx, s.store)
 
 	// only do status updates for parent steps; per-workflow reporting is opt-out
 	// (StatusPerWorkflow, default on) — off, only the aggregate below is posted,
