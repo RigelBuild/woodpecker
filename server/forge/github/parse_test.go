@@ -97,7 +97,13 @@ func Test_parseHook(t *testing.T) {
 	})
 
 	t.Run("PR hook", func(t *testing.T) {
-		req := testHookRequest([]byte(fixtures.HookPullRequest), hookPull)
+		payload := strings.Replace(
+			fixtures.HookPullRequest,
+			`"title": "Update the README with new information",`,
+			`"title": "Update the README with new information",`+"\n    "+`"body": "Fixes #1",`,
+			1,
+		)
+		req := testHookRequest([]byte(payload), hookPull)
 		p, r, b, cc, pc, err := parseHook(req, false)
 		assert.Empty(t, pc)
 		assert.Empty(t, cc)
@@ -106,6 +112,7 @@ func Test_parseHook(t *testing.T) {
 		assert.NotNil(t, b)
 		assert.NotNil(t, p)
 		assert.Equal(t, model.EventPull, b.Event)
+		assert.Equal(t, "Fixes #1", b.PullRequestBody)
 		assert.False(t, b.PullRequestDraft)
 	})
 
