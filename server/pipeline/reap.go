@@ -43,6 +43,21 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 		}
 	}
 
+	persistedTasks, err := storage.TaskList()
+	if err != nil {
+		log.Error().Err(err).Msg("could not list persisted tasks for orphan reaper")
+		return fmt.Errorf("list persisted tasks for orphan reaper: %w", err)
+	}
+	for _, task := range persistedTasks {
+		queued[task.ID] = struct{}{}
+	}
+
+	type agentResult struct {
+		agent *model.Agent
+		err   error
+	}
+	agents := make(map[int64]agentResult)
+
 	for _, feed := range feeds {
 		if ctx.Err() != nil {
 			return nil
@@ -67,6 +82,12 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 		}
 
 		changed := false
+		pipelineEverStarted := false
+		for _, workflow := range workflows {
+			if workflow.Started != 0 {
+				pipelineEverStarted = true
+			}
+		}
 		for _, workflow := range workflows {
 			if !workflow.Running() {
 				continue
@@ -75,29 +96,44 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				continue
 			}
 
-			timeout := time.Hour
+			// A live agent enforces the real deadline; this is a backstop, so never
+			// reap before the longest timeout the workflow could have been given.
+			timeout := 60 * time.Minute
 			if repo.Timeout != 0 {
 				timeout = time.Duration(repo.Timeout) * time.Minute
+			}
+			if server.Config.Pipeline.MaxTimeout > 0 {
+				maxTimeout := time.Duration(server.Config.Pipeline.MaxTimeout) * time.Minute
+				if maxTimeout > timeout {
+					timeout = maxTimeout
+				}
 			}
 			timedOut := workflow.State == model.StatusRunning && workflow.Started != 0 &&
 				now.After(time.Unix(workflow.Started, 0).Add(timeout+grace))
 
 			agentGone := workflow.AgentID == 0
 			if workflow.AgentID != 0 {
-				agent, agentErr := storage.AgentFind(workflow.AgentID)
+				result, ok := agents[workflow.AgentID]
+				if !ok {
+					result.agent, result.err = storage.AgentFind(workflow.AgentID)
+					agents[workflow.AgentID] = result
+				}
 				switch {
-				case errors.Is(agentErr, store_types.ErrRecordNotExist):
+				case errors.Is(result.err, store_types.ErrRecordNotExist):
 					agentGone = true
-				case agentErr != nil:
-					log.Error().Err(agentErr).Int64("agent_id", workflow.AgentID).Msg("could not load agent for orphan reaper")
-				case agent != nil && time.Unix(agent.LastContact, 0).Before(now.Add(-grace)):
+				case result.err != nil:
+					log.Error().Err(result.err).Int64("agent_id", workflow.AgentID).Msg("could not load agent for orphan reaper")
+				case result.agent != nil && time.Unix(result.agent.LastContact, 0).Before(now.Add(-grace)):
 					agentGone = true
 				}
 			}
 
 			anchor := workflow.Started
 			if workflow.State == model.StatusPending && anchor == 0 {
-				anchor = pipeline.Created
+				anchor = pipeline.Updated
+				if anchor == 0 {
+					anchor = pipeline.Created
+				}
 			}
 			oldEnough := anchor != 0 && time.Unix(anchor, 0).Before(now.Add(-grace))
 			if !timedOut && !(agentGone && oldEnough) {
@@ -121,7 +157,11 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 		}
 
 		if !model.IsThereRunningStage(workflows) {
-			updated, err := UpdateStatusToDone(storage, *pipeline, PipelineStatus(workflows), now.Unix())
+			status := PipelineStatus(workflows)
+			if changed && !pipelineEverStarted {
+				status = model.StatusCanceled
+			}
+			updated, err := UpdateStatusToDone(storage, *pipeline, status, now.Unix())
 			if err != nil {
 				log.Error().Err(err).Int64("pipeline_id", pipeline.ID).Msg("could not finalize pipeline in orphan reaper")
 			} else {
