@@ -60,6 +60,8 @@ var Config = struct {
 		CustomJsFile           string
 		AsyncRepositoryUpdate  bool
 		WebhookSyncTimeout     time.Duration
+		OrphanReapInterval     time.Duration
+		OrphanReapGrace        time.Duration
 	}
 	Agent struct {
 		DisableUserRegisteredAgentRegistration bool

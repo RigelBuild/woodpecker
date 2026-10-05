@@ -835,6 +835,21 @@ The maximum time in minutes you can set in the repo settings before a pipeline g
 
 ---
 
+### ORPHAN_REAP_INTERVAL
+
+- Name: `WOODPECKER_ORPHAN_REAP_INTERVAL`
+- Default: `5m`
+
+How often the server checks for orphaned workflows. Set to `0` to disable reaping.
+
+### ORPHAN_REAP_GRACE
+
+- Name: `WOODPECKER_ORPHAN_REAP_GRACE`
+- Default: `10m`
+
+Minimum age before a missing agent or workflow is treated as orphaned.
+
+
 ### SESSION_EXPIRES
 
 - Name: `WOODPECKER_SESSION_EXPIRES`

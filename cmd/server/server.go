@@ -40,6 +40,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	cron_scheduler "go.woodpecker-ci.org/woodpecker/v3/server/cron"
 	"go.woodpecker-ci.org/woodpecker/v3/server/metric"
+	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/server/router"
 	"go.woodpecker-ci.org/woodpecker/v3/server/router/middleware"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -138,6 +139,24 @@ func run(ctx context.Context, c *cli.Command) error {
 		log.Info().Msg("cron service stopped")
 		return nil
 	})
+	if server.Config.Server.OrphanReapInterval > 0 {
+		serviceWaitingGroup.Go(func() error {
+			log.Info().Msg("starting orphan workflow reaper ...")
+			ticker := time.NewTicker(server.Config.Server.OrphanReapInterval)
+			defer ticker.Stop()
+			for {
+				if err := pipeline.ReapOrphanedWorkflows(ctx, _store, time.Now(), server.Config.Server.OrphanReapGrace); err != nil {
+					log.Error().Err(err).Msg("orphan workflow reaper failed")
+				}
+				select {
+				case <-ctx.Done():
+					log.Info().Msg("orphan workflow reaper stopped")
+					return nil
+				case <-ticker.C:
+				}
+			}
+		})
+	}
 
 	// start the grpc server
 	serviceWaitingGroup.Go(func() error {
