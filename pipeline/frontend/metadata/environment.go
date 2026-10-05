@@ -29,9 +29,9 @@ import (
 const (
 	initialEnvMapSize = 100
 	maxChangedFiles   = 500
-	// Every step gets the body in its env: stay well under the 128 KiB
-	// per-string exec limit and keep the workflow RPC small.
-	maxPullRequestBodyBytes = 64 << 10
+	// Every step gets the body in its env: stay under the Windows 32767-char
+	// per-variable limit and keep the per-step workflow RPC cost small.
+	maxPullRequestBodyBytes = 16 << 10
 )
 
 var pullRegexp = regexp.MustCompile(`\d+`)
