@@ -313,7 +313,6 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			default:
 				queueInfo.Pending = tasks
 			}
-			schedulerMock.On("Info", mock.Anything).Return(queueInfo).Once()
 
 			managerMock := manager_mocks.NewMockManager(t)
 			server.Config.Services.Manager = managerMock
@@ -323,7 +322,10 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			for _, id := range tt.persistedTasks {
 				persistedTasks = append(persistedTasks, &model.Task{ID: id})
 			}
-			storeMock.On("TaskList").Return(persistedTasks, tt.taskListErr).Once()
+			taskListCall := storeMock.On("TaskList").Return(persistedTasks, tt.taskListErr).Once()
+			if tt.taskListErr == nil {
+				schedulerMock.On("Info", mock.Anything).Return(queueInfo).Once().NotBefore(taskListCall)
+			}
 			if tt.taskListErr == nil {
 				storeMock.On("GetPipeline", pipeline.ID).Return(pipeline, nil).Once()
 				storeMock.On("GetRepo", repo.ID).Return(repo, nil).Once()

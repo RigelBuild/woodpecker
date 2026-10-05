@@ -35,21 +35,23 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 		return fmt.Errorf("list active pipelines: %w", err)
 	}
 
-	queueInfo := server.Config.Services.Scheduler.Info(ctx)
-	queued := make(map[string]struct{}, len(queueInfo.Pending)+len(queueInfo.WaitingOnDeps)+len(queueInfo.Running))
-	for _, tasks := range [][]*model.Task{queueInfo.Pending, queueInfo.WaitingOnDeps, queueInfo.Running} {
-		for _, task := range tasks {
-			queued[task.ID] = struct{}{}
-		}
-	}
-
 	persistedTasks, err := storage.TaskList()
 	if err != nil {
 		log.Error().Err(err).Msg("could not list persisted tasks for orphan reaper")
 		return fmt.Errorf("list persisted tasks for orphan reaper: %w", err)
 	}
+
+	// Read the store before the scheduler: Poll moves a task to running before
+	// deleting its row, so a claimed task is always in one snapshot.
+	queueInfo := server.Config.Services.Scheduler.Info(ctx)
+	queued := make(map[string]struct{}, len(persistedTasks)+len(queueInfo.Pending)+len(queueInfo.WaitingOnDeps)+len(queueInfo.Running))
 	for _, task := range persistedTasks {
 		queued[task.ID] = struct{}{}
+	}
+	for _, tasks := range [][]*model.Task{queueInfo.Pending, queueInfo.WaitingOnDeps, queueInfo.Running} {
+		for _, task := range tasks {
+			queued[task.ID] = struct{}{}
+		}
 	}
 
 	type agentResult struct {
