@@ -68,12 +68,12 @@ func updatePipelineStatus(ctx context.Context, _forge forge.Forge, _store store.
 	//     cancel can commit between the read and the POST flush). The ingest dedup
 	//     window (server/api/hook.go) is what removes the competing writer; this
 	//     is defense in depth.
-	if !pipeline.Status.IsTerminal() && pipeline.ID != 0 {
+	if !model.IsTerminalStatus(pipeline.Status) && pipeline.ID != 0 {
 		stored, err := _store.GetPipeline(pipeline.ID)
 		switch {
 		case err != nil:
 			log.Error().Err(err).Msgf("stale-pending guard: cannot re-read pipeline %s/%d, posting anyway", repo.FullName, pipeline.Number)
-		case stored.Status.IsTerminal():
+		case model.IsTerminalStatus(stored.Status):
 			log.Debug().
 				Str("repo", repo.FullName).
 				Int64("pipeline", pipeline.Number).

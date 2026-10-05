@@ -146,7 +146,7 @@ func TestRPCDoneGuardHitPostsTerminalAggregate(t *testing.T) {
 	require.Equal(t, 1, calls,
 		"a terminal pipeline hitting the Done guard must POST its terminal aggregate exactly once (RIG-1129)")
 	require.Len(t, statuses, 1)
-	assert.True(t, statuses[0].IsTerminal(),
+	assert.True(t, model.IsTerminalStatus(statuses[0]),
 		"the aggregate posted on the guard-hit must carry a TERMINAL pipeline status, never pending")
 }
 
@@ -204,7 +204,7 @@ func TestRPCDoneGuardHitPostsTerminalAggregateDespiteStaleRunningSibling(t *test
 	require.Equal(t, 1, calls,
 		"a terminal pipeline must POST its terminal aggregate even when a stale running sibling row remains (RIG-1170)")
 	require.Len(t, statuses, 1)
-	assert.True(t, statuses[0].IsTerminal(),
+	assert.True(t, model.IsTerminalStatus(statuses[0]),
 		"the aggregate posted on the guard-hit must carry a TERMINAL pipeline status, never pending")
 }
 
@@ -217,7 +217,7 @@ func TestRPCDoneGuardHitPostsTerminalAggregateDespiteStaleRunningSibling(t *test
 //
 // This holds in BOTH directions by design: it is the terminal-only tripwire, not
 // a red repro. The constraint is now enforced solely by
-// currentPipeline.Status.IsTerminal() — a still-running pipeline is
+// model.IsTerminalStatus(currentPipeline.Status) — a still-running pipeline is
 // non-terminal, so no aggregate is posted early on a guard-hit. The tree
 // expectation is Maybe() because nothing on this path loads it.
 func TestRPCDoneGuardHitSkipsAggregateWhenPipelineStillRunning(t *testing.T) {
@@ -268,7 +268,7 @@ func TestRPCDoneGuardHitSkipsAggregateWhenPipelineStillRunning(t *testing.T) {
 // also means this path does no store read: the MockStore carries no
 // WorkflowGetTree expectation, so a tree load here fails the test loudly.
 //
-// Drop the currentPipeline.Status.IsTerminal() precondition and this reddens on
+// Drop the model.IsTerminalStatus(currentPipeline.Status) precondition and this reddens on
 // the unexpected WorkflowGetTree call.
 func TestRPCDoneGuardHitOnBlockedWorkflowPostsNothing(t *testing.T) {
 	setStatusFlags(t, false)

@@ -322,6 +322,11 @@ var flags = []cli.Flag{
 		Name:    "commit-pull-milestone",
 		Usage:   "Set the metadata environment variable \"CI_COMMIT_PULL_REQUEST_MILESTONE\".",
 	},
+	&cli.StringFlag{
+		Sources: cli.EnvVars("CI_COMMIT_PULL_REQUEST_BODY"),
+		Name:    "commit-pull-body",
+		Usage:   "Set the metadata environment variable \"CI_COMMIT_PULL_REQUEST_BODY\".",
+	},
 	&cli.BoolFlag{
 		Sources: cli.EnvVars("CI_COMMIT_PULL_REQUEST_DRAFT"),
 		Name:    "commit-pull-draft",

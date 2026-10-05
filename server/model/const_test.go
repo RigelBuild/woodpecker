@@ -20,8 +20,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestStatusValueIsTerminal pins the terminality partition for ALL eleven
-// StatusValue constants. IsTerminal is the predicate the shared status poster
+// TestIsTerminalStatus pins the terminality partition for ALL eleven
+// StatusValue constants. IsTerminalStatus is the predicate the shared status poster
 // uses to decide whether a POST may be suppressed as stale, so a single
 // misclassified state is a live wedge (a non-terminal state wrongly called
 // terminal suppresses a legitimate first "pending"; a terminal state wrongly
@@ -31,7 +31,7 @@ import (
 // (server/forge/github/convert.go:50-75) reports: everything that maps to a
 // concrete GitHub status is terminal, everything that falls through to
 // "pending" is not.
-func TestStatusValueIsTerminal(t *testing.T) {
+func TestIsTerminalStatus(t *testing.T) {
 	terminal := []StatusValue{
 		StatusSuccess,  // convertStatus -> success
 		StatusFailure,  // convertStatus -> failure
@@ -55,18 +55,18 @@ func TestStatusValueIsTerminal(t *testing.T) {
 	// one requires classifying it in exactly one of these two lists.
 
 	for _, s := range terminal {
-		assert.Truef(t, s.IsTerminal(), "%q maps to a concrete GitHub status, so it must be terminal", s)
+		assert.Truef(t, IsTerminalStatus(s), "%q maps to a concrete GitHub status, so it must be terminal", s)
 	}
 	for _, s := range nonTerminal {
-		assert.Falsef(t, s.IsTerminal(), "%q reports as GitHub pending, so it must NOT be terminal", s)
+		assert.Falsef(t, IsTerminalStatus(s), "%q reports as GitHub pending, so it must NOT be terminal", s)
 	}
 }
 
-// TestStatusValueIsTerminalUnknownState pins the default branch: an unrecognized
+// TestIsTerminalStatusUnknownState pins the default branch: an unrecognized
 // status must be treated as NON-terminal. Terminality gates suppression of a
 // status POST, so the safe default on an unknown state is to post (leaving the
 // forge to see a pending) rather than to silently swallow a report.
-func TestStatusValueIsTerminalUnknownState(t *testing.T) {
-	assert.False(t, StatusValue("not-a-real-status").IsTerminal(),
+func TestIsTerminalStatusUnknownState(t *testing.T) {
+	assert.False(t, IsTerminalStatus(StatusValue("not-a-real-status")),
 		"an unknown status must default to non-terminal so its POST is never suppressed")
 }

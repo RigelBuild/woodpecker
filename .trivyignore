@@ -3,3 +3,8 @@
 # reports "main module does not need package"): the module dependency itself
 # is only used for ssh/acme/bcrypt, and the advisory has no fixed version.
 GO-2026-5932
+
+# docs/ build tooling only (Docusaurus/webpack-dev-server via micromatch and
+# chokidar; got via cacheable-request). Neither advisory has a fixed release.
+CVE-2026-93687
+CVE-2026-93748

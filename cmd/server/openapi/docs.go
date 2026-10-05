@@ -5144,6 +5144,9 @@ const docTemplate = `{
                 "parent": {
                     "type": "integer"
                 },
+                "pr_body": {
+                    "type": "string"
+                },
                 "pr_draft": {
                     "type": "boolean"
                 },
@@ -6004,6 +6007,9 @@ const docTemplate = `{
             "properties": {
                 "author": {
                     "$ref": "#/definitions/metadata.Author"
+                },
+                "body": {
+                    "type": "string"
                 },
                 "branch": {
                     "type": "string"

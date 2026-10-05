@@ -15,7 +15,9 @@
 package metadata
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -64,6 +66,7 @@ func TestEnviron(t *testing.T) {
 			Commit: Commit{
 				ChangedFiles:     []string{"readme", "license"},
 				Refspec:          "branch-a:branch-b",
+				PullRequestBody:  "Fixes #1",
 				PullRequestDraft: true,
 			},
 		},
@@ -79,9 +82,29 @@ func TestEnviron(t *testing.T) {
 
 	_, ok := envs["CI_COMMIT_TAG"]
 	assert.False(t, ok)
-
 	assert.Equal(t, `["readme","license"]`, envs["CI_PIPELINE_FILES"])
 	assert.Equal(t, "true", envs["CI_COMMIT_PULL_REQUEST_DRAFT"])
+	assert.Equal(t, "Fixes #1", envs["CI_COMMIT_PULL_REQUEST_BODY"])
+
+	m = Metadata{
+		Sys:  System{Name: "wp"},
+		Curr: Pipeline{Event: EventPullMetadata},
+	}
+	envs = m.Environ()
+	_, ok = envs["CI_COMMIT_PULL_REQUEST_BODY"]
+	assert.True(t, ok)
+	assert.Empty(t, envs["CI_COMMIT_PULL_REQUEST_BODY"])
+
+	m = Metadata{
+		Sys: System{Name: "wp"},
+		Curr: Pipeline{
+			Event:  EventPush,
+			Commit: Commit{PullRequestBody: "ignored for push"},
+		},
+	}
+	envs = m.Environ()
+	_, ok = envs["CI_COMMIT_PULL_REQUEST_BODY"]
+	assert.False(t, ok)
 
 	m = Metadata{
 		Sys: System{Name: "wp"},
@@ -92,7 +115,22 @@ func TestEnviron(t *testing.T) {
 			},
 		},
 	}
-
 	envs = m.Environ()
+	_, ok = envs["CI_COMMIT_PULL_REQUEST_BODY"]
+	assert.True(t, ok)
+	assert.Empty(t, envs["CI_COMMIT_PULL_REQUEST_BODY"])
 	assert.Equal(t, "false", envs["CI_COMMIT_PULL_REQUEST_DRAFT"])
+}
+
+func TestPullRequestBodyIsCappedOnARuneBoundary(t *testing.T) {
+	// 3-byte runes, so the byte limit falls inside a rune.
+	body := "Spec-impact: none\n" + strings.Repeat("€", maxPullRequestBodyBytes)
+	m := Metadata{Curr: Pipeline{Event: EventPull, Commit: Commit{PullRequestBody: body}}}
+
+	got := m.Environ()["CI_COMMIT_PULL_REQUEST_BODY"]
+	assert.LessOrEqual(t, len(got), maxPullRequestBodyBytes)
+	assert.Greater(t, len(got), maxPullRequestBodyBytes-utf8.UTFMax)
+	assert.True(t, utf8.ValidString(got))
+	assert.True(t, strings.HasPrefix(body, got))
+	assert.True(t, strings.HasPrefix(got, "Spec-impact: none\n"))
 }

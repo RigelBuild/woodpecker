@@ -384,7 +384,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		// state mutation, and never weaken the rejection. Scoped to this abnormal
 		// branch on purpose: the happy path already POSTs below, so the two never
 		// overlap and there is no double-post.
-		if currentPipeline.Status.IsTerminal() {
+		if model.IsTerminalStatus(currentPipeline.Status) {
 			s.reportForgeStatusAsync(c, repo, currentPipeline, nil)
 		}
 

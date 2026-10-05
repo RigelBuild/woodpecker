@@ -53,11 +53,12 @@ func TestPipelines(t *testing.T) {
 
 	// add pipeline
 	pipeline = model.Pipeline{
-		RepoID: repo.ID,
-		Status: model.StatusSuccess,
-		Commit: "85f8c029b902ed9400bc600bac301a0aadb144ac",
-		Event:  model.EventPush,
-		Branch: "some-branch",
+		RepoID:          repo.ID,
+		Status:          model.StatusSuccess,
+		Commit:          "85f8c029b902ed9400bc600bac301a0aadb144ac",
+		Event:           model.EventPush,
+		Branch:          "some-branch",
+		PullRequestBody: "Fixes #1\n\nSpec-impact: none",
 	}
 	err = store.CreatePipeline(&pipeline)
 	assert.NoError(t, err)
@@ -74,6 +75,7 @@ func TestPipelines(t *testing.T) {
 	assert.Equal(t, pipeline.ID, GetPipeline.ID)
 	assert.Equal(t, pipeline.RepoID, GetPipeline.RepoID)
 	assert.Equal(t, pipeline.Status, GetPipeline.Status)
+	assert.Equal(t, "Fixes #1\n\nSpec-impact: none", GetPipeline.PullRequestBody)
 
 	// update pipeline
 	pipeline.Status = model.StatusRunning
