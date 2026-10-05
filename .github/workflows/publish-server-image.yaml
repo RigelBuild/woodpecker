@@ -40,16 +40,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "$EVENT" = "push" ]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="$INPUT_VERSION"
-          fi
-          flake="$(sed -n 's/^ *version = "\(.*\)";$/\1/p' flake.nix | head -n1)"
-          if [ "$version" != "$flake" ]; then
-            echo "::error::version '$version' does not match flake.nix version '$flake'"
-            exit 1
-          fi
+          version="$(.github/scripts/resolve-image-version.sh "$EVENT" "$GITHUB_REF_NAME" "$INPUT_VERSION" flake.nix)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   web:
