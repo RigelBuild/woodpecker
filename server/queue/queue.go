@@ -41,6 +41,11 @@ var (
 	ErrWorkerKicked = errors.New("worker was kicked")
 )
 
+type ExpiredTask struct {
+	ID      string
+	AgentID int64
+}
+
 // ErrExternal wraps an external error.
 type ErrExternal struct {
 	err error
@@ -119,6 +124,14 @@ type Queue interface {
 	// Extend extends the deadline for a task.
 	Extend(c context.Context, agentID int64, workflowID string) error
 
+	// Reserve holds a running entry while its state is reset outside the queue lock.
+	Reserve(ctx context.Context, id string, agentID int64, expiredOnly bool) error
+
+	// Requeue releases a reserved task to the front of pending.
+	Requeue(ctx context.Context, id string) error
+
+	// Expired reports tasks whose leases have expired.
+	Expired() <-chan ExpiredTask
 	// Done signals the task is complete.
 	Done(c context.Context, id string, exitStatus model.StatusValue) error
 
