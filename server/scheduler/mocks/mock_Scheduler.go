@@ -20,10 +20,19 @@ func NewMockScheduler(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockScheduler {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockScheduler{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }
@@ -220,6 +229,52 @@ func (_c *MockScheduler_Error_Call) Return(err1 error) *MockScheduler_Error_Call
 }
 
 func (_c *MockScheduler_Error_Call) RunAndReturn(run func(c context.Context, id string, err error) error) *MockScheduler_Error_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Expired provides a mock function for the type MockScheduler
+func (_mock *MockScheduler) Expired() <-chan queue.ExpiredTask {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for Expired")
+	}
+
+	var r0 <-chan queue.ExpiredTask
+	if returnFunc, ok := ret.Get(0).(func() <-chan queue.ExpiredTask); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(<-chan queue.ExpiredTask)
+		}
+	}
+	return r0
+}
+
+// MockScheduler_Expired_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Expired'
+type MockScheduler_Expired_Call struct {
+	*mock.Call
+}
+
+// Expired is a helper method to define mock.On call
+func (_e *MockScheduler_Expecter) Expired() *MockScheduler_Expired_Call {
+	return &MockScheduler_Expired_Call{Call: _e.mock.On("Expired")}
+}
+
+func (_c *MockScheduler_Expired_Call) Run(run func()) *MockScheduler_Expired_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockScheduler_Expired_Call) Return(expiredTaskCh <-chan queue.ExpiredTask) *MockScheduler_Expired_Call {
+	_c.Call.Return(expiredTaskCh)
+	return _c
+}
+
+func (_c *MockScheduler_Expired_Call) RunAndReturn(run func() <-chan queue.ExpiredTask) *MockScheduler_Expired_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -550,6 +605,132 @@ func (_c *MockScheduler_PublishPipelineEvent_Call) Return(err error) *MockSchedu
 }
 
 func (_c *MockScheduler_PublishPipelineEvent_Call) RunAndReturn(run func(c context.Context, repo *model.Repo, pipeline *model.Pipeline) error) *MockScheduler_PublishPipelineEvent_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Requeue provides a mock function for the type MockScheduler
+func (_mock *MockScheduler) Requeue(ctx context.Context, id string) error {
+	ret := _mock.Called(ctx, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Requeue")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(ctx, id)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockScheduler_Requeue_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Requeue'
+type MockScheduler_Requeue_Call struct {
+	*mock.Call
+}
+
+// Requeue is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id string
+func (_e *MockScheduler_Expecter) Requeue(ctx any, id any) *MockScheduler_Requeue_Call {
+	return &MockScheduler_Requeue_Call{Call: _e.mock.On("Requeue", ctx, id)}
+}
+
+func (_c *MockScheduler_Requeue_Call) Run(run func(ctx context.Context, id string)) *MockScheduler_Requeue_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockScheduler_Requeue_Call) Return(err error) *MockScheduler_Requeue_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockScheduler_Requeue_Call) RunAndReturn(run func(ctx context.Context, id string) error) *MockScheduler_Requeue_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Reserve provides a mock function for the type MockScheduler
+func (_mock *MockScheduler) Reserve(ctx context.Context, id string, agentID int64, expiredOnly bool) error {
+	ret := _mock.Called(ctx, id, agentID, expiredOnly)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Reserve")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, int64, bool) error); ok {
+		r0 = returnFunc(ctx, id, agentID, expiredOnly)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockScheduler_Reserve_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Reserve'
+type MockScheduler_Reserve_Call struct {
+	*mock.Call
+}
+
+// Reserve is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id string
+//   - agentID int64
+//   - expiredOnly bool
+func (_e *MockScheduler_Expecter) Reserve(ctx any, id any, agentID any, expiredOnly any) *MockScheduler_Reserve_Call {
+	return &MockScheduler_Reserve_Call{Call: _e.mock.On("Reserve", ctx, id, agentID, expiredOnly)}
+}
+
+func (_c *MockScheduler_Reserve_Call) Run(run func(ctx context.Context, id string, agentID int64, expiredOnly bool)) *MockScheduler_Reserve_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		var arg3 bool
+		if args[3] != nil {
+			arg3 = args[3].(bool)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockScheduler_Reserve_Call) Return(err error) *MockScheduler_Reserve_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockScheduler_Reserve_Call) RunAndReturn(run func(ctx context.Context, id string, agentID int64, expiredOnly bool) error) *MockScheduler_Reserve_Call {
 	_c.Call.Return(run)
 	return _c
 }

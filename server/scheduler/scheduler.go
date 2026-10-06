@@ -44,6 +44,9 @@ type Scheduler interface {
 	// this is a hack for another refactor later.
 	Poll(c context.Context, agentID int64, agentFilter rpc.Filter, markSkipped func(taskID string) error) (*rpc.Workflow, error)
 	Extend(c context.Context, agentID int64, workflowID string) error
+	Reserve(ctx context.Context, id string, agentID int64, expiredOnly bool) error
+	Requeue(ctx context.Context, id string) error
+	Expired() <-chan queue.ExpiredTask
 	Done(c context.Context, id string, exitStatus model.StatusValue) error
 	Error(c context.Context, id string, err error) error
 	Wait(c context.Context, id string) error

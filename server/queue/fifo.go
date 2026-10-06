@@ -18,6 +18,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -29,10 +30,22 @@ import (
 )
 
 type entry struct {
-	item     *model.Task
-	done     chan bool
-	error    error
-	deadline time.Time
+	item        *model.Task
+	done        chan bool
+	error       error
+	deadline    time.Time
+	expired     bool
+	reserved    bool
+	doneClosed  bool
+	lastSent    time.Time
+	lastSentSet bool
+}
+
+func (e *entry) closeDone() {
+	if !e.doneClosed {
+		close(e.done)
+		e.doneClosed = true
+	}
 }
 
 type worker struct {
@@ -50,6 +63,7 @@ type fifo struct {
 	running       map[string]*entry
 	pending       *list.List
 	waitingOnDeps *list.List
+	expired       chan ExpiredTask
 	extension     time.Duration
 	paused        bool
 }
@@ -66,11 +80,46 @@ func NewMemoryQueue(ctx context.Context) Queue {
 		running:       map[string]*entry{},
 		pending:       list.New(),
 		waitingOnDeps: list.New(),
+		expired:       make(chan ExpiredTask, 64),
 		extension:     constant.TaskTimeout,
 		paused:        false,
 	}
 	go q.process()
 	return q
+}
+
+// Reserve holds a running entry so its state can be reset outside the queue lock.
+func (q *fifo) Reserve(_ context.Context, id string, agentID int64, expiredOnly bool) error {
+	q.Lock()
+	defer q.Unlock()
+
+	entry, ok := q.running[id]
+	if !ok || entry.item.AgentID != agentID || entry.reserved || (expiredOnly && !entry.expired) {
+		return ErrNotFound
+	}
+	entry.reserved = true
+	if !entry.doneClosed {
+		entry.error = ErrTaskExpired
+		entry.closeDone()
+	}
+	return nil
+}
+
+func (q *fifo) Requeue(_ context.Context, id string) error {
+	q.Lock()
+	defer q.Unlock()
+
+	entry, ok := q.running[id]
+	if !ok || !entry.reserved {
+		return ErrNotFound
+	}
+	delete(q.running, id)
+	q.pending.PushFront(entry.item)
+	return nil
+}
+
+func (q *fifo) Expired() <-chan ExpiredTask {
+	return q.expired
 }
 
 // PushAtOnce pushes multiple tasks to the tail of this queue.
@@ -141,8 +190,10 @@ func (q *fifo) finished(ids []string, exitStatus model.StatusValue, err error) e
 	// we first process the tasks itself
 	for _, id := range ids {
 		if taskEntry, ok := q.running[id]; ok {
-			taskEntry.error = err
-			close(taskEntry.done)
+			if !taskEntry.doneClosed {
+				taskEntry.error = err
+				taskEntry.closeDone()
+			}
 			delete(q.running, id)
 		} else {
 			errs = append(errs, q.removeFromPendingAndWaiting(id))
@@ -188,15 +239,17 @@ func (q *fifo) Extend(_ context.Context, agentID int64, taskID string) error {
 	defer q.Unlock()
 
 	state, ok := q.running[taskID]
-	if ok {
-		if state.item.AgentID != agentID {
-			return ErrAgentMissMatch
-		}
-
-		state.deadline = time.Now().Add(q.extension)
-		return nil
+	if !ok {
+		return ErrNotFound
 	}
-	return ErrNotFound
+	if state.item.AgentID != agentID {
+		return ErrAgentMissMatch
+	}
+	if state.expired || state.reserved {
+		return ErrTaskExpired
+	}
+	state.deadline = time.Now().Add(q.extension)
+	return nil
 }
 
 // Info returns internal queue information.
@@ -223,6 +276,33 @@ func (q *fifo) Info(_ context.Context) InfoT {
 
 	q.Unlock()
 	return stats
+}
+
+func (q *fifo) snapshotRunningTask(id string) *model.Task {
+	q.Lock()
+	defer q.Unlock()
+	entry, ok := q.running[id]
+	if !ok {
+		return nil
+	}
+	task := *entry.item
+	task.Data = slices.Clone(entry.item.Data)
+	task.Labels = maps.Clone(entry.item.Labels)
+	task.Dependencies = slices.Clone(entry.item.Dependencies)
+	task.RunOn = slices.Clone(entry.item.RunOn)
+	task.DepStatus = maps.Clone(entry.item.DepStatus)
+	return &task
+}
+
+func (q *fifo) retryReserved(id string) {
+	q.Lock()
+	defer q.Unlock()
+	if entry, ok := q.running[id]; ok && entry.reserved {
+		entry.reserved = false
+		if entry.expired {
+			entry.lastSentSet = false
+		}
+	}
 }
 
 // Pause stops the queue from handing out new work items in Poll.
@@ -450,13 +530,22 @@ func taskOrderLess(a, b *model.Task) bool {
 }
 
 func (q *fifo) resubmitExpiredPipelines() {
+	now := time.Now()
 	for taskID, taskState := range q.running {
-		if time.Now().After(taskState.deadline) {
-			log.Info().Msgf("queue: resubmitting expired task %s", taskID)
+		if !taskState.expired && now.After(taskState.deadline) {
+			log.Info().Msgf("queue: expired task %s", taskID)
+			taskState.expired = true
 			taskState.error = ErrTaskExpired
-			q.pending.PushFront(taskState.item)
-			delete(q.running, taskID)
-			close(taskState.done)
+			taskState.closeDone()
+		}
+		if !taskState.expired || taskState.reserved || (taskState.lastSentSet && now.Sub(taskState.lastSent) < constant.TaskTimeout) {
+			continue
+		}
+		select {
+		case q.expired <- ExpiredTask{ID: taskID, AgentID: taskState.item.AgentID}:
+			taskState.lastSent = now
+			taskState.lastSentSet = true
+		default:
 		}
 	}
 }
