@@ -75,8 +75,11 @@ steps:
     when: *when
 
 services:
+  # Throwaway DBs: skip fsync so commits don't wait on a busy host disk; the
+  # homelab agents' disk stalls hung these tests on a DB read (RIG-4716).
   postgres:
     image: docker.io/postgres:18
+    entrypoint: [docker-entrypoint.sh, postgres, -c, fsync=off, -c, synchronous_commit=off, -c, full_page_writes=off]
     ports: ['5432']
     environment:
       POSTGRES_USER: postgres
@@ -85,6 +88,8 @@ services:
 
   mysql:
     image: docker.io/mysql:26.7.0
+    entrypoint:
+      [docker-entrypoint.sh, mysqld, --innodb-flush-log-at-trx-commit=0, --sync-binlog=0, --innodb-doublewrite=OFF]
     ports: ['3306']
     environment:
       MYSQL_DATABASE: test
