@@ -4,6 +4,7 @@ import { ref } from 'vue';
 import type { Ref } from 'vue';
 import { createI18n } from 'vue-i18n';
 
+import en from '~/assets/locales/en.json';
 import PipelineStepList from '~/components/repo/pipeline/PipelineStepList.vue';
 import type { Pipeline, PipelineConfig, PipelineStep, PipelineWorkflow } from '~/lib/api/types';
 
@@ -15,7 +16,7 @@ const i18n = createI18n({
   fallbackLocale: 'en',
   missingWarn: false,
   fallbackWarn: false,
-  messages: { en: { repo: { pipeline: { attempt: 'attempt {attempt}' } } } },
+  messages: { en },
 });
 
 const pipelineConfigs = ref<PipelineConfig[]>([{ hash: 'h', name: 'default', data: '' }]);
@@ -161,5 +162,11 @@ describe('pipelineStepList', () => {
     const wrapper = mountStepList(makePipeline([workflow]), ref<PipelineConfig[]>([]));
 
     expect(wrapper.get('button[title="workflow-1"]').text()).toContain('attempt 2');
+  });
+  it('shows the localized one-based attempt in the single-config view', () => {
+    const workflow = makeWorkflow(1, [], 'success', 1);
+    const wrapper = mountStepList(makePipeline([workflow]));
+
+    expect(wrapper.text()).toContain('attempt 2');
   });
 });
