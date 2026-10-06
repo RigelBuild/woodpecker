@@ -18,6 +18,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -187,8 +188,10 @@ func (q *fifo) finished(ids []string, exitStatus model.StatusValue, err error) e
 	// we first process the tasks itself
 	for _, id := range ids {
 		if taskEntry, ok := q.running[id]; ok {
-			taskEntry.error = err
-			taskEntry.closeDone()
+			if !taskEntry.doneClosed {
+				taskEntry.error = err
+				taskEntry.closeDone()
+			}
 			delete(q.running, id)
 		} else {
 			errs = append(errs, q.removeFromPendingAndWaiting(id))
@@ -271,6 +274,33 @@ func (q *fifo) Info(_ context.Context) InfoT {
 
 	q.Unlock()
 	return stats
+}
+
+func (q *fifo) snapshotRunningTask(id string) *model.Task {
+	q.Lock()
+	defer q.Unlock()
+	entry, ok := q.running[id]
+	if !ok {
+		return nil
+	}
+	task := *entry.item
+	task.Data = slices.Clone(entry.item.Data)
+	task.Labels = maps.Clone(entry.item.Labels)
+	task.Dependencies = slices.Clone(entry.item.Dependencies)
+	task.RunOn = slices.Clone(entry.item.RunOn)
+	task.DepStatus = maps.Clone(entry.item.DepStatus)
+	return &task
+}
+
+func (q *fifo) retryReserved(id string) {
+	q.Lock()
+	defer q.Unlock()
+	if entry, ok := q.running[id]; ok && entry.reserved {
+		entry.reserved = false
+		if entry.expired {
+			entry.lastSentSet = false
+		}
+	}
 }
 
 // Pause stops the queue from handing out new work items in Poll.

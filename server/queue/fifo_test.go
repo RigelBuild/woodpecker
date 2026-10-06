@@ -1237,6 +1237,18 @@ func TestFifoExpiredEventsDoNotBlockDispatch(t *testing.T) {
 	}
 	assert.Equal(t, next.ID, dispatched.ID)
 	assert.NoError(t, q.Done(ctx, dispatched.ID, model.StatusSuccess))
+
+	dropped := <-q.Expired()
+	assert.Equal(t, ExpiredTask{ID: "already-buffered"}, dropped)
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	select {
+	case event := <-q.Expired():
+		assert.Equal(t, ExpiredTask{ID: expired.ID, AgentID: 1}, event)
+	case <-time.After(time.Second):
+		t.Fatal("dropped expiry event was not retried after the buffer drained")
+	}
 }
 func TestFifoFinishExpiredEntries(t *testing.T) {
 	tests := []struct {
@@ -1279,6 +1291,51 @@ func TestFifoFinishExpiredEntries(t *testing.T) {
 			}
 			assert.Equal(t, expectedStatus, info.WaitingOnDeps[0].DepStatus[parent.ID])
 		})
+	}
+}
+
+type blockedDoneContext struct {
+	context.Context
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *blockedDoneContext) Done() <-chan struct{} {
+	close(c.entered)
+	<-c.release
+	return c.Context.Done()
+}
+
+func TestFifoWaitPreservesFirstCompletionError(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	task := &model.Task{ID: "wait-first-error"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+
+	waitCtx := &blockedDoneContext{
+		Context: ctx,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- q.Wait(waitCtx, got.ID) }()
+	select {
+	case <-waitCtx.entered:
+	case <-time.After(time.Second):
+		close(waitCtx.release)
+		t.Fatal("Wait did not reach its done-channel select")
+	}
+
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+	assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	close(waitCtx.release)
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after its done channel closed")
 	}
 }
 

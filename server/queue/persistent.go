@@ -78,24 +78,27 @@ func (q *persistentQueue) PushAtOnce(c context.Context, tasks []*model.Task) err
 }
 
 func (q *persistentQueue) Requeue(c context.Context, id string) error {
-	info := q.Queue.Info(c)
-	var task *model.Task
-	for _, running := range info.Running {
-		if running.ID == id {
-			task = running
-			break
-		}
+	qf, ok := q.Queue.(*fifo)
+	if !ok {
+		return errors.New("persistent queue requires fifo queue for task snapshots")
 	}
+	task := qf.snapshotRunningTask(id)
 	if task == nil {
 		return ErrNotFound
 	}
 	if err := q.store.TaskInsert(task); err != nil {
-		return err
+		if !errors.Is(err, types.ErrInsertDuplicateDetected) {
+			qf.retryReserved(id)
+			return err
+		}
+		// The backup row may have survived an earlier interrupted requeue.
 	}
 	if err := q.Queue.Requeue(c, id); err != nil {
 		if deleteErr := q.store.TaskDelete(id); deleteErr != nil && !errors.Is(deleteErr, types.ErrRecordNotExist) {
+			qf.retryReserved(id)
 			return errors.Join(err, deleteErr)
 		}
+		qf.retryReserved(id)
 		return err
 	}
 	return nil

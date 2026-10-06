@@ -15,9 +15,12 @@
 package queue
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
@@ -152,6 +155,134 @@ func TestPersistentQueueRequeuePersistsBeforePoll(t *testing.T) {
 	got, err = pq.Poll(ctx, 2, filterFnTrue)
 	assert.NoError(t, err)
 	assert.Equal(t, task.ID, got.ID)
+}
+
+func TestPersistentQueueRequeuePersistsTaskSnapshot(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	store := store_mocks.NewMockStore(t)
+	task := &model.Task{
+		ID:           "snapshot-task",
+		Data:         []byte("payload"),
+		Labels:       map[string]string{"team": "queue"},
+		Dependencies: []string{"upstream"},
+		RunOn:        []string{"success"},
+		DepStatus:    map[string]model.StatusValue{"upstream": model.StatusPending},
+	}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+
+	insertStarted := make(chan struct{})
+	insertContinue := make(chan struct{})
+	var persistedTask *model.Task
+	store.EXPECT().TaskInsert(mock.Anything).Run(func(snapshot *model.Task) {
+		persistedTask = snapshot
+		close(insertStarted)
+		<-insertContinue
+	}).Return(nil).Once()
+	pq := &persistentQueue{Queue: q, store: store}
+
+	requeueResult := make(chan error, 1)
+	go func() { requeueResult <- pq.Requeue(ctx, task.ID) }()
+	select {
+	case <-insertStarted:
+	case <-time.After(time.Second):
+		t.Fatal("requeue did not start persisting the task snapshot")
+	}
+	q.Lock()
+	q.running[got.ID].item.Data[0] = 'P'
+	q.running[got.ID].item.Labels["team"] = "changed"
+	q.running[got.ID].item.Dependencies[0] = "changed-upstream"
+	q.running[got.ID].item.RunOn[0] = "failure"
+	q.running[got.ID].item.DepStatus["upstream"] = model.StatusSuccess
+	q.Unlock()
+	close(insertContinue)
+	select {
+	case err := <-requeueResult:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("requeue did not complete")
+	}
+	assert.NotSame(t, task, persistedTask)
+	assert.Equal(t, model.StatusPending, persistedTask.DepStatus["upstream"])
+	assert.Equal(t, []byte("payload"), persistedTask.Data)
+	assert.Equal(t, map[string]string{"team": "queue"}, persistedTask.Labels)
+	assert.Equal(t, []string{"upstream"}, persistedTask.Dependencies)
+	assert.Equal(t, []string{"success"}, persistedTask.RunOn)
+	assert.Equal(t, map[string]model.StatusValue{"upstream": model.StatusPending}, persistedTask.DepStatus)
+	assert.Equal(t, model.StatusSuccess, task.DepStatus["upstream"])
+	assert.Same(t, task, q.pending.Front().Value)
+}
+
+func TestPersistentQueueRequeueInsertFailureCanRetry(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	store := store_mocks.NewMockStore(t)
+	task := genDummyTask()
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	q.Lock()
+	q.running[got.ID].deadline = time.Now().Add(-time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	assert.Equal(t, ExpiredTask{ID: task.ID, AgentID: 1}, receiveExpiredTask(t, q))
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, true))
+
+	store.EXPECT().TaskInsert(mock.Anything).Return(errors.New("temporary insert failure")).Once()
+	store.EXPECT().TaskInsert(mock.Anything).Return(nil).Once()
+	store.EXPECT().TaskDelete(task.ID).Return(nil).Once()
+	store.EXPECT().WorkflowLoad(int64(1)).Return(&model.Workflow{ID: 1, State: model.StatusPending}, nil).Once()
+	pq := &persistentQueue{Queue: q, store: store}
+	assert.Error(t, pq.Requeue(ctx, task.ID))
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	assert.Equal(t, ExpiredTask{ID: task.ID, AgentID: 1}, receiveExpiredTask(t, q))
+	assert.NoError(t, q.Reserve(ctx, task.ID, 1, true))
+	assert.NoError(t, pq.Requeue(ctx, task.ID))
+	got, err = pq.Poll(ctx, 2, filterFnTrue)
+	assert.NoError(t, err)
+	assert.Equal(t, task.ID, got.ID)
+}
+
+func TestPersistentQueueRequeueDeletesBackupOnQueueFailure(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	store := store_mocks.NewMockStore(t)
+	task := genDummyTask()
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+
+	insertStarted := make(chan struct{})
+	insertContinue := make(chan struct{})
+	store.EXPECT().TaskInsert(mock.Anything).Run(func(*model.Task) {
+		close(insertStarted)
+		<-insertContinue
+	}).Return(nil).Once()
+	store.EXPECT().TaskDelete(task.ID).Return(nil).Once()
+	pq := &persistentQueue{Queue: q, store: store}
+	requeueResult := make(chan error, 1)
+	go func() { requeueResult <- pq.Requeue(ctx, task.ID) }()
+	select {
+	case <-insertStarted:
+	case <-time.After(time.Second):
+		t.Fatal("requeue did not persist backup row")
+	}
+	assert.NoError(t, q.Done(ctx, task.ID, model.StatusSuccess))
+	close(insertContinue)
+	select {
+	case err := <-requeueResult:
+		assert.ErrorIs(t, err, ErrNotFound)
+	case <-time.After(time.Second):
+		t.Fatal("requeue did not observe that the task was finished")
+	}
+	assert.Equal(t, 0, q.Info(ctx).Stats.Running)
+	assert.Equal(t, 0, q.Info(ctx).Stats.Pending)
 }
 
 func TestPersistentQueueDoneRemovesPendingTaskFromBackup(t *testing.T) {
