@@ -37,6 +37,7 @@ type Step struct {
 	Started    int64       `json:"started,omitempty"    xorm:"started"`
 	Finished   int64       `json:"finished,omitempty"   xorm:"finished"`
 	Type       StepType    `json:"type,omitempty"       xorm:"type"`
+	Detached   bool        `json:"detached"             xorm:"detached"`
 } //	@name	Step
 
 // TableName return database table name for xorm.

@@ -30,6 +30,7 @@ type Workflow struct {
 	Environ        map[string]string `json:"environ,omitempty"    xorm:"json 'environ'"`
 	AxisID         int               `json:"-"                    xorm:"axis_id"`
 	OnMetadataEdit bool              `json:"on_metadata_edit,omitempty" xorm:"on_metadata_edit"`
+	Attempts       int               `json:"attempts"              xorm:"attempts"`
 	Children       []*Step           `json:"children,omitempty"   xorm:"-"`
 }
 

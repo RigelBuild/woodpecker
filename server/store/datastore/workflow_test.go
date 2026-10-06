@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
@@ -90,6 +91,32 @@ func TestWorkflowOnMetadataEditRoundTrip(t *testing.T) {
 	gotLegacy, err := store.WorkflowLoad(legacy.ID)
 	assert.NoError(t, err)
 	assert.False(t, gotLegacy.OnMetadataEdit, "a legacy row written without the column must read back false")
+}
+
+func TestWorkflowAttemptsAndDetachedRoundTrip(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+	defer closer()
+
+	wf := &model.Workflow{
+		PipelineID: 1,
+		PID:        1,
+		Attempts:   2,
+		Children: []*model.Step{{
+			UUID:       "ea6d4008-8ace-4f8a-ad03-53f1756465d9",
+			PipelineID: 1,
+			PID:        2,
+			PPID:       1,
+			Detached:   true,
+		}},
+	}
+	require.NoError(t, store.WorkflowsCreate([]*model.Workflow{wf}))
+
+	got, err := store.WorkflowGetTree(&model.Pipeline{ID: 1})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 2, got[0].Attempts)
+	require.Len(t, got[0].Children, 1)
+	assert.True(t, got[0].Children[0].Detached)
 }
 
 func TestWorkflowGetTree(t *testing.T) {

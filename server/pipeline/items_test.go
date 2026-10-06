@@ -82,6 +82,33 @@ func TestSetPipelineStepsOnPipeline(t *testing.T) {
 	}
 }
 
+func TestWorkflowsFromPipelineBuilderDetached(t *testing.T) {
+	tests := []struct {
+		name     string
+		typeName backend_types.StepType
+		detached bool
+		want     bool
+	}{
+		{name: "detached commands", typeName: backend_types.StepTypeCommands, detached: true, want: true},
+		{name: "service", typeName: backend_types.StepTypeService, detached: true, want: true},
+		{name: "plain commands", typeName: backend_types.StepTypeCommands, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &builder.Item{
+				Workflow: &builder.Workflow{PID: 1},
+				Config: &backend_types.Config{Stages: []*backend_types.Stage{{
+					Steps: []*backend_types.Step{{Name: "step", Type: tt.typeName, Detached: tt.detached}},
+				}}},
+			}
+			got := workflowsFromPipelineBuilder(&model.Pipeline{ID: 1}, []*builder.Item{item})
+			require.Len(t, got, 1)
+			require.Len(t, got[0].Children, 1)
+			assert.Equal(t, tt.want, got[0].Children[0].Detached)
+		})
+	}
+}
+
 func TestSaveWorkflowsSkipped(t *testing.T) {
 	t.Parallel()
 
