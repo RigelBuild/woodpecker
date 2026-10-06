@@ -16,8 +16,9 @@ package main
 
 import (
 	"context"
-
-	"github.com/rs/zerolog/log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"go.woodpecker-ci.org/woodpecker/v3/cmd/agent/core"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/docker"
@@ -25,7 +26,6 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/local"
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/dot_env"
-	"go.woodpecker-ci.org/woodpecker/v3/shared/utils"
 )
 
 var backends = []backend_types.Backend{
@@ -37,8 +37,8 @@ var backends = []backend_types.Backend{
 func main() {
 	dot_env.Load()
 
-	ctx := utils.WithContextSigtermCallback(context.Background(), func() {
-		log.Info().Msg("termination signal is received, shutting down agent")
-	})
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	ctx := core.AgentRootContext(context.Background(), signals)
 	core.RunAgent(ctx, backends)
 }

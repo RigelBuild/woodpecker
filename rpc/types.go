@@ -38,10 +38,11 @@ type (
 
 	// WorkflowState defines the workflow state.
 	WorkflowState struct {
-		Started  int64  `json:"started"`
-		Finished int64  `json:"finished"`
-		Error    string `json:"error"`
-		Canceled bool   `json:"canceled"`
+		Started       int64  `json:"started"`
+		Finished      int64  `json:"finished"`
+		Error         string `json:"error"`
+		Canceled      bool   `json:"canceled"`
+		AgentShutdown bool   `json:"agent_shutdown"`
 	}
 
 	// Workflow defines the workflow execution details.
