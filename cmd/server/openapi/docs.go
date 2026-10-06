@@ -5822,6 +5822,9 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "detached": {
+                    "type": "boolean"
+                },
                 "error": {
                     "type": "string"
                 },
@@ -6495,6 +6498,9 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "agent_id": {
+                    "type": "integer"
+                },
+                "attempts": {
                     "type": "integer"
                 },
                 "children": {

@@ -53,6 +53,18 @@ func (p *impl) Extend(c context.Context, agentID int64, workflowID string) error
 	return p.q.Extend(c, agentID, workflowID)
 }
 
+func (p *impl) Reserve(ctx context.Context, id string, agentID int64, expiredOnly bool) error {
+	return p.q.Reserve(ctx, id, agentID, expiredOnly)
+}
+
+func (p *impl) Requeue(ctx context.Context, id string) error {
+	return p.q.Requeue(ctx, id)
+}
+
+func (p *impl) Expired() <-chan queue.ExpiredTask {
+	return p.q.Expired()
+}
+
 func (p *impl) Info(c context.Context) queue.InfoT {
 	return p.q.Info(c)
 }
