@@ -20,6 +20,7 @@ import (
 	"slices"
 
 	"github.com/google/go-github/v90/github"
+	"github.com/rs/zerolog/log"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
@@ -104,12 +105,23 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 
 // requiredStatusClient posts required statuses as the App installation when
 // one is configured, so they draw on the App's rate-limit bucket instead of the
-// forge user's, which every other API call shares.
+// forge user's, which every other API call shares. A repo the App is not
+// installed on keeps the user token; transient mint failures are retried.
 func (c *client) requiredStatusClient(ctx context.Context, user *model.User, repo *model.Repo) (*github.Client, error) {
-	if c.appConfigured() {
-		return c.installationClient(ctx, repo.Owner, repo.Name)
+	if !c.appConfigured() {
+		return c.newClientToken(ctx, user.AccessToken)
 	}
-	return c.newClientToken(ctx, user.AccessToken)
+	var gh *github.Client
+	_, err := doForgeWrite(ctx, func() (*github.Response, error) {
+		var e error
+		gh, e = c.installationClient(ctx, repo.Owner, repo.Name)
+		return nil, e
+	})
+	if errors.Is(err, errAppNotInstalled) {
+		log.Debug().Str("repo", repo.FullName).Msg("GitHub App not installed; required statuses use the user token")
+		return c.newClientToken(ctx, user.AccessToken)
+	}
+	return gh, err
 }
 
 // reconcileTerminalStatus keeps a required commit status from posting a

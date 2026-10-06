@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -115,4 +116,83 @@ func TestRequiredStatusesUseUserTokenWithoutApp(t *testing.T) {
 	require.NoError(t, c.StatusAggregate(context.Background(), &model.User{AccessToken: "user-token"}, repo, p,
 		[]*model.Workflow{{Name: "build", State: model.StatusSuccess}}))
 	assert.Equal(t, []string{"Bearer user-token"}, auths())
+}
+
+// TestRequiredStatusesFallBackWhenAppNotInstalled keeps repos the App is not
+// installed on reporting with the user token, as before the App routing.
+func TestRequiredStatusesFallBackWhenAppNotInstalled(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	origCtx := server.Config.Server.StatusContext
+	origAgg := server.Config.Server.StatusAggregateFormat
+	server.Config.Server.StatusContext = "CI"
+	server.Config.Server.StatusAggregateFormat = "{{ .context }} ({{ .event }})"
+	t.Cleanup(func() {
+		server.Config.Server.StatusContext = origCtx
+		server.Config.Server.StatusAggregateFormat = origAgg
+	})
+
+	var auths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/o/r/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/statuses/abc123", func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := &client{API: srv.URL + "/", url: srv.URL, appID: 123, appKey: key}
+	p := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
+	require.NoError(t, c.StatusAggregate(context.Background(), &model.User{AccessToken: "user-token"},
+		&model.Repo{Owner: "o", Name: "r"}, p, []*model.Workflow{{Name: "build", State: model.StatusSuccess}}))
+	assert.Equal(t, []string{"Bearer user-token"}, auths)
+}
+
+// TestRequiredStatusesRetryTransientTokenMint retries a 5xx from the App token
+// mint inside the report budget instead of dropping the required status.
+func TestRequiredStatusesRetryTransientTokenMint(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	origCtx := server.Config.Server.StatusContext
+	origAgg := server.Config.Server.StatusAggregateFormat
+	server.Config.Server.StatusContext = "CI"
+	server.Config.Server.StatusAggregateFormat = "{{ .context }} ({{ .event }})"
+	t.Cleanup(func() {
+		server.Config.Server.StatusContext = origCtx
+		server.Config.Server.StatusAggregateFormat = origAgg
+	})
+
+	var mints atomic.Int32
+	var auths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/o/r/installation", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":99}`))
+	})
+	mux.HandleFunc("POST /app/installations/99/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		if mints.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"token":"inst-token","expires_at":"2099-01-01T00:00:00Z"}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/statuses/abc123", func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := &client{API: srv.URL + "/", url: srv.URL, appID: 123, appKey: key}
+	p := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusSuccess}
+	require.NoError(t, c.StatusAggregate(context.Background(), &model.User{AccessToken: "user-token"},
+		&model.Repo{Owner: "o", Name: "r"}, p, []*model.Workflow{{Name: "build", State: model.StatusSuccess}}))
+	assert.Equal(t, int32(2), mints.Load())
+	assert.Equal(t, []string{"Bearer inst-token"}, auths)
 }
