@@ -31,6 +31,7 @@ type Workflow struct {
 	DependsOn      []string          `json:"depends_on,omitempty" xorm:"json 'depends_on'"`
 	AxisID         int               `json:"-"                    xorm:"axis_id"`
 	OnMetadataEdit bool              `json:"on_metadata_edit,omitempty" xorm:"on_metadata_edit"`
+	Attempts       int               `json:"attempts"              xorm:"attempts"`
 	Children       []*Step           `json:"children,omitempty"   xorm:"-"`
 }
 
