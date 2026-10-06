@@ -28,6 +28,9 @@ import (
 	store_types "go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
+// defaultReapTimeout mirrors the timeout a repo with no explicit setting gets.
+const defaultReapTimeout = 60 * time.Minute
+
 // ReapOrphanedWorkflows finalizes active workflows that cannot finish through an agent.
 func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Time, grace time.Duration) error {
 	feeds, err := storage.GetPipelineQueue()
@@ -100,7 +103,7 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 
 			// A live agent enforces the real deadline; this is a backstop, so never
 			// reap before the longest timeout the workflow could have been given.
-			timeout := 60 * time.Minute
+			timeout := defaultReapTimeout
 			if repo.Timeout != 0 {
 				timeout = time.Duration(repo.Timeout) * time.Minute
 			}
@@ -138,7 +141,7 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				}
 			}
 			oldEnough := anchor != 0 && time.Unix(anchor, 0).Before(now.Add(-grace))
-			if !timedOut && !(agentGone && oldEnough) {
+			if !timedOut && (!agentGone || !oldEnough) {
 				continue
 			}
 
