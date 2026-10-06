@@ -77,6 +77,41 @@ func (q *persistentQueue) PushAtOnce(c context.Context, tasks []*model.Task) err
 	return err
 }
 
+func (q *persistentQueue) Requeue(c context.Context, id string) error {
+	qf, ok := q.Queue.(*fifo)
+	if !ok {
+		return errors.New("persistent queue requires fifo queue for task snapshots")
+	}
+	task := qf.snapshotRunningTask(id)
+	if task == nil {
+		return ErrNotFound
+	}
+	if err := q.store.TaskInsert(task); err != nil {
+		if !errors.Is(err, types.ErrInsertDuplicateDetected) {
+			qf.retryReserved(id)
+			return err
+		}
+		// The backup row may have survived an earlier interrupted requeue.
+	}
+	if err := q.Queue.Requeue(c, id); err != nil {
+		if deleteErr := q.store.TaskDelete(id); deleteErr != nil && !errors.Is(deleteErr, types.ErrRecordNotExist) {
+			qf.retryReserved(id)
+			return errors.Join(err, deleteErr)
+		}
+		qf.retryReserved(id)
+		return err
+	}
+	return nil
+}
+
+func (q *persistentQueue) Reserve(c context.Context, id string, agentID int64, expiredOnly bool) error {
+	return q.Queue.Reserve(c, id, agentID, expiredOnly)
+}
+
+func (q *persistentQueue) Expired() <-chan ExpiredTask {
+	return q.Queue.Expired()
+}
+
 // Poll retrieves and removes a task head of this queue.
 func (q *persistentQueue) Poll(c context.Context, agentID int64, f func(*model.Task) (bool, int)) (*model.Task, error) {
 	task, err := q.Queue.Poll(c, agentID, f)

@@ -191,6 +191,9 @@ type Store interface {
 	WorkflowLoad(int64) (*model.Workflow, error)
 	WorkflowByStep(*model.Step) (*model.Workflow, error)
 	WorkflowUpdate(*model.Workflow) error
+	// WorkflowResetForRequeue returns a workflow its agent lost to pending if
+	// the row still belongs to agentID; false means the row changed.
+	WorkflowResetForRequeue(workflow *model.Workflow, steps []*model.Step, agentID int64) (bool, error)
 
 	// Org
 	OrgCreate(*model.Org) error

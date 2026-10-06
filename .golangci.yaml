@@ -230,6 +230,8 @@ linters:
           alias: tracer_mocks
         - pkg: go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks
           alias: queue_mocks
+        - pkg: go.woodpecker-ci.org/woodpecker/v3/server/scheduler/mocks
+          alias: scheduler_mocks
         - pkg: go.woodpecker-ci.org/woodpecker/v3/server/store/mocks
           alias: store_mocks
         - pkg: go.woodpecker-ci.org/woodpecker/v3/server/services/config/mocks
