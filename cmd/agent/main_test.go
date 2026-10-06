@@ -15,11 +15,11 @@
 package main
 
 import (
+	"os"
 	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"os"
 )
 
 func TestForwardFirstStopsBeforeForwarding(t *testing.T) {

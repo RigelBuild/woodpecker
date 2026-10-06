@@ -193,7 +193,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 		Msg("workflow finished")
 
 	// Update workflow state
-	doneCtx := runnerCtx //nolint:contextcheck
+	doneCtx := runnerCtx
 	if doneCtx.Err() != nil {
 		shutdownCtx, shutdownCtxCancel := context.WithTimeout(context.WithoutCancel(runnerCtx), shutdownTimeout)
 		defer shutdownCtxCancel()
