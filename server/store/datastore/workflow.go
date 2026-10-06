@@ -184,12 +184,15 @@ func (s storage) WorkflowResetForRequeue(workflow *model.Workflow, steps []*mode
 		return true, nil
 
 	case row.State == model.StatusPending && (row.AgentID == 0 || row.AgentID == agentID):
-		n, err := sess.ID(row.ID).
-			Where("state = ? AND agent_id IN (0, ?)", row.State, agentID).
-			Cols("agent_id").
-			Update(&model.Workflow{})
-		if err != nil || n != 1 {
-			return false, err
+		// MySQL counts changed rows, not matched ones, so an agent already 0 needs no write.
+		if row.AgentID != 0 {
+			n, err := sess.ID(row.ID).
+				Where("state = ? AND agent_id = ?", row.State, row.AgentID).
+				Cols("agent_id").
+				Update(&model.Workflow{})
+			if err != nil || n != 1 {
+				return false, err
+			}
 		}
 		if err := sess.Commit(); err != nil {
 			return false, err

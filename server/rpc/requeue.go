@@ -35,8 +35,8 @@ import (
 // maxAgentLossRequeues caps how often one workflow is requeued after losing its agent.
 const maxAgentLossRequeues = 2
 
-// agentLossRequeueable reports whether a workflow whose agent went away may run again.
-func agentLossRequeueable(workflow *model.Workflow, currentPipeline *model.Pipeline) bool {
+// canRequeueAfterAgentLoss reports whether a workflow whose agent went away may run again.
+func canRequeueAfterAgentLoss(workflow *model.Workflow, currentPipeline *model.Pipeline) bool {
 	if workflow.Attempts >= maxAgentLossRequeues {
 		return false
 	}
@@ -163,7 +163,7 @@ func (s *RPC) HandleExpired(c context.Context, ev queue.ExpiredTask) error {
 
 	case workflow.State == model.StatusRunning && workflow.AgentID == ev.AgentID:
 		state := rpc.WorkflowState{Started: workflow.Started, Finished: time.Now().Unix(), Canceled: true}
-		if agentLossRequeueable(workflow, currentPipeline) {
+		if canRequeueAfterAgentLoss(workflow, currentPipeline) {
 			handled, err := s.requeueReserved(c, workflow, currentPipeline, repo, ev.AgentID, state)
 			if handled {
 				return err

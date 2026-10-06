@@ -362,7 +362,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		return err
 	}
 
-	if state.AgentShutdown && agentLossRequeueable(workflow, currentPipeline) {
+	if state.AgentShutdown && canRequeueAfterAgentLoss(workflow, currentPipeline) {
 		if err := s.scheduler.Reserve(c, strWorkflowID, agent.ID, false); errors.Is(err, queue.ErrNotFound) {
 			log.Debug().Err(err).Str("workflow_id", strWorkflowID).Msg("done: workflow left the queue before requeue")
 		} else if err != nil {
