@@ -50,6 +50,7 @@ func setupTestQueue(t *testing.T) (context.Context, context.CancelCauseFunc, *fi
 
 	return ctx, cancel, q
 }
+
 func receiveExpiredTask(t *testing.T, q *fifo) ExpiredTask {
 	t.Helper()
 	select {
@@ -1046,6 +1047,7 @@ func TestFifoLeaseManagement(t *testing.T) {
 		assert.Len(t, info.Running, 0)
 	})
 }
+
 func TestFifoReserveAndRequeue(t *testing.T) {
 	ctx, cancel, q := setupTestQueue(t)
 	defer cancel(nil)
@@ -1250,6 +1252,7 @@ func TestFifoExpiredEventsDoNotBlockDispatch(t *testing.T) {
 		t.Fatal("dropped expiry event was not retried after the buffer drained")
 	}
 }
+
 func TestFifoFinishExpiredEntries(t *testing.T) {
 	tests := []struct {
 		name   string
