@@ -127,6 +127,33 @@ func TestPersistentQueuePollReturnsLiveTask(t *testing.T) {
 	assert.Equal(t, "1", got.ID)
 }
 
+func TestPersistentQueueRequeuePersistsBeforePoll(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	store := store_mocks.NewMockStore(t)
+	task := genDummyTask()
+	store.EXPECT().TaskInsert(task).Return(nil).Once()
+	store.EXPECT().TaskDelete("1").Return(nil).Once()
+	store.EXPECT().WorkflowLoad(int64(1)).Return(&model.Workflow{ID: 1, State: model.StatusPending}, nil).Once()
+	store.EXPECT().TaskInsert(task).Run(func(*model.Task) {
+		assert.Equal(t, 1, q.Info(ctx).Stats.Running, "requeued task must remain reserved until its backup row is inserted")
+	}).Return(nil).Once()
+	store.EXPECT().TaskDelete("1").Return(nil).Once()
+	store.EXPECT().WorkflowLoad(int64(1)).Return(&model.Workflow{ID: 1, State: model.StatusPending}, nil).Once()
+	pq := &persistentQueue{Queue: q, store: store}
+
+	assert.NoError(t, pq.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := pq.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	assert.Equal(t, task.ID, got.ID)
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+	assert.NoError(t, pq.Requeue(ctx, got.ID))
+
+	got, err = pq.Poll(ctx, 2, filterFnTrue)
+	assert.NoError(t, err)
+	assert.Equal(t, task.ID, got.ID)
+}
+
 func TestPersistentQueueDoneRemovesPendingTaskFromBackup(t *testing.T) {
 	ctx, cancel, q := setupTestQueue(t)
 	defer cancel(nil)
