@@ -103,6 +103,14 @@
                 class="pr-2px mr-1"
               />
             </button>
+            <div
+              v-else-if="workflow.attempts !== undefined && workflow.attempts > 0"
+              class="flex items-center px-2 py-1"
+            >
+              <span class="text-wp-text-alt-100 shrink-0 text-xs">
+                {{ $t('repo.pipeline.attempt', { attempt: workflow.attempts + 1 }) }}
+              </span>
+            </div>
           </div>
           <div
             class="transition-height overflow-hidden duration-150"
