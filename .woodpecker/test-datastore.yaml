@@ -4,6 +4,9 @@
 # chained 1-wide (serial) so only one runs at a time on a 4 GiB agent.
 labels:
   backend: docker
+  # DB tests hang on a busy homelab disk (RIG-4716);
+  # every aws pool run passed, so keep the DB tests there.
+  cloud: aws
 
 variables:
   - &golang_image 'docker.io/golang:1.27'
