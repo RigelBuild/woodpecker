@@ -37,8 +37,24 @@ var backends = []backend_types.Backend{
 func main() {
 	dot_env.Load()
 
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	ctx := core.AgentRootContext(context.Background(), signals)
+	ctx := core.AgentRootContext(context.Background(), firstSignal())
 	core.RunAgent(ctx, backends)
+}
+
+// firstSignal forwards one SIGINT/SIGTERM, then restores default handling so a
+// second signal kills a stuck shutdown.
+func firstSignal() <-chan os.Signal {
+	notified := make(chan os.Signal, 1)
+	signal.Notify(notified, syscall.SIGINT, syscall.SIGTERM)
+	return forwardFirst(notified, func() { signal.Stop(notified) })
+}
+
+func forwardFirst(notified <-chan os.Signal, stop func()) <-chan os.Signal {
+	first := make(chan os.Signal, 1)
+	go func() {
+		sig := <-notified
+		stop()
+		first <- sig
+	}()
+	return first
 }
