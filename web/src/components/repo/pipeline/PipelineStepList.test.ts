@@ -1,6 +1,7 @@
 import { shallowMount } from '@vue/test-utils';
 import { describe, expect, it } from 'vitest';
 import { ref } from 'vue';
+import type { Ref } from 'vue';
 import { createI18n } from 'vue-i18n';
 
 import PipelineStepList from '~/components/repo/pipeline/PipelineStepList.vue';
@@ -14,17 +15,17 @@ const i18n = createI18n({
   fallbackLocale: 'en',
   missingWarn: false,
   fallbackWarn: false,
-  messages: { en: {} },
+  messages: { en: { repo: { pipeline: { attempt: 'attempt {attempt}' } } } },
 });
 
 const pipelineConfigs = ref<PipelineConfig[]>([{ hash: 'h', name: 'default', data: '' }]);
 
-function mountStepList(pipeline: Pipeline) {
+function mountStepList(pipeline: Pipeline, configs: Ref<PipelineConfig[]> = pipelineConfigs) {
   return shallowMount(PipelineStepList, {
     props: { pipeline },
     global: {
       plugins: [i18n],
-      provide: { 'pipeline-configs': pipelineConfigs },
+      provide: { 'pipeline-configs': configs },
       // shallowMount stubs the imported child components (Icon/Badge/Panel/...),
       // but router-link is resolved globally via vue-router which we do not install.
       stubs: { 'router-link': true, RouterLink: true },
@@ -52,7 +53,12 @@ interface LooseWorkflow extends Omit<PipelineWorkflow, 'children'> {
   children: PipelineStep[] | null;
 }
 
-function makeWorkflow(id: number, children: PipelineStep[] | null, state: PipelineWorkflow['state']): LooseWorkflow {
+function makeWorkflow(
+  id: number,
+  children: PipelineStep[] | null,
+  state: PipelineWorkflow['state'],
+  attempts?: number,
+): LooseWorkflow {
   return {
     id,
     pipeline_id: 1,
@@ -62,6 +68,7 @@ function makeWorkflow(id: number, children: PipelineStep[] | null, state: Pipeli
     started: 1,
     finished: 2,
     children,
+    attempts,
   };
 }
 
@@ -141,5 +148,18 @@ describe('pipelineStepList', () => {
     const pipeline = makePipeline([makeWorkflow(1, [], 'skipped'), makeWorkflow(2, [makeStep(1)], 'success')]);
 
     expect(() => mountStepList(pipeline)).not.toThrow();
+  });
+  it('omits the attempt label on the first attempt', () => {
+    const workflow = makeWorkflow(1, [], 'success', 0);
+    const wrapper = mountStepList(makePipeline([workflow]), ref<PipelineConfig[]>([]));
+
+    expect(wrapper.get('button[title="workflow-1"]').text()).not.toContain('attempt');
+  });
+
+  it('shows the one-based attempt number for a requeued workflow', () => {
+    const workflow = makeWorkflow(1, [], 'success', 1);
+    const wrapper = mountStepList(makePipeline([workflow]), ref<PipelineConfig[]>([]));
+
+    expect(wrapper.get('button[title="workflow-1"]').text()).toContain('attempt 2');
   });
 });

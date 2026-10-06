@@ -124,6 +124,7 @@ export interface PipelineWorkflow {
   agent_id?: number;
   error?: string;
   children?: PipelineStep[];
+  attempts?: number;
 }
 
 export interface PipelineStep {
