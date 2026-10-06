@@ -67,7 +67,7 @@ func hasUnfinishedStep(steps []*model.Step) bool {
 }
 
 // requeueReserved resets a reserved workflow and puts it back in the queue.
-// handled is false when the row no longer belongs to agentID; the caller then
+// The handled result is false when the row no longer belongs to agentID; the caller then
 // finalizes the workflow, which also releases the reserved entry.
 func (s *RPC) requeueReserved(c context.Context, workflow *model.Workflow, currentPipeline *model.Pipeline, repo *model.Repo, agentID int64, state rpc.WorkflowState) (handled bool, err error) {
 	strWorkflowID := strconv.FormatInt(workflow.ID, 10)
