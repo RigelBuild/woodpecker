@@ -6521,6 +6521,78 @@ func (_c *MockStore_WorkflowLoad_Call) RunAndReturn(run func(n int64) (*model.Wo
 	return _c
 }
 
+// WorkflowResetForRequeue provides a mock function for the type MockStore
+func (_mock *MockStore) WorkflowResetForRequeue(workflow *model.Workflow, steps []*model.Step, agentID int64) (bool, error) {
+	ret := _mock.Called(workflow, steps, agentID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for WorkflowResetForRequeue")
+	}
+
+	var r0 bool
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(*model.Workflow, []*model.Step, int64) (bool, error)); ok {
+		return returnFunc(workflow, steps, agentID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(*model.Workflow, []*model.Step, int64) bool); ok {
+		r0 = returnFunc(workflow, steps, agentID)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	if returnFunc, ok := ret.Get(1).(func(*model.Workflow, []*model.Step, int64) error); ok {
+		r1 = returnFunc(workflow, steps, agentID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_WorkflowResetForRequeue_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'WorkflowResetForRequeue'
+type MockStore_WorkflowResetForRequeue_Call struct {
+	*mock.Call
+}
+
+// WorkflowResetForRequeue is a helper method to define mock.On call
+//   - workflow *model.Workflow
+//   - steps []*model.Step
+//   - agentID int64
+func (_e *MockStore_Expecter) WorkflowResetForRequeue(workflow any, steps any, agentID any) *MockStore_WorkflowResetForRequeue_Call {
+	return &MockStore_WorkflowResetForRequeue_Call{Call: _e.mock.On("WorkflowResetForRequeue", workflow, steps, agentID)}
+}
+
+func (_c *MockStore_WorkflowResetForRequeue_Call) Run(run func(workflow *model.Workflow, steps []*model.Step, agentID int64)) *MockStore_WorkflowResetForRequeue_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.Workflow
+		if args[0] != nil {
+			arg0 = args[0].(*model.Workflow)
+		}
+		var arg1 []*model.Step
+		if args[1] != nil {
+			arg1 = args[1].([]*model.Step)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_WorkflowResetForRequeue_Call) Return(b bool, err error) *MockStore_WorkflowResetForRequeue_Call {
+	_c.Call.Return(b, err)
+	return _c
+}
+
+func (_c *MockStore_WorkflowResetForRequeue_Call) RunAndReturn(run func(workflow *model.Workflow, steps []*model.Step, agentID int64) (bool, error)) *MockStore_WorkflowResetForRequeue_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // WorkflowUpdate provides a mock function for the type MockStore
 func (_mock *MockStore) WorkflowUpdate(workflow *model.Workflow) error {
 	ret := _mock.Called(workflow)

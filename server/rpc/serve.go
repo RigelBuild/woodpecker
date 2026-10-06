@@ -72,15 +72,15 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	woodpeckerServer := NewWoodpeckerServer(
 		cfg.Scheduler, cfg.Logger, cfg.Store, cfg.Registerer,
 	)
+	// Same-package invariant: NewWoodpeckerServer always returns
+	// *WoodpeckerServer. Use comma-ok rather than a bare assertion so a
+	// future upstream change to the concrete type surfaces as a returned
+	// error, never a panic that takes the process down.
+	ws, ok := woodpeckerServer.(*WoodpeckerServer)
+	if !ok {
+		return fmt.Errorf("rpc serve: NewWoodpeckerServer returned %T, want *WoodpeckerServer", woodpeckerServer)
+	}
 	if cfg.ReportWG != nil {
-		// Same-package invariant: NewWoodpeckerServer always returns
-		// *WoodpeckerServer. Use comma-ok rather than a bare assertion so a
-		// future upstream change to the concrete type surfaces as a returned
-		// error, never a panic that takes the process down.
-		ws, ok := woodpeckerServer.(*WoodpeckerServer)
-		if !ok {
-			return fmt.Errorf("rpc serve: NewWoodpeckerServer returned %T, want *WoodpeckerServer", woodpeckerServer)
-		}
 		ws.peer.reportWG = cfg.ReportWG
 	}
 	proto.RegisterWoodpeckerServer(grpcServer, woodpeckerServer)
@@ -90,6 +90,8 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 
 	grpcCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+
+	go ws.peer.consumeExpired(grpcCtx)
 
 	go func() {
 		<-grpcCtx.Done()

@@ -44,6 +44,12 @@ func UpdateWorkflowToStatusSkipped(store store.Store, workflow model.Workflow) (
 	return &workflow, store.WorkflowUpdate(&workflow)
 }
 
+// ResetWorkflowForRequeue returns the workflow and its steps to pending for
+// another attempt; false means the row no longer belongs to agentID.
+func ResetWorkflowForRequeue(store store.Store, workflow *model.Workflow, agentID int64) (bool, error) {
+	return store.WorkflowResetForRequeue(workflow, workflow.Children, agentID)
+}
+
 func UpdateWorkflowStatusToDone(store store.Store, workflow model.Workflow, state rpc.WorkflowState) (*model.Workflow, error) {
 	workflow.Finished = state.Finished
 	workflow.Error = state.Error

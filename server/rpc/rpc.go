@@ -362,6 +362,40 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		return err
 	}
 
+	if state.AgentShutdown && agentLossRequeueable(workflow, currentPipeline) {
+		if err := s.scheduler.Reserve(c, strWorkflowID, agent.ID, false); errors.Is(err, queue.ErrNotFound) {
+			log.Debug().Err(err).Str("workflow_id", strWorkflowID).Msg("done: workflow left the queue before requeue")
+		} else if err != nil {
+			log.Error().Err(err).Str("workflow_id", strWorkflowID).Msg("done: cannot reserve workflow, finalizing it")
+		} else {
+			handled, err := s.requeueReserved(c, workflow, currentPipeline, repo, agent.ID, state)
+			if handled {
+				if err != nil {
+					return err
+				}
+				return s.updateAgentLastWork(agent)
+			}
+			log.Warn().Err(err).Str("workflow_id", strWorkflowID).Msg("done: cannot requeue workflow, finalizing it")
+		}
+	}
+
+	// A re-run would repeat side effects, so finished steps decide the result.
+	if state.AgentShutdown && !hasUnfinishedStep(workflow.Children) {
+		state.Canceled = false
+	}
+
+	if err := s.finishWorkflow(c, workflow, currentPipeline, repo, state); err != nil {
+		return err
+	}
+
+	return s.updateAgentLastWork(agent)
+}
+
+// finishWorkflow stores the final workflow state, releases its queue entry and
+// updates the pipeline, the forge and subscribers.
+func (s *RPC) finishWorkflow(c context.Context, workflow *model.Workflow, currentPipeline *model.Pipeline, repo *model.Repo, state rpc.WorkflowState) error {
+	var err error
+	strWorkflowID := strconv.FormatInt(workflow.ID, 10)
 	logger := log.With().
 		Str("repo_id", fmt.Sprint(repo.ID)).
 		Str("pipeline_id", fmt.Sprint(currentPipeline.ID)).
@@ -438,7 +472,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		s.pipelineTime.WithLabelValues(repo.FullName, currentPipeline.Branch, string(workflow.State), workflow.Name).Set(float64(workflow.Finished - workflow.Started))
 	}
 
-	return s.updateAgentLastWork(agent)
+	return nil
 }
 
 // Log writes a log entry to the database and publishes it to the pubsub.

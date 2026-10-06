@@ -141,3 +141,63 @@ func (s storage) WorkflowUpdate(workflow *model.Workflow) error {
 	_, err := s.engine.ID(workflow.ID).AllCols().Update(workflow)
 	return err
 }
+
+// WorkflowResetForRequeue compares and sets the workflow row in one transaction,
+// so a concurrent finish or re-dispatch of the same row wins over the reset.
+func (s storage) WorkflowResetForRequeue(workflow *model.Workflow, steps []*model.Step, agentID int64) (bool, error) {
+	sess := s.engine.NewSession()
+	defer sess.Close()
+	if err := sess.Begin(); err != nil {
+		return false, err
+	}
+
+	row := new(model.Workflow)
+	if err := wrapGet(sess.ID(workflow.ID).Get(row)); err != nil {
+		return false, err
+	}
+
+	switch {
+	case row.State == model.StatusRunning && row.AgentID == agentID:
+		reset := &model.Workflow{State: model.StatusPending, Attempts: row.Attempts + 1}
+		n, err := sess.ID(row.ID).
+			Where("state = ? AND agent_id = ? AND attempts = ?", row.State, agentID, row.Attempts).
+			Cols("state", "started", "finished", "error", "agent_id", "attempts").
+			Update(reset)
+		if err != nil || n != 1 {
+			return false, err
+		}
+		for _, step := range steps {
+			if _, err := sess.ID(step.ID).
+				Cols("state", "started", "finished", "exit_code", "error").
+				Update(&model.Step{State: model.StatusPending}); err != nil {
+				return false, err
+			}
+		}
+		if err := sess.Commit(); err != nil {
+			return false, err
+		}
+		workflow.State, workflow.Started, workflow.Finished, workflow.Error = model.StatusPending, 0, 0, ""
+		workflow.AgentID, workflow.Attempts = 0, reset.Attempts
+		for _, step := range steps {
+			step.State, step.Started, step.Finished, step.ExitCode, step.Error = model.StatusPending, 0, 0, 0, ""
+		}
+		return true, nil
+
+	case row.State == model.StatusPending && (row.AgentID == 0 || row.AgentID == agentID):
+		n, err := sess.ID(row.ID).
+			Where("state = ? AND agent_id IN (0, ?)", row.State, agentID).
+			Cols("agent_id").
+			Update(&model.Workflow{})
+		if err != nil || n != 1 {
+			return false, err
+		}
+		if err := sess.Commit(); err != nil {
+			return false, err
+		}
+		workflow.AgentID = 0
+		return true, nil
+
+	default:
+		return false, nil
+	}
+}
