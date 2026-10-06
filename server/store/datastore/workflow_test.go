@@ -20,8 +20,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"xorm.io/xorm"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore/migration"
 )
 
 func TestWorkflowLoad(t *testing.T) {
@@ -117,6 +119,51 @@ func TestWorkflowAttemptsAndDetachedRoundTrip(t *testing.T) {
 	assert.Equal(t, 2, got[0].Attempts)
 	require.Len(t, got[0].Children, 1)
 	assert.True(t, got[0].Children[0].Detached)
+}
+
+type legacyWorkflowSchema struct {
+	ID         int64             `xorm:"pk autoincr 'id'"`
+	PipelineID int64             `xorm:"UNIQUE(s) INDEX 'pipeline_id'"`
+	PID        int               `xorm:"UNIQUE(s) 'pid'"`
+	State      model.StatusValue `xorm:"state"`
+}
+
+func (legacyWorkflowSchema) TableName() string { return "workflows" }
+
+type legacyStepSchema struct {
+	ID         int64             `xorm:"pk autoincr 'id'"`
+	UUID       string            `xorm:"INDEX 'uuid'"`
+	PipelineID int64             `xorm:"UNIQUE(s) INDEX 'pipeline_id'"`
+	PID        int               `xorm:"UNIQUE(s) 'pid'"`
+	PPID       int               `xorm:"ppid"`
+	State      model.StatusValue `xorm:"state"`
+}
+
+func (legacyStepSchema) TableName() string { return "steps" }
+
+func TestWorkflowSyncAddsColumnsForLegacyRows(t *testing.T) {
+	engine, err := xorm.NewEngine("sqlite3", ":memory:")
+	require.NoError(t, err)
+	engine.SetMaxOpenConns(1)
+	engine.SetMaxIdleConns(1)
+	t.Cleanup(func() { require.NoError(t, engine.Close()) })
+
+	require.NoError(t, engine.Sync(new(legacyWorkflowSchema), new(legacyStepSchema)))
+	workflow := &legacyWorkflowSchema{PipelineID: 1, PID: 1, State: model.StatusPending}
+	_, err = engine.Insert(workflow)
+	require.NoError(t, err)
+	step := &legacyStepSchema{UUID: "ea6d4008-8ace-4f8a-ad03-53f1756465d9", PipelineID: 1, PID: 2, PPID: 1, State: model.StatusPending}
+	_, err = engine.Insert(step)
+	require.NoError(t, err)
+
+	require.NoError(t, migration.Migrate(t.Context(), engine, true))
+	store := storage{engine: engine}
+	gotWorkflow, err := store.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	gotStep, err := store.StepLoad(step.PipelineID, step.ID)
+	require.NoError(t, err)
+	assert.Zero(t, gotWorkflow.Attempts)
+	assert.False(t, gotStep.Detached)
 }
 
 func TestWorkflowGetTree(t *testing.T) {
