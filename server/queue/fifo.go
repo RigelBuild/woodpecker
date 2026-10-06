@@ -98,8 +98,10 @@ func (q *fifo) Reserve(_ context.Context, id string, agentID int64, expiredOnly 
 		return ErrNotFound
 	}
 	entry.reserved = true
-	entry.error = ErrTaskExpired
-	entry.closeDone()
+	if !entry.doneClosed {
+		entry.error = ErrTaskExpired
+		entry.closeDone()
+	}
 	return nil
 }
 

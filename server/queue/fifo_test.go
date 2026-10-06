@@ -1339,6 +1339,29 @@ func TestFifoWaitPreservesFirstCompletionError(t *testing.T) {
 	}
 }
 
+func TestFifoReserveAfterExpiryDoesNotRewriteWaitError(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{{ID: "reserve-after-expiry"}}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	q.Lock()
+	q.running[got.ID].deadline = time.Now().Add(-time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+
+	// Wait reads the entry error without the lock; Reserve must not write it again.
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- q.Wait(ctx, got.ID) }()
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, true))
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return for an expired task")
+	}
+}
+
 func TestFifoWorkerManagement(t *testing.T) {
 	ctx, cancel, q := setupTestQueue(t)
 	defer cancel(nil)
