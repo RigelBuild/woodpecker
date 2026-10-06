@@ -76,7 +76,7 @@ steps:
 
 services:
   # Throwaway DBs: skip fsync so commits don't wait on a busy host disk; the
-  # homelab agents' disk stalls hung these tests on a DB read (RIG-4716).
+  # homelab agents hit go-test timeouts on DB reads in these legs (RIG-4716).
   postgres:
     image: docker.io/postgres:18
     entrypoint: [docker-entrypoint.sh, postgres, -c, fsync=off, -c, synchronous_commit=off, -c, full_page_writes=off]
