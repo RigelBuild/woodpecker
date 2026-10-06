@@ -15,6 +15,7 @@
 package datastore
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,22 +74,24 @@ func TestWorkflowResetForRequeue(t *testing.T) {
 
 	t.Run("pending row only clears the agent", func(t *testing.T) {
 		for _, agentID := range []int64{0, 7} {
-			s, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
-			wf := seedRequeueWorkflow(t, s, model.StatusPending, agentID)
+			t.Run(strconv.FormatInt(agentID, 10), func(t *testing.T) {
+				s, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+				defer closer()
+				wf := seedRequeueWorkflow(t, s, model.StatusPending, agentID)
 
-			ok, err := s.WorkflowResetForRequeue(wf, wf.Children, 7)
-			require.NoError(t, err)
-			require.True(t, ok)
+				ok, err := s.WorkflowResetForRequeue(wf, wf.Children, 7)
+				require.NoError(t, err)
+				require.True(t, ok)
 
-			row, err := s.WorkflowLoad(wf.ID)
-			require.NoError(t, err)
-			assert.Equal(t, model.StatusPending, row.State)
-			assert.Zero(t, row.AgentID)
-			assert.Equal(t, 1, row.Attempts)
-			steps, err := s.StepListFromWorkflowFind(row)
-			require.NoError(t, err)
-			assert.Equal(t, model.StatusRunning, steps[1].State)
-			closer()
+				row, err := s.WorkflowLoad(wf.ID)
+				require.NoError(t, err)
+				assert.Equal(t, model.StatusPending, row.State)
+				assert.Zero(t, row.AgentID)
+				assert.Equal(t, 1, row.Attempts)
+				steps, err := s.StepListFromWorkflowFind(row)
+				require.NoError(t, err)
+				assert.Equal(t, model.StatusRunning, steps[1].State)
+			})
 		}
 	})
 

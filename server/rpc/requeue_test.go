@@ -87,8 +87,8 @@ func newRequeueEnv(t *testing.T, lease time.Duration) *requeueEnv {
 	server.Config.Services.LogStore = raw
 	t.Cleanup(func() { server.Config.Services.LogStore = origLogStore })
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+	ctx, cancel := context.WithCancelCause(t.Context())
+	t.Cleanup(func() { cancel(nil) })
 	q, err := queue.New(ctx, queue.Config{Backend: queue.TypeMemory, Store: s})
 	require.NoError(t, err)
 	sched := scheduler.NewScheduler(ctx, s, q, memory.New())
@@ -183,8 +183,8 @@ func (e *requeueEnv) workflow(id int64) *model.Workflow {
 	return wf
 }
 
-func (e *requeueEnv) shutdownDone(wf *model.Workflow, agentID int64) error {
-	return e.rpc.Done(agentCtx(e.t, agentID), strconv.FormatInt(wf.ID, 10),
+func (e *requeueEnv) shutdownDone(wf *model.Workflow) error {
+	return e.rpc.Done(agentCtx(e.t, 1), strconv.FormatInt(wf.ID, 10),
 		rpc.WorkflowState{Started: 100, Finished: 200, Canceled: true, AgentShutdown: true})
 }
 
@@ -234,7 +234,7 @@ func TestDoneAgentShutdownRequeue(t *testing.T) {
 		wf := e.addWorkflow(1, steps(2))
 		e.start(wf, 1, 0, model.StatusSuccess, model.StatusRunning)
 
-		require.NoError(t, e.shutdownDone(wf, 1))
+		require.NoError(t, e.shutdownDone(wf))
 
 		row := e.workflow(wf.ID)
 		assert.Equal(t, model.StatusPending, row.State)
@@ -262,7 +262,7 @@ func TestDoneAgentShutdownRequeue(t *testing.T) {
 		wf := e.addWorkflow(1, steps(2))
 		e.start(wf, 1, maxAgentLossRequeues, model.StatusSuccess, model.StatusRunning)
 
-		require.NoError(t, e.shutdownDone(wf, 1))
+		require.NoError(t, e.shutdownDone(wf))
 
 		row := e.workflow(wf.ID)
 		assert.Equal(t, model.StatusKilled, row.State)
@@ -341,7 +341,7 @@ func TestDoneAgentShutdownRequeue(t *testing.T) {
 		e.start(wf, 1, 0, model.StatusSuccess, model.StatusRunning)
 		require.NoError(t, e.sched.CancelWorkflows(t.Context(), []string{strconv.FormatInt(wf.ID, 10)}))
 
-		require.NoError(t, e.shutdownDone(wf, 1))
+		require.NoError(t, e.shutdownDone(wf))
 
 		row := e.workflow(wf.ID)
 		assert.Equal(t, model.StatusKilled, row.State)
@@ -359,7 +359,7 @@ func TestDoneAgentShutdownRequeue(t *testing.T) {
 			require.NoError(t, e.sched.CancelWorkflows(t.Context(), []string{strconv.FormatInt(w.ID, 10)}))
 		}
 
-		require.NoError(t, e.shutdownDone(wf, 1))
+		require.NoError(t, e.shutdownDone(wf))
 
 		row := e.workflow(wf.ID)
 		assert.Equal(t, model.StatusKilled, row.State)
