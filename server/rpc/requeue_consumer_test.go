@@ -39,7 +39,7 @@ func TestConsumeExpiredKeepsGoingAfterError(t *testing.T) {
 	mockStore.On("WorkflowLoad", int64(31)).Run(func(args mock.Arguments) { loaded <- 31 }).Return(nil, errors.New("db down")).Once()
 
 	r := &RPC{store: mockStore, scheduler: sched}
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancelCause(t.Context())
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -57,7 +57,7 @@ func TestConsumeExpiredKeepsGoingAfterError(t *testing.T) {
 		}
 	}
 
-	cancel()
+	cancel(nil)
 	select {
 	case <-stopped:
 	case <-time.After(10 * time.Second):
@@ -75,7 +75,12 @@ func TestHandleExpiredUsesCallerContext(t *testing.T) {
 	mockStore.On("GetRepo", int64(10)).Return(&model.Repo{ID: 10}, nil)
 	var reserveCtx context.Context
 	sched.On("Reserve", mock.Anything, "30", int64(1), true).Run(func(args mock.Arguments) {
-		reserveCtx = args.Get(0).(context.Context)
+		ctx, ok := args.Get(0).(context.Context)
+		if !ok {
+			t.Error("Reserve called without a context")
+			return
+		}
+		reserveCtx = ctx
 	}).Return(queue.ErrNotFound)
 
 	ctx := context.WithValue(t.Context(), key{}, "server")
