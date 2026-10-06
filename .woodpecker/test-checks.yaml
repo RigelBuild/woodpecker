@@ -75,12 +75,14 @@ steps:
         path:
           - '.woodpecker/**'
 
-  # Unit tests for the GitHub Actions image publishers' version guard.
+  # Unit tests for the GitHub Actions image publishers' version and source guards.
   test-image-version:
     depends_on: []
     image: docker.io/bash:5
     commands:
+      - apk add --no-cache git
       - .github/scripts/resolve-image-version.test.sh
+      - .github/scripts/check-release-source.test.sh
     when:
       - event: pull_request
         path:
