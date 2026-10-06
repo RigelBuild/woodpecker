@@ -248,6 +248,26 @@ func TestPersistentQueueRequeueInsertFailureCanRetry(t *testing.T) {
 	assert.Equal(t, task.ID, got.ID)
 }
 
+func TestPersistentQueueRequeueAcceptsSurvivingBackupRow(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	store := store_mocks.NewMockStore(t)
+	task := genDummyTask()
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+
+	store.EXPECT().TaskInsert(mock.Anything).Return(types.ErrInsertDuplicateDetected).Once()
+	store.EXPECT().TaskDelete(task.ID).Return(nil).Once()
+	store.EXPECT().WorkflowLoad(int64(1)).Return(&model.Workflow{ID: 1, State: model.StatusPending}, nil).Once()
+	pq := &persistentQueue{Queue: q, store: store}
+	assert.NoError(t, pq.Requeue(ctx, task.ID))
+	got, err = pq.Poll(ctx, 2, filterFnTrue)
+	assert.NoError(t, err)
+	assert.Equal(t, task.ID, got.ID)
+}
+
 func TestPersistentQueueRequeueDeletesBackupOnQueueFailure(t *testing.T) {
 	ctx, cancel, q := setupTestQueue(t)
 	defer cancel(nil)
