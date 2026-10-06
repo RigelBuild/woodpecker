@@ -27,6 +27,8 @@ env:
 
 jobs:
   resolve:
+    # Dispatch may only run from the release branch; tags are checked by the source guard.
+    if: github.event_name == 'push' || github.ref == 'refs/heads/rigel-release'
     runs-on: ubuntu-latest
     permissions:
       contents: read
