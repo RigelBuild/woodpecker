@@ -30,7 +30,6 @@ import (
 	pipeline_runtime "go.woodpecker-ci.org/woodpecker/v3/pipeline/runtime"
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
-	"go.woodpecker-ci.org/woodpecker/v3/shared/utils"
 )
 
 const shutdownTimeout = time.Second * 5
@@ -99,17 +98,10 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 
 	// Workflow execution context.
 	// This context is the SINGLE source of truth for cancellation.
-	workflowCtx, _ := context.WithTimeout(ctxMeta, timeout) //nolint:govet
-	workflowCtx, cancelWorkflowCtx := context.WithCancelCause(workflowCtx)
+	workflowTimeoutCtx, cancelWorkflowTimeout := context.WithTimeout(ctxMeta, timeout)
+	defer cancelWorkflowTimeout()
+	workflowCtx, cancelWorkflowCtx := context.WithCancelCause(workflowTimeoutCtx)
 	defer cancelWorkflowCtx(nil)
-
-	// Add sigterm support for internal context.
-	// Required to be able to terminate the running workflow by external signals.
-	workflowCtx = utils.WithContextSigtermCallback(workflowCtx, func() {
-		logger.Error().Msg("received sigterm termination signal")
-		// WithContextSigtermCallback would cancel the context too, but  we want our own custom error
-		cancelWorkflowCtx(pipeline_errors.ErrCancel)
-	})
 
 	// Listen for remote cancel events (UI / API).
 	// When canceled, we MUST cancel the workflow context
@@ -147,9 +139,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 		}
 	}()
 
-	state := rpc.WorkflowState{
-		Started: time.Now().Unix(),
-	}
+	state := rpc.WorkflowState{Started: time.Now().Unix()}
 
 	if err := r.client.Init(runnerCtx, workflow.ID, state); err != nil {
 		logger.Error().Err(err).Msg("signaling workflow initialization to server failed")
@@ -195,6 +185,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 			state.Error = err.Error()
 		}
 	}
+	state.AgentShutdown = state.Canceled && errors.Is(context.Cause(workflowCtx), pipeline_errors.ErrAgentShutdown)
 
 	logger.Debug().
 		Str("error", state.Error).
@@ -204,7 +195,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 	// Update workflow state
 	doneCtx := runnerCtx //nolint:contextcheck
 	if doneCtx.Err() != nil {
-		shutdownCtx, shutdownCtxCancel := GetShutdownContext()
+		shutdownCtx, shutdownCtxCancel := context.WithTimeout(context.WithoutCancel(runnerCtx), shutdownTimeout)
 		defer shutdownCtxCancel()
 		// keep the gRPC metadata
 		doneCtx = metadata.NewOutgoingContext(shutdownCtx, meta)

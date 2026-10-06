@@ -27,6 +27,8 @@ var (
 	// ErrCancel is used as a return value when the container execution receives
 	// a cancellation signal from the context.
 	ErrCancel = errors.New("Canceled")
+
+	ErrAgentShutdown = fmt.Errorf("agent shutdown: %w", ErrCancel)
 )
 
 // An ExitError reports an unsuccessful exit.

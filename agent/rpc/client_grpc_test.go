@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,15 +17,59 @@ package rpc
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/cenkalti/backoff/v7"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+
+	"go.woodpecker-ci.org/woodpecker/v3/rpc"
+	"go.woodpecker-ci.org/woodpecker/v3/rpc/proto"
 )
+
+type doneCaptureServer struct {
+	proto.UnimplementedWoodpeckerServer
+	requests chan *proto.DoneRequest
+}
+
+func (s *doneCaptureServer) Done(_ context.Context, req *proto.DoneRequest) (*proto.Empty, error) {
+	s.requests <- req
+	return &proto.Empty{}, nil
+}
+
+func TestClientDoneSendsAgentShutdown(t *testing.T) {
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer()
+	capture := &doneCaptureServer{requests: make(chan *proto.DoneRequest, 1)}
+	proto.RegisterWoodpeckerServer(server, capture)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		return listener.DialContext(ctx)
+	}), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := NewGrpcClient(t.Context(), conn, SetConnectionRetryTimeout(time.Second))
+	require.NoError(t, client.Done(t.Context(), "workflow-id", rpc.WorkflowState{AgentShutdown: true}))
+	select {
+	case req := <-capture.requests:
+		assert.True(t, req.GetState().GetAgentShutdown())
+	case <-time.After(time.Second):
+		t.Fatal("Done request was not received")
+	}
+}
 
 func TestSetConnectionRetryTimeout(t *testing.T) {
 	tc := []struct {
