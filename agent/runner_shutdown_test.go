@@ -133,7 +133,11 @@ func shutdownBackend(t *testing.T, onCancel func(context.Context)) *mocks.MockBa
 	engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
-			ctx := args.Get(0).(context.Context)
+			ctx, ok := args.Get(0).(context.Context)
+			if !ok {
+				t.Error("StartStep called without a context")
+				return
+			}
 			<-ctx.Done()
 			if onCancel != nil {
 				onCancel(ctx)
@@ -152,9 +156,19 @@ func shutdownPeer(t *testing.T, done *rpc.WorkflowState, workflow *rpc.Workflow,
 	peer.On("Update", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	peer.On("Done", mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
-			*done = args.Get(2).(rpc.WorkflowState)
+			state, ok := args.Get(2).(rpc.WorkflowState)
+			if !ok {
+				t.Error("Done called without a WorkflowState")
+				return
+			}
+			*done = state
 			if onDone != nil {
-				onDone(args.Get(0).(context.Context))
+				ctx, ok := args.Get(0).(context.Context)
+				if !ok {
+					t.Error("Done called without a context")
+					return
+				}
+				onDone(ctx)
 			}
 		}).Return(nil)
 	return peer
