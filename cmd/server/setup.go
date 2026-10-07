@@ -188,7 +188,7 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Server.WebhookSyncTimeout = c.Duration("webhook-sync-timeout")
 	server.Config.Server.OrphanReapInterval = c.Duration("orphan-reap-interval")
 	server.Config.Server.OrphanReapGrace = c.Duration("orphan-reap-grace")
-	server.Config.Server.CreationTimeout = pipelineCreationTimeout(c.Duration("extensions-timeout"))
+	server.Config.Server.CreationTimeout = pipelineCreationTimeout(c.Duration("extensions-timeout"), c.Duration("forge-timeout"), c.Uint("forge-retry"))
 
 	// Pull requests
 	server.Config.Pipeline.DefaultAllowPullRequests = c.Bool("default-allow-pull-requests")
@@ -301,11 +301,14 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 
 const (
 	extensionTries             = 3 // matches the retry count in services/utils.Client.Send
+	extensionCalls             = 3 // config, secret and registry, called in sequence
+	creationSlack              = time.Minute
 	minPipelineCreationTimeout = 2 * time.Minute
 )
 
 // pipelineCreationTimeout lets a background pipeline creation outlast every
-// retry of a slow config extension, plus a minute for forge round-trips.
-func pipelineCreationTimeout(extensionsTimeout time.Duration) time.Duration {
-	return max(minPipelineCreationTimeout, extensionTries*extensionsTimeout+time.Minute)
+// try of each extension it calls plus every forge config read.
+func pipelineCreationTimeout(extensionsTimeout, forgeTimeout time.Duration, forgeRetries uint) time.Duration {
+	budget := extensionCalls*extensionTries*extensionsTimeout + time.Duration(forgeRetries)*forgeTimeout + creationSlack
+	return max(minPipelineCreationTimeout, budget)
 }

@@ -139,8 +139,12 @@ func TestSetupGrpcSecret(t *testing.T) {
 }
 
 func TestPipelineCreationTimeout(t *testing.T) {
-	// The default stays at two minutes; a slow config extension stretches it so
-	// every retry of the extension call finishes before the creation is canceled.
-	assert.Equal(t, 2*time.Minute, pipelineCreationTimeout(10*time.Second))
-	assert.Equal(t, 16*time.Minute, pipelineCreationTimeout(300*time.Second))
+	// Defaults: 9 tries x 10s + 3 forge reads x 5s + 1m slack.
+	assert.Equal(t, 2*time.Minute+45*time.Second, pipelineCreationTimeout(10*time.Second, 5*time.Second, 3))
+	// Tiny timeouts fall back to the two-minute floor.
+	assert.Equal(t, 2*time.Minute, pipelineCreationTimeout(time.Second, time.Second, 1))
+	// 3 extension calls x 3 tries x 300s + 3 forge reads x 5s + 1m slack.
+	assert.Equal(t, 46*time.Minute+15*time.Second, pipelineCreationTimeout(300*time.Second, 5*time.Second, 3))
+	// A large forge budget alone also raises the cap.
+	assert.Equal(t, 11*time.Minute+30*time.Second, pipelineCreationTimeout(10*time.Second, time.Minute, 9))
 }
