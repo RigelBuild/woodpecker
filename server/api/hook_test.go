@@ -152,10 +152,12 @@ func TestHookBackgroundCreationUsesConfiguredTimeout(t *testing.T) {
 	assert.NoError(t, err)
 	header := http.Header{}
 	header.Set("Authorization", fmt.Sprintf("Bearer %s", signedToken))
-	c.Request = &http.Request{Header: header, URL: &url.URL{Scheme: "https"}}
+	type ctxKey struct{}
+	reqCtx, cancelReq := context.WithCancelCause(context.WithValue(t.Context(), ctxKey{}, "trace"))
+	defer cancelReq(nil)
+	c.Request = (&http.Request{Header: header, URL: &url.URL{Scheme: "https"}}).WithContext(reqCtx)
 
 	release := make(chan struct{})
-	remaining := make(chan time.Duration, 1)
 	_manager.On("ForgeFromRepo", repo).Return(_forge, nil)
 	_forge.On("Hook", mock.Anything, mock.Anything).Return(repo, pipeline, nil)
 	_store.On("GetRepo", repo.ID).Return(repo, nil)
@@ -164,12 +166,11 @@ func TestHookBackgroundCreationUsesConfiguredTimeout(t *testing.T) {
 	_store.On("CreatePipeline", mock.Anything).Return(nil)
 	_manager.On("ConfigServiceFromRepo", repo).Return(_configService)
 	created := make(chan struct{})
+	fetchCtx := make(chan context.Context, 1)
 	_configService.On("Fetch", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			ctx, _ := args.Get(0).(context.Context)
-			deadline, ok := ctx.Deadline()
-			assert.True(t, ok)
-			remaining <- time.Until(deadline)
+			fetchCtx <- ctx
 			<-release
 		}).
 		Return(nil, &forge_types.ErrConfigNotFound{})
@@ -179,7 +180,14 @@ func TestHookBackgroundCreationUsesConfiguredTimeout(t *testing.T) {
 	api.PostHook(c)
 	assert.Equal(t, http.StatusAccepted, c.Writer.Status())
 
-	left := <-remaining
+	ctx := <-fetchCtx
+	// The server cancels the request once the 202 is written; creation must survive it.
+	cancelReq(nil)
+	assert.NoError(t, ctx.Err())
+	assert.Equal(t, "trace", ctx.Value(ctxKey{}))
+	deadline, ok := ctx.Deadline()
+	assert.True(t, ok)
+	left := time.Until(deadline)
 	close(release)
 	<-created
 	// Configured 7m, not the 2m default.

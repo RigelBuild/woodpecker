@@ -300,8 +300,10 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 }
 
 const (
-	extensionTries             = 3 // matches the retry count in services/utils.Client.Send
-	extensionCalls             = 3 // config, secret and registry, called in sequence
+	extensionTries = 3 // matches the retry count in services/utils.Client.Send
+	// Config, secret and registry each may call a global then a repo extension, in sequence.
+	extensionCalls             = 6
+	defaultExtensionsTimeout   = 10 * time.Second // services/utils fallback for a nonpositive timeout
 	creationSlack              = time.Minute
 	minPipelineCreationTimeout = 2 * time.Minute
 )
@@ -309,6 +311,9 @@ const (
 // pipelineCreationTimeout lets a background pipeline creation outlast every
 // try of each extension it calls plus every forge config read.
 func pipelineCreationTimeout(extensionsTimeout, forgeTimeout time.Duration, forgeRetries uint) time.Duration {
+	if extensionsTimeout <= 0 {
+		extensionsTimeout = defaultExtensionsTimeout
+	}
 	budget := extensionCalls*extensionTries*extensionsTimeout + time.Duration(forgeRetries)*forgeTimeout + creationSlack
 	return max(minPipelineCreationTimeout, budget)
 }
