@@ -8,6 +8,7 @@ when:
   - event: push
     branch:
       - ${CI_REPO_DEFAULT_BRANCH}
+      - rigel-release
 
 variables:
   - &trivy_plugin docker.io/woodpeckerci/plugin-trivy:1.6.0
