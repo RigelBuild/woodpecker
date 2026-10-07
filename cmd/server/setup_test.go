@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -135,4 +136,11 @@ func TestSetupGrpcSecret(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, decoded, 32)
 	})
+}
+
+func TestPipelineCreationTimeout(t *testing.T) {
+	// The default stays at two minutes; a slow config extension stretches it so
+	// every retry of the extension call finishes before the creation is canceled.
+	assert.Equal(t, 2*time.Minute, pipelineCreationTimeout(10*time.Second))
+	assert.Equal(t, 16*time.Minute, pipelineCreationTimeout(300*time.Second))
 }

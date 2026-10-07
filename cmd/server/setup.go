@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/tink-crypto/tink-go/v2/subtle/random"
@@ -187,6 +188,7 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Server.WebhookSyncTimeout = c.Duration("webhook-sync-timeout")
 	server.Config.Server.OrphanReapInterval = c.Duration("orphan-reap-interval")
 	server.Config.Server.OrphanReapGrace = c.Duration("orphan-reap-grace")
+	server.Config.Server.CreationTimeout = pipelineCreationTimeout(c.Duration("extensions-timeout"))
 
 	// Pull requests
 	server.Config.Pipeline.DefaultAllowPullRequests = c.Bool("default-allow-pull-requests")
@@ -295,4 +297,15 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Permissions.Orgs = permissions.NewOrgs(c.StringSlice("orgs"))
 	server.Config.Permissions.OwnersAllowlist = permissions.NewOwnersAllowlist(c.StringSlice("repo-owners"))
 	return nil
+}
+
+const (
+	extensionTries             = 3 // matches the retry count in services/utils.Client.Send
+	minPipelineCreationTimeout = 2 * time.Minute
+)
+
+// pipelineCreationTimeout lets a background pipeline creation outlast every
+// retry of a slow config extension, plus a minute for forge round-trips.
+func pipelineCreationTimeout(extensionsTimeout time.Duration) time.Duration {
+	return max(minPipelineCreationTimeout, extensionTries*extensionsTimeout+time.Minute)
 }

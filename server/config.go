@@ -62,6 +62,7 @@ var Config = struct {
 		WebhookSyncTimeout     time.Duration
 		OrphanReapInterval     time.Duration
 		OrphanReapGrace        time.Duration
+		CreationTimeout        time.Duration
 	}
 	Agent struct {
 		DisableUserRegisteredAgentRegistration bool
