@@ -303,7 +303,7 @@ const (
 	extensionTries = 3 // matches the retry count in services/utils.Client.Send
 	// Config, secret and registry each may call a global then a repo extension, in sequence.
 	extensionCalls             = 6
-	defaultExtensionsTimeout   = 10 * time.Second // services/utils fallback for a nonpositive timeout
+	defaultExtensionsTimeout   = 10 * time.Second // services/utils fallback for a zero or negative timeout
 	creationSlack              = time.Minute
 	minPipelineCreationTimeout = 2 * time.Minute
 )
