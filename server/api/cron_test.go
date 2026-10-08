@@ -269,6 +269,44 @@ func TestPostCron(t *testing.T) {
 
 		assert.Equal(t, http.StatusConflict, tc.Recorder.Code)
 	})
+
+	t.Run("absent enabled defaults to true", func(t *testing.T) {
+		cronForgeManager(t)
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+		withRepo(repo, &model.Perm{})(tc)
+		withRawBody(http.MethodPost, "application/json", []byte(`{"name":"implicit","schedule":"@every 1h"}`))(tc)
+
+		PostCron(tc.Ctx)
+
+		require.Equal(t, http.StatusOK, tc.Recorder.Code)
+		stored, err := s.CronFind(repo, mustCronID(t, tc))
+		require.NoError(t, err)
+		assert.True(t, stored.Enabled)
+	})
+
+	t.Run("explicit enabled false is kept", func(t *testing.T) {
+		cronForgeManager(t)
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+		withRepo(repo, &model.Perm{})(tc)
+		withRawBody(http.MethodPost, "application/json", []byte(`{"name":"off","schedule":"@every 1h","enabled":false}`))(tc)
+
+		PostCron(tc.Ctx)
+
+		require.Equal(t, http.StatusOK, tc.Recorder.Code)
+		stored, err := s.CronFind(repo, mustCronID(t, tc))
+		require.NoError(t, err)
+		assert.False(t, stored.Enabled)
+	})
+}
+
+func mustCronID(t *testing.T, tc *testContext) int64 {
+	t.Helper()
+	var got model.Cron
+	tc.decodeJSON(t, &got)
+	require.Positive(t, got.ID)
+	return got.ID
 }
 
 func TestRunCron(t *testing.T) {
@@ -337,6 +375,27 @@ func TestPatchCron(t *testing.T) {
 		tc.decodeJSON(t, &got)
 		assert.Equal(t, "renamed", got.Name)
 		assert.Equal(t, "@every 2h", got.Schedule)
+	})
+
+	t.Run("omitted enabled keeps a disabled cron disabled", func(t *testing.T) {
+		cron := seedCron(t, s, repo.ID, "paused")
+		cron.Enabled = false
+		require.NoError(t, s.CronUpdate(repo, cron))
+		cronForgeManager(t)
+
+		newName := "paused-renamed"
+		tc := newTestContext(t, s)
+		withUser(user)(tc)
+		withRepo(repo, &model.Perm{})(tc)
+		withParam("cron", strItoa(cron.ID))(tc)
+		withRequest(http.MethodPatch, &model.CronPatch{Name: &newName})(tc)
+
+		PatchCron(tc.Ctx)
+
+		require.Equal(t, http.StatusOK, tc.Recorder.Code)
+		stored, err := s.CronFind(repo, cron.ID)
+		require.NoError(t, err)
+		assert.False(t, stored.Enabled)
 	})
 
 	t.Run("invalid id returns bad request", func(t *testing.T) {
