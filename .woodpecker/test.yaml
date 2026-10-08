@@ -12,6 +12,9 @@
 # it). This file is the push+PR Go-test spine.
 labels:
   backend: docker
+  # DB tests hang on a busy homelab disk (RIG-4716);
+  # every aws pool run passed, so keep the DB tests there.
+  cloud: aws
 
 variables:
   - &golang_image 'docker.io/golang:1.27'
