@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
 )
 
 var (
@@ -48,6 +49,17 @@ func setupTestQueue(t *testing.T) (context.Context, context.CancelCauseFunc, *fi
 	}
 
 	return ctx, cancel, q
+}
+
+func receiveExpiredTask(t *testing.T, q *fifo) ExpiredTask {
+	t.Helper()
+	select {
+	case event := <-q.Expired():
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for expired task event")
+		return ExpiredTask{}
+	}
 }
 
 func TestFifoBasicOperations(t *testing.T) {
@@ -899,43 +911,32 @@ func TestFifoLeaseManagement(t *testing.T) {
 
 	t.Run("lease expiration", func(t *testing.T) {
 		q.extension = 0
-		t.Cleanup(func() {
-			q.extension = 50 * time.Millisecond
-		})
 		dummyTask := &model.Task{ID: "lease-exp-1"}
 		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask}))
-
-		waitForProcess()
 		got, err := q.Poll(ctx, 1, filterFnTrue)
 		assert.NoError(t, err)
 
-		errCh := make(chan error, 1)
-		go func() { errCh <- q.Wait(ctx, got.ID) }()
-
-		waitForProcess()
-		select {
-		case werr := <-errCh:
-			assert.Error(t, werr)
-			// Edge case: verify error is ErrTaskExpired
-			assert.ErrorIs(t, werr, ErrTaskExpired)
-		case <-time.After(2 * time.Second):
-			t.Fatal("timeout waiting for Wait to return")
-		}
-
+		q.Lock()
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.resubmitExpiredPipelines()
+		q.Unlock()
+		assert.ErrorIs(t, q.Wait(ctx, got.ID), ErrTaskExpired)
+		assert.ErrorIs(t, q.Extend(ctx, 1, got.ID), ErrTaskExpired)
+		event := receiveExpiredTask(t, q)
+		assert.Equal(t, ExpiredTask{ID: got.ID, AgentID: 1}, event)
 		info := q.Info(ctx)
-		assert.Len(t, info.Pending, 1)
+		assert.Len(t, info.Running, 1)
+		assert.Empty(t, info.Pending)
 
-		// Edge case: verify task was resubmitted to front of queue
-		got2, _ := q.Poll(ctx, 1, filterFnTrue)
-		assert.Equal(t, got.ID, got2.ID) // Same task resubmitted
-
-		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
-		waitForProcess()
-
-		// Verify cleanup
+		assert.NoError(t, q.Reserve(ctx, got.ID, event.AgentID, true))
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, dummyTask.ID, got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
 		info = q.Info(ctx)
-		assert.Len(t, info.Pending, 0)
-		assert.Len(t, info.Running, 0)
+		assert.Empty(t, info.Pending)
+		assert.Empty(t, info.Running)
 	})
 
 	t.Run("extend lease", func(t *testing.T) {
@@ -943,33 +944,33 @@ func TestFifoLeaseManagement(t *testing.T) {
 		dummyTask := &model.Task{ID: "extend-1"}
 		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask}))
 
-		waitForProcess()
-		got, _ := q.Poll(ctx, 5, filterFnTrue)
+		got, err := q.Poll(ctx, 5, filterFnTrue)
+		assert.NoError(t, err)
 
 		assert.NoError(t, q.Extend(ctx, 5, got.ID))
 		assert.ErrorIs(t, q.Extend(ctx, 999, got.ID), ErrAgentMissMatch)
 		assert.ErrorIs(t, q.Extend(ctx, 1, got.ID), ErrAgentMissMatch)
 		assert.ErrorIs(t, q.Extend(ctx, 1, "non-existent"), ErrNotFound)
 
-		// Edge case: extend multiple times rapidly
-		for i := 0; i < 3; i++ {
-			time.Sleep(30 * time.Millisecond)
-			assert.NoError(t, q.Extend(ctx, 5, got.ID))
-		}
+		q.Lock()
+		deadline := q.running[got.ID].deadline
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.Unlock()
+		assert.NoError(t, q.Extend(ctx, 5, got.ID))
+		q.Lock()
+		assert.True(t, q.running[got.ID].deadline.After(deadline))
+		q.Unlock()
 
 		info := q.Info(ctx)
 		assert.Len(t, info.Running, 1)
-		assert.Len(t, info.Pending, 0)
+		assert.Empty(t, info.Pending)
 
-		// Edge case: extend after Done should error
 		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
-		waitForProcess()
 		assert.ErrorIs(t, q.Extend(ctx, 5, got.ID), ErrNotFound)
 
-		// Verify cleanup
 		info = q.Info(ctx)
-		assert.Len(t, info.Pending, 0)
-		assert.Len(t, info.Running, 0)
+		assert.Empty(t, info.Pending)
+		assert.Empty(t, info.Running)
 	})
 
 	t.Run("wait operations", func(t *testing.T) {
@@ -1045,6 +1046,323 @@ func TestFifoLeaseManagement(t *testing.T) {
 		assert.Len(t, info.Pending, 0)
 		assert.Len(t, info.Running, 0)
 	})
+}
+
+func TestFifoReserveAndRequeue(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("reserve keeps dependents waiting and dependency state unchanged", func(t *testing.T) {
+		dependency := &model.Task{ID: "reserve-dependency", Created: 1}
+		dependent := &model.Task{
+			ID:           "reserve-dependent",
+			Dependencies: []string{dependency.ID},
+			DepStatus:    map[string]model.StatusValue{dependency.ID: model.StatusPending},
+			RunOn:        []string{"success"},
+		}
+		parent := &model.Task{ID: "reserve-parent", Created: 2}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dependent, parent, dependency}))
+		got, err := q.Poll(ctx, 1, func(task *model.Task) (bool, int) { return task.ID == dependency.ID, 1 })
+		assert.NoError(t, err)
+		assert.Equal(t, dependency.ID, got.ID)
+
+		assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+		assert.ErrorIs(t, q.Wait(ctx, got.ID), ErrTaskExpired)
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 2, func(task *model.Task) (bool, int) { return task.ID == parent.ID, 1 })
+		assert.NoError(t, err)
+		assert.Equal(t, parent.ID, got.ID)
+		info := q.Info(ctx)
+		assert.Len(t, info.WaitingOnDeps, 1)
+		assert.Equal(t, model.StatusPending, info.WaitingOnDeps[0].DepStatus[dependency.ID])
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+
+		got, err = q.Poll(ctx, 3, func(task *model.Task) (bool, int) { return task.ID == dependency.ID, 1 })
+		assert.NoError(t, err)
+		assert.Equal(t, dependency.ID, got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		got, err = q.Poll(ctx, 4, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, dependent.ID, got.ID)
+		assert.Equal(t, model.StatusSuccess, got.DepStatus[dependency.ID])
+		assert.True(t, got.ShouldRun())
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	})
+
+	t.Run("reserve validates entry, agent, and expiry", func(t *testing.T) {
+		task := &model.Task{ID: "reserve-validation"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+		got, err := q.Poll(ctx, 7, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ErrorIs(t, q.Reserve(ctx, "missing", 7, false), ErrNotFound)
+		assert.ErrorIs(t, q.Reserve(ctx, got.ID, 8, false), ErrNotFound)
+		assert.ErrorIs(t, q.Reserve(ctx, got.ID, 7, true), ErrNotFound)
+		assert.NoError(t, q.Reserve(ctx, got.ID, 7, false))
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		assert.ErrorIs(t, q.Requeue(ctx, got.ID), ErrNotFound)
+
+		expired := &model.Task{ID: "reserve-expired-validation"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{expired}))
+		got, err = q.Poll(ctx, 9, filterFnTrue)
+		assert.NoError(t, err)
+		q.Lock()
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.resubmitExpiredPipelines()
+		q.Unlock()
+		assert.Equal(t, ExpiredTask{ID: expired.ID, AgentID: 9}, receiveExpiredTask(t, q))
+		assert.NoError(t, q.Reserve(ctx, got.ID, 9, true))
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 10, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, expired.ID, got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	})
+
+	t.Run("requeue preserves task dependency status", func(t *testing.T) {
+		task := &model.Task{ID: "requeue-dependency-status", DepStatus: map[string]model.StatusValue{"upstream": model.StatusSuccess}}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+		got, err := q.Poll(ctx, 9, filterFnTrue)
+		assert.NoError(t, err)
+		assert.NoError(t, q.Reserve(ctx, got.ID, 9, false))
+		select {
+		case event := <-q.Expired():
+			t.Fatalf("ordinary reservation emitted expiry event: %+v", event)
+		default:
+		}
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 10, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, model.StatusSuccess, got.DepStatus["upstream"])
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	})
+}
+
+func TestFifoExpiredEvents(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	q.extension = time.Hour
+
+	task := &model.Task{ID: "expired-event"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 11, filterFnTrue)
+	assert.NoError(t, err)
+
+	q.Lock()
+	entry := q.running[got.ID]
+	entry.deadline = time.Now().Add(-time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	first := receiveExpiredTask(t, q)
+	assert.Equal(t, ExpiredTask{ID: got.ID, AgentID: 11}, first)
+
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	select {
+	case event := <-q.Expired():
+		t.Fatalf("expiry event resent too early: %+v", event)
+	default:
+	}
+
+	q.Lock()
+	q.running[got.ID].lastSent = time.Now().Add(-constant.TaskTimeout - time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	assert.Equal(t, first, receiveExpiredTask(t, q))
+
+	assert.NoError(t, q.Reserve(ctx, got.ID, first.AgentID, true))
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	select {
+	case event := <-q.Expired():
+		t.Fatalf("reserved entry emitted expiry event: %+v", event)
+	default:
+	}
+	assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+}
+
+func TestFifoExpiredEventsDoNotBlockDispatch(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	q.expired = make(chan ExpiredTask, 1)
+	q.expired <- ExpiredTask{ID: "already-buffered"}
+	q.extension = time.Hour
+
+	expired := &model.Task{ID: "expired-before-dispatch"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{expired}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+
+	waitStarted := make(chan struct{})
+	waitResult := make(chan error, 1)
+	go func() {
+		close(waitStarted)
+		waitResult <- q.Wait(ctx, got.ID)
+	}()
+	<-waitStarted
+
+	next := &model.Task{ID: "after-expiry-buffer-full"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{next}))
+
+	q.Lock()
+	q.running[got.ID].deadline = time.Now().Add(-time.Second)
+	q.Unlock()
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("task expiry was not observed")
+	}
+
+	pollCtx, pollCancel := context.WithTimeout(ctx, time.Second)
+	defer pollCancel()
+	pollResult := make(chan *model.Task, 1)
+	go func() {
+		task, _ := q.Poll(pollCtx, 100, func(task *model.Task) (bool, int) {
+			return task.ID == next.ID, 1
+		})
+		pollResult <- task
+	}()
+	var dispatched *model.Task
+	select {
+	case dispatched = <-pollResult:
+	case <-pollCtx.Done():
+		// Free a blocking-send mutant so the queue goroutine can exit its lock.
+		<-q.Expired()
+		t.Errorf("queue did not dispatch before the expiry buffer blocked processing")
+		return
+	}
+	assert.NotNil(t, dispatched)
+	if dispatched == nil {
+		return
+	}
+	assert.Equal(t, next.ID, dispatched.ID)
+	assert.NoError(t, q.Done(ctx, dispatched.ID, model.StatusSuccess))
+
+	dropped := <-q.Expired()
+	assert.Equal(t, ExpiredTask{ID: "already-buffered"}, dropped)
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	select {
+	case event := <-q.Expired():
+		assert.Equal(t, ExpiredTask{ID: expired.ID, AgentID: 1}, event)
+	case <-time.After(time.Second):
+		t.Fatal("dropped expiry event was not retried after the buffer drained")
+	}
+}
+
+func TestFifoFinishExpiredEntries(t *testing.T) {
+	tests := []struct {
+		name   string
+		finish func(*fifo, context.Context, string) error
+	}{
+		{name: "Done", finish: func(q *fifo, ctx context.Context, id string) error { return q.Done(ctx, id, model.StatusSuccess) }},
+		{name: "Error", finish: func(q *fifo, ctx context.Context, id string) error { return q.Error(ctx, id, errors.New("failed")) }},
+		{name: "ErrorAtOnce", finish: func(q *fifo, ctx context.Context, id string) error {
+			return q.ErrorAtOnce(ctx, []string{id}, errors.New("failed"))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel, q := setupTestQueue(t)
+			defer cancel(nil)
+			dependent := &model.Task{
+				ID:           "expired-dependent",
+				Dependencies: []string{"expired-parent"},
+				DepStatus:    map[string]model.StatusValue{"expired-parent": model.StatusPending},
+			}
+			parent := &model.Task{ID: "expired-parent"}
+			assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dependent, parent}))
+			got, err := q.Poll(ctx, 2, filterFnTrue)
+			assert.NoError(t, err)
+			q.Lock()
+			q.running[got.ID].deadline = time.Now().Add(-time.Second)
+			q.resubmitExpiredPipelines()
+			q.Unlock()
+			assert.Equal(t, ExpiredTask{ID: parent.ID, AgentID: 2}, receiveExpiredTask(t, q))
+			assert.NoError(t, q.Reserve(ctx, parent.ID, 2, true))
+			assert.NoError(t, tt.finish(q, ctx, parent.ID))
+			assert.ErrorIs(t, q.Requeue(ctx, parent.ID), ErrNotFound)
+			info := q.Info(ctx)
+			assert.Empty(t, info.Running)
+			assert.Len(t, info.WaitingOnDeps, 1)
+			expectedStatus := model.StatusSuccess
+			if tt.name != "Done" {
+				expectedStatus = model.StatusFailure
+			}
+			assert.Equal(t, expectedStatus, info.WaitingOnDeps[0].DepStatus[parent.ID])
+		})
+	}
+}
+
+type blockedDoneContext struct {
+	context.Context
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *blockedDoneContext) Done() <-chan struct{} {
+	close(c.entered)
+	<-c.release
+	return c.Context.Done()
+}
+
+func TestFifoWaitPreservesFirstCompletionError(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	task := &model.Task{ID: "wait-first-error"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+
+	waitCtx := &blockedDoneContext{
+		Context: ctx,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- q.Wait(waitCtx, got.ID) }()
+	select {
+	case <-waitCtx.entered:
+	case <-time.After(time.Second):
+		close(waitCtx.release)
+		t.Fatal("Wait did not reach its done-channel select")
+	}
+
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+	assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	close(waitCtx.release)
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after its done channel closed")
+	}
+}
+
+func TestFifoReserveAfterExpiryDoesNotRewriteWaitError(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{{ID: "reserve-after-expiry"}}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	q.Lock()
+	q.running[got.ID].deadline = time.Now().Add(-time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+
+	// Wait reads the entry error without the lock; Reserve must not write it again.
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- q.Wait(ctx, got.ID) }()
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, true))
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return for an expired task")
+	}
 }
 
 func TestFifoWorkerManagement(t *testing.T) {
@@ -1419,49 +1737,40 @@ func TestFifoFairDispatch(t *testing.T) {
 	})
 
 	t.Run("expired lease retries before a newer pending task", func(t *testing.T) {
-		// An expired task is resubmitted to the pending list; the creation-order
-		// sort must keep its retry priority so it re-dispatches ahead of a task
-		// from a pipeline created later. Expiry is observed deterministically by
-		// re-inspecting the queue and re-polling — never by racing the process
-		// ticker against a Wait goroutine.
-		q.extension = 0
-		t.Cleanup(func() { q.extension = 50 * time.Millisecond })
+		q.extension = time.Hour
 
 		old := &model.Task{ID: "10", Created: 100}
 		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{old}))
-		waitForProcess()
 		got, err := q.Poll(ctx, 1, filterFnTrue)
 		assert.NoError(t, err)
 		assert.Equal(t, "10", got.ID)
 
-		// with a zero lease the task expires immediately; the next process tick
-		// resubmits it to pending. Wait for that tick, then confirm it is back
-		// in pending and no longer running.
-		waitForProcess()
+		q.Lock()
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.resubmitExpiredPipelines()
+		q.Unlock()
+		event := receiveExpiredTask(t, q)
+		assert.Equal(t, ExpiredTask{ID: "10", AgentID: 1}, event)
 		info := q.Info(ctx)
-		assert.Len(t, info.Running, 0)
-		assert.Len(t, info.Pending, 1)
-		assert.Equal(t, "10", info.Pending[0].ID) // resubmitted expired task
+		assert.Len(t, info.Running, 1)
+		assert.Empty(t, info.Pending)
 
 		newer := &model.Task{ID: "20", Created: 200}
 		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{newer}))
-		waitForProcess()
+		assert.NoError(t, q.Reserve(ctx, event.ID, event.AgentID, true))
+		assert.NoError(t, q.Requeue(ctx, event.ID))
 
 		got2, err := q.Poll(ctx, 2, filterFnTrue)
 		assert.NoError(t, err)
-		assert.Equal(t, "10", got2.ID, "expired older task retries before the newer pending task")
-
+		assert.Equal(t, "10", got2.ID, "expired task retries before the newer pending task")
 		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
-		waitForProcess()
 		got3, err := q.Poll(ctx, 3, filterFnTrue)
 		assert.NoError(t, err)
 		assert.Equal(t, "20", got3.ID)
 		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
-		waitForProcess()
-
 		info = q.Info(ctx)
-		assert.Len(t, info.Pending, 0)
-		assert.Len(t, info.Running, 0)
+		assert.Empty(t, info.Pending)
+		assert.Empty(t, info.Running)
 	})
 
 	t.Run("same-Created siblings dispatch in name order", func(t *testing.T) {
