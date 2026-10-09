@@ -95,5 +95,8 @@ func (s *WoodpeckerAuthServer) getAgent(agentID int64, agentToken string) (*mode
 	if err != nil && errors.Is(err, types.ErrRecordNotExist) {
 		return nil, fmt.Errorf("individual agent not found by token: %w", err)
 	}
+	if err == nil && agent != nil && agent.IsSystemAgent() {
+		return nil, fmt.Errorf("system agents must authenticate with the agent secret")
+	}
 	return agent, err
 }
