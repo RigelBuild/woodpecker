@@ -4,12 +4,12 @@
 set -euo pipefail
 event="$1" ref_name="$2" dispatch_version="$3" flake="$4"
 
-if [ "$event" = "push" ]; then
-  version="${ref_name#v}"
-else
-  version="$dispatch_version"
-fi
 flake_version="$(sed -n 's/^ *version = "\(.*\)";$/\1/p' "$flake" | head -n1)"
+case "$event" in
+  push) version="${ref_name#v}" ;;
+  pull_request) version="$flake_version" ;;
+  *) version="$dispatch_version" ;;
+esac
 
 if [ -z "$version" ] || [ "$version" != "$flake_version" ]; then
   echo "::error::version '$version' does not match flake.nix version '$flake_version'" >&2

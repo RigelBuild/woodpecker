@@ -28,5 +28,7 @@ expect "tag mismatch fails" 1 "" push v3.17.0-rigel.4 "" "$dir/flake.nix"
 expect "dispatch mismatch fails" 1 "" workflow_dispatch main 3.16.0-rigel.1 "$dir/flake.nix"
 expect "empty dispatch input fails" 1 "" workflow_dispatch main "" "$dir/flake.nix"
 expect "missing flake version fails" 1 "" push v3.17.0-rigel.3 "" /dev/null
+expect "pull request uses flake version" 0 3.17.0-rigel.3 pull_request 75/merge "" "$dir/flake.nix"
+expect "pull request without flake version fails" 1 "" pull_request 75/merge "" /dev/null
 
 [ "$fails" -eq 0 ]

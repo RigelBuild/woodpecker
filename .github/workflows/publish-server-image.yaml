@@ -14,6 +14,9 @@ name: publish-server-image
   push:
     tags:
       - 'v*.*.*-rigel.*'
+  # Build without publishing, so a broken release path fails before the tag.
+  pull_request:
+    branches: [rigel-release]
 
 permissions:
   contents: read
@@ -28,7 +31,7 @@ env:
 jobs:
   resolve:
     # Dispatch may only run from the release branch; tags are checked by the source guard.
-    if: github.event_name == 'push' || github.ref == 'refs/heads/rigel-release'
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/rigel-release'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,6 +46,7 @@ jobs:
 
       # main is a resettable upstream mirror; only CI-green rigel-release commits release.
       - name: Require a gated rigel-release source
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/check-release-source.sh "$GITHUB_SHA" "$GITHUB_REPOSITORY"
@@ -106,8 +110,10 @@ jobs:
           CI_COMMIT_SHA: ${{ github.sha }}
           CI_COMMIT_BRANCH: ${{ github.ref_name }}
           TAGS: sqlite sqlite_unlock_notify netgo
-          GOFLAGS: -buildvcs=false
+        # The root container user does not own the runner-owned checkout, and
+        # xgo's -buildvcs flag overrides GOFLAGS, so git must trust the tree.
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           go mod vendor
           make release-server-xgo TARGETOS=linux TARGETARCH_XGO=${{ matrix.arch }} TARGETARCH_BUILDX=${{ matrix.arch }}
 
@@ -120,6 +126,7 @@ jobs:
 
   publish:
     needs: [resolve, server-binaries]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
