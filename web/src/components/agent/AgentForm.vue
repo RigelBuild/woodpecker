@@ -13,7 +13,7 @@
     </InputField>
 
     <template v-if="isEditingAgent">
-      <InputField v-slot="{ id }" :label="$t('admin.settings.agents.token')">
+      <InputField v-if="agent.token" v-slot="{ id }" :label="$t('admin.settings.agents.token')">
         <TextField :id="id" v-model="agent.token" :placeholder="$t('admin.settings.agents.token')" disabled />
       </InputField>
 
