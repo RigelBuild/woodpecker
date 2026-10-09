@@ -117,7 +117,10 @@ func TestAgentCreateReturnsToken(t *testing.T) {
 	for name, handler := range map[string]gin.HandlerFunc{"POST /agents": PostAgent, "POST /orgs/:id/agents": PostOrgAgent} {
 		t.Run(name, func(t *testing.T) {
 			s := store_mocks.NewMockStore(t)
-			s.On("AgentCreate", mock.AnythingOfType("*model.Agent")).Return(nil)
+			var created *model.Agent
+			s.On("AgentCreate", mock.AnythingOfType("*model.Agent")).
+				Run(func(args mock.Arguments) { created = args.Get(0).(*model.Agent) }).
+				Return(nil)
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
@@ -133,7 +136,9 @@ func TestAgentCreateReturnsToken(t *testing.T) {
 			require.Equal(t, http.StatusOK, w.Code)
 			var got model.Agent
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+			require.NotNil(t, created)
 			assert.NotEmpty(t, got.Token)
+			assert.Equal(t, created.Token, got.Token)
 		})
 	}
 }
