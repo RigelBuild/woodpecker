@@ -119,7 +119,7 @@ func TestAgentCreateReturnsToken(t *testing.T) {
 			s := store_mocks.NewMockStore(t)
 			var created *model.Agent
 			s.On("AgentCreate", mock.AnythingOfType("*model.Agent")).
-				Run(func(args mock.Arguments) { created = args.Get(0).(*model.Agent) }).
+				Run(func(args mock.Arguments) { created, _ = args.Get(0).(*model.Agent) }).
 				Return(nil)
 
 			w := httptest.NewRecorder()
