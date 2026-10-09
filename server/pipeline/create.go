@@ -78,11 +78,7 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 	forgeYamlConfigs, configFetchErr := configService.Fetch(ctx, _forge, repoUser, repo, pipeline, nil, false)
 	switch {
 	case errors.Is(configFetchErr, &forge_types.ErrConfigNotFound{}):
-		log.Debug().Str("repo", repo.FullName).Err(configFetchErr).Msgf("cannot find config '%s' in '%s' with user: '%s'", repo.Config, pipeline.Ref, repoUser.Login)
-		if err := _store.DeletePipeline(pipeline); err != nil {
-			log.Error().Str("repo", repo.FullName).Err(err).Msg("failed to delete pipeline without config")
-		}
-
+		dropCreatedPipeline(_store, repo, pipeline, "config-not-found", configFetchErr)
 		return nil, ErrFiltered
 	case configFetchErr != nil && forgeYamlConfigs != nil:
 		// unexpected status code from config endpoint - using previous config as fallback
@@ -100,7 +96,7 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 		if err != nil {
 			msg := fmt.Sprintf("failed to find or persist pipeline config for %s", repo.FullName)
 			log.Error().Err(err).Msg(msg)
-			return nil, errors.New(msg)
+			return nil, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, fmt.Errorf("%s: %w", msg, err))
 		}
 		configs = append(configs, config)
 	}
@@ -108,25 +104,21 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 	if err := linkPipelineConfigs(_store, configs, pipeline.ID); err != nil {
 		msg := fmt.Sprintf("failed to find or persist pipeline config for %s", repo.FullName)
 		log.Error().Err(err).Msg(msg)
-		return nil, errors.New(msg)
+		return nil, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, fmt.Errorf("%s: %w", msg, err))
 	}
 
 	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, _forge, _store, pipeline, repoUser, repo, forgeYamlConfigs, nil, false)
+	if err != nil {
+		return nil, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, fmt.Errorf("createPipelineItems failed: %w", err))
+	}
 	*pipeline = *currentPipeline
 	if handleParseErrors(pipeline, parseErr) {
 		log.Debug().Str("repo", repo.FullName).Err(parseErr).Msg("failed to parse yaml")
 		return pipeline, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, parseErr)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("createPipelineItems failed: %w", err)
-	}
 
 	if len(pipelineItems) == 0 {
-		log.Debug().Str("repo", repo.FullName).Msg(ErrFiltered.Error())
-		if err := _store.DeletePipeline(pipeline); err != nil {
-			log.Error().Str("repo", repo.FullName).Err(err).Msg("failed to delete empty pipeline")
-		}
-
+		dropCreatedPipeline(_store, repo, pipeline, "no-workflows", nil)
 		return nil, ErrFiltered
 	}
 
@@ -148,6 +140,17 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 	}
 
 	return pipeline, nil
+}
+
+// dropCreatedPipeline deletes a pipeline Create already stored. It logs at info, the server level,
+// because the deleted row leaves no other trace of why the event produced no pipeline.
+func dropCreatedPipeline(_store store.Store, repo *model.Repo, pipeline *model.Pipeline, reason string, cause error) {
+	log.Info().Str("repo", repo.FullName).Int64("number", pipeline.Number).
+		Str("event", string(pipeline.Event)).Str("ref", pipeline.Ref).Str("commit", pipeline.Commit).
+		Str("reason", reason).Err(cause).Msg("dropping created pipeline")
+	if err := _store.DeletePipeline(pipeline); err != nil {
+		log.Error().Str("repo", repo.FullName).Int64("number", pipeline.Number).Err(err).Msg("failed to delete dropped pipeline")
+	}
 }
 
 func updatePipelineWithErr(ctx context.Context, _forge forge.Forge, _store store.Store, pipeline *model.Pipeline, repo *model.Repo, repoUser *model.User, err error) error {

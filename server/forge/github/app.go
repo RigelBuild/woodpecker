@@ -16,13 +16,18 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/go-github/v90/github"
 )
+
+// errAppNotInstalled marks a repository the App has no installation on.
+var errAppNotInstalled = errors.New("GitHub App not installed on repository")
 
 // appToken is a cached installation access token with its expiry.
 type appToken struct {
@@ -38,7 +43,7 @@ const (
 )
 
 // appConfigured reports whether GitHub App credentials are set, enabling the
-// Checks API reporting path.
+// Checks API path and App-token required statuses.
 func (c *client) appConfigured() bool {
 	return c.appID != 0 && c.appKey != nil
 }
@@ -77,7 +82,10 @@ func (c *client) installationToken(ctx context.Context, owner, name string) (str
 	if err != nil {
 		return "", err
 	}
-	installation, _, err := appClient.Apps.GetRepositoryInstallation(ctx, owner, name)
+	installation, resp, err := appClient.Apps.GetRepositoryInstallation(ctx, owner, name)
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("%w: %s", errAppNotInstalled, cacheKey)
+	}
 	if err != nil {
 		return "", fmt.Errorf("could not find GitHub App installation for %s: %w", cacheKey, err)
 	}

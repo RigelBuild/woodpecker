@@ -20,6 +20,7 @@ import (
 	"slices"
 
 	"github.com/google/go-github/v90/github"
+	"github.com/rs/zerolog/log"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
@@ -32,7 +33,7 @@ import (
 // per-workflow statuses it is always present, so it can be set as a required
 // branch-protection check that only passes when the whole code pipeline passes.
 // It uses the commit-status API, which works as a required check on any
-// Woodpecker — no GitHub App needed.
+// Woodpecker; a configured GitHub App posts it with the installation token.
 //
 // It rolls up ONLY the non-meta workflows (those that do NOT listen on
 // pull_request_metadata): the meta gates get their own required CI (meta) context
@@ -60,7 +61,7 @@ func (c *client) StatusAggregate(ctx context.Context, user *model.User, repo *mo
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusReportTimeout)
 	defer cancel()
 
-	client, err := c.newClientToken(ctx, user.AccessToken)
+	client, err := c.requiredStatusClient(ctx, user, repo)
 	if err != nil {
 		return err
 	}
@@ -93,13 +94,34 @@ func (c *client) StatusMeta(ctx context.Context, user *model.User, repo *model.R
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusReportTimeout)
 	defer cancel()
 
-	client, err := c.newClientToken(ctx, user.AccessToken)
+	client, err := c.requiredStatusClient(ctx, user, repo)
 	if err != nil {
 		return err
 	}
 
 	_, err = c.postAggregate(ctx, client, repo, p, common.GetPipelineMetaStatusContext(repo, p), metaStatus, metaGateStatus)
 	return ignoreSkip(err)
+}
+
+// requiredStatusClient posts required statuses as the App installation when
+// one is configured, so they draw on the App's rate-limit bucket instead of the
+// forge user's, which every other API call shares. A repo the App is not
+// installed on keeps the user token; transient mint failures are retried.
+func (c *client) requiredStatusClient(ctx context.Context, user *model.User, repo *model.Repo) (*github.Client, error) {
+	if !c.appConfigured() {
+		return c.newClientToken(ctx, user.AccessToken)
+	}
+	var gh *github.Client
+	_, err := doForgeWrite(ctx, func() (*github.Response, error) {
+		var e error
+		gh, e = c.installationClient(ctx, repo.Owner, repo.Name)
+		return nil, e
+	})
+	if errors.Is(err, errAppNotInstalled) {
+		log.Debug().Str("repo", repo.FullName).Msg("GitHub App not installed; required statuses use the user token")
+		return c.newClientToken(ctx, user.AccessToken)
+	}
+	return gh, err
 }
 
 // reconcileTerminalStatus keeps a required commit status from posting a

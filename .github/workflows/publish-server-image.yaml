@@ -1,0 +1,180 @@
+name: publish-server-image
+
+# Publishes the multi-arch woodpecker-server image to GHCR for the AKS server
+# Deployment, which pins ghcr.io/rigelbuild/woodpecker-server:<version>@<digest>.
+# The server links go-sqlite3 (CGO), so binaries cross-compile in upstream's
+# xgo image; upstream's rootless Dockerfile then only copies them in.
+
+'on':
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Server image version; must equal the flake.nix version (e.g. 3.17.0-rigel.3)'
+        required: true
+  push:
+    tags:
+      - 'v*.*.*-rigel.*'
+  # Build without publishing, so a broken release path fails before the tag.
+  pull_request:
+    branches: [rigel-release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/rigelbuild/woodpecker-server
+
+jobs:
+  resolve:
+    # Dispatch may only run from the release branch; tags are checked by the source guard.
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/rigel-release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # main is a resettable upstream mirror; only CI-green rigel-release commits release.
+      - name: Require a gated rigel-release source
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/check-release-source.sh "$GITHUB_SHA" "$GITHUB_REPOSITORY"
+
+      - name: Resolve version and match it to flake.nix
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          version="$(.github/scripts/resolve-image-version.sh "$EVENT" "$GITHUB_REF_NAME" "$INPUT_VERSION" flake.nix)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # web/package.json pins pnpm through packageManager; corepack provides it.
+      - name: Build UI
+        run: |
+          corepack enable
+          make build-ui
+
+      - name: Upload UI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  server-binaries:
+    needs: [resolve, web]
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/techknowlogick/xgo:go-1.27.x@sha256:8cc742b41f043a4fd45d2f63f1fcd12cb27949342df09efb5561f2aadfbe6da3 # go-1.27.x
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download UI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-dist
+          path: web/dist
+
+      # Upstream's release-server-xgo target; cross-compile-server only loops it
+      # over PLATFORMS and then runs `tree`, which the xgo image lacks.
+      - name: Cross-compile server
+        env:
+          CI_COMMIT_TAG: v${{ needs.resolve.outputs.version }}
+          CI_COMMIT_SHA: ${{ github.sha }}
+          CI_COMMIT_BRANCH: ${{ github.ref_name }}
+          TAGS: sqlite sqlite_unlock_notify netgo
+        # The root container user does not own the runner-owned checkout, and
+        # xgo's -buildvcs flag overrides GOFLAGS, so git must trust the tree.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          go mod vendor
+          make release-server-xgo TARGETOS=linux TARGETARCH_XGO=${{ matrix.arch }} TARGETARCH_BUILDX=${{ matrix.arch }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: server-linux_${{ matrix.arch }}
+          path: dist/server/linux_${{ matrix.arch }}/woodpecker-server
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, server-binaries]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: server-linux_*
+          path: dist/server
+
+      # Artifacts drop the exec bit, and the Dockerfile COPYs the binary as-is.
+      - name: Lay out binaries for the Dockerfile
+        run: |
+          for arch in amd64 arm64; do
+            mv "dist/server/server-linux_${arch}" "dist/server/linux_${arch}"
+            chmod 0755 "dist/server/linux_${arch}/woodpecker-server"
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch server image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: docker/Dockerfile.server.multiarch.rootless
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.resolve.outputs.version }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+
+      - name: Record pin
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          echo "Pin: ${IMAGE}:${VERSION}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"

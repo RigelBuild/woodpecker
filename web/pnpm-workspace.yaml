@@ -4,3 +4,5 @@ allowBuilds:
 overrides:
   # CVE-2026-85008 floor; jsdom allows ^8.9.0 but the lock pinned 8.10.0.
   undici: '^8.11.2'
+  # CVE floors (securityscan); vue's server-renderer is fixed by the vue bump.
+  source-map-js: '^1.2.2'
