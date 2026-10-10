@@ -136,7 +136,7 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 		mockStore.On("WorkflowUpdate", mock.Anything).Return(nil)
 
 		s := RPC{store: mockStore}
-		s.completeChildrenIfParentCompleted(&workflow, 1234567900)
+		s.completeChildrenIfParentCompleted(&workflow, 1234567900, false)
 
 		assert.Equal(t, model.StatusSuccess, runningService.State)
 		assert.Equal(t, int64(1234567900), runningService.Finished)
@@ -147,6 +147,20 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, model.StatusSuccess, result.State)
+	})
+
+	t.Run("When an agent cancel interrupts a running command step it stays killed", func(t *testing.T) {
+		running := &model.Step{ID: 3, State: model.StatusRunning, Started: 1234567800, Type: model.StepTypeCommands}
+		workflow := model.Workflow{ID: 8, State: model.StatusRunning, Children: []*model.Step{running}}
+
+		mockStore := store_mocks.NewMockStore(t)
+		mockStore.On("StepUpdate", mock.Anything).Return(nil)
+
+		s := RPC{store: mockStore}
+		s.completeChildrenIfParentCompleted(&workflow, 1234567900, true)
+
+		assert.Equal(t, model.StatusKilled, running.State)
+		assert.Equal(t, int64(1234567900), running.Finished)
 	})
 }
 

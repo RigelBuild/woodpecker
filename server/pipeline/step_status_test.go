@@ -290,20 +290,43 @@ func TestUpdateStepToStatusSkipped(t *testing.T) {
 	t.Run("NotStarted", func(t *testing.T) {
 		t.Parallel()
 
-		step, err := UpdateStepToStatusSkipped(mockStoreStep(t), model.Step{}, int64(1), model.StatusSkipped)
+		step, err := UpdateStepToStatusSkipped(mockStoreStep(t), model.Step{}, int64(1), model.StatusSkipped, false)
 
 		assert.NoError(t, err)
 		assert.Equal(t, model.StatusSkipped, step.State)
 		assert.Equal(t, int64(0), step.Finished)
 	})
 
-	t.Run("AlreadyStarted", func(t *testing.T) {
+	// A detached commands step still running at a normal workflow end is torn down.
+	t.Run("StartedAtNormalEnd", func(t *testing.T) {
 		t.Parallel()
 
-		step, err := UpdateStepToStatusSkipped(mockStoreStep(t), model.Step{Started: 42}, int64(100), model.StatusSkipped)
+		step, err := UpdateStepToStatusSkipped(mockStoreStep(t), model.Step{Started: 42, Type: model.StepTypeCommands}, int64(100), model.StatusKilled, false)
 
 		assert.NoError(t, err)
 		assert.Equal(t, model.StatusSuccess, step.State)
+		assert.Equal(t, int64(100), step.Finished)
+	})
+
+	t.Run("StartedServiceInterrupted", func(t *testing.T) {
+		t.Parallel()
+
+		step, err := UpdateStepToStatusSkipped(mockStoreStep(t), model.Step{Started: 42, Type: model.StepTypeService}, int64(100), model.StatusKilled, true)
+
+		assert.NoError(t, err)
+		assert.Equal(t, model.StatusSuccess, step.State)
+		assert.Equal(t, int64(100), step.Finished)
+	})
+
+	// An agent shutdown interrupts a running command step; reporting it as
+	// success hid spot reclaims behind an all-green killed pipeline.
+	t.Run("StartedCommandsInterruptedKeepsStatus", func(t *testing.T) {
+		t.Parallel()
+
+		step, err := UpdateStepToStatusSkipped(mockStoreStep(t), model.Step{Started: 42, Type: model.StepTypeCommands}, int64(100), model.StatusKilled, true)
+
+		assert.NoError(t, err)
+		assert.Equal(t, model.StatusKilled, step.State)
 		assert.Equal(t, int64(100), step.Finished)
 	})
 }
