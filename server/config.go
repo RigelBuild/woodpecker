@@ -60,6 +60,7 @@ var Config = struct {
 		CustomJsFile           string
 		AsyncRepositoryUpdate  bool
 		WebhookSyncTimeout     time.Duration
+		HookDedupWindow        time.Duration
 		OrphanReapInterval     time.Duration
 		OrphanReapGrace        time.Duration
 		CreationTimeout        time.Duration
