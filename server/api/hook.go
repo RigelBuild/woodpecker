@@ -60,11 +60,10 @@ func getAgentName(store store.Store, agentNameMap map[int64]string, agentID int6
 	return "", false
 }
 
-// backgroundPipelineCreationTimeout caps how long a webhook-triggered pipeline
-// creation may keep running after the HTTP handler has already responded 202
-// Accepted (see PostHook). It bounds the detached background goroutine so a
-// stuck creation cannot leak indefinitely.
-const backgroundPipelineCreationTimeout = 2 * time.Minute
+// defaultPipelineCreationTimeout caps how long a webhook-triggered pipeline
+// creation may keep running after PostHook has responded 202 Accepted, when
+// server.Config.Server.CreationTimeout is unset.
+const defaultPipelineCreationTimeout = 2 * time.Minute
 
 // PostHook
 //
@@ -266,7 +265,12 @@ func PostHook(c *gin.Context) {
 	// respond synchronously with the created pipeline (preserving the old
 	// behavior and API response). If it takes longer we respond 202 Accepted and
 	// let creation finish in the background.
-	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), backgroundPipelineCreationTimeout)
+	creationTimeout := server.Config.Server.CreationTimeout
+	if creationTimeout <= 0 {
+		creationTimeout = defaultPipelineCreationTimeout
+	}
+	// Detached so creation survives the 202 response; derived to keep request values.
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), creationTimeout)
 
 	done := make(chan struct{})
 	var pl *model.Pipeline
