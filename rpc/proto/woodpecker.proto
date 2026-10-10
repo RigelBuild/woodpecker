@@ -57,6 +57,7 @@ message WorkflowState {
   int64  finished = 2;
   string error = 3;
   bool   canceled = 4;
+  bool   agent_shutdown = 5;
 }
 
 message LogEntry {

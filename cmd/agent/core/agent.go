@@ -39,6 +39,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/logger"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/utils"
@@ -49,6 +50,25 @@ const (
 	reportHealthInterval           = time.Second * 10
 	authInterceptorRefreshInterval = time.Minute * 30
 )
+
+func AgentRootContext(parent context.Context, sig <-chan os.Signal) context.Context {
+	ctx, cancel := context.WithCancelCause(parent)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-sig:
+			cancel(pipeline_errors.ErrAgentShutdown)
+		}
+	}()
+	return ctx
+}
+
+func checkServerProtoVersion(serverVersion int32) error {
+	if serverVersion != agent_rpc.ClientGrpcVersion {
+		return errors.New("GRPC version mismatch")
+	}
+	return nil
+}
 
 func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 	log.Info().Str("version", version.String()).Msg("Starting Woodpecker agent")
@@ -159,8 +179,7 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 		log.Error().Err(err).Msg("could not get grpc server version")
 		return err
 	}
-	if grpcServerVersion.GrpcVersion != agent_rpc.ClientGrpcVersion {
-		err := errors.New("GRPC version mismatch")
+	if err := checkServerProtoVersion(grpcServerVersion.GrpcVersion); err != nil {
 		log.Error().Err(err).Msgf("server version %s does report grpc version %d but we only understand %d",
 			grpcServerVersion.ServerVersion,
 			grpcServerVersion.GrpcVersion,

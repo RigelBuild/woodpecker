@@ -142,6 +142,7 @@ type WorkflowState struct {
 	Finished      int64                  `protobuf:"varint,2,opt,name=finished,proto3" json:"finished,omitempty"`
 	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
 	Canceled      bool                   `protobuf:"varint,4,opt,name=canceled,proto3" json:"canceled,omitempty"`
+	AgentShutdown bool                   `protobuf:"varint,5,opt,name=agent_shutdown,json=agentShutdown,proto3" json:"agent_shutdown,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -200,6 +201,13 @@ func (x *WorkflowState) GetError() string {
 func (x *WorkflowState) GetCanceled() bool {
 	if x != nil {
 		return x.Canceled
+	}
+	return false
+}
+
+func (x *WorkflowState) GetAgentShutdown() bool {
+	if x != nil {
+		return x.AgentShutdown
 	}
 	return false
 }
@@ -1225,12 +1233,13 @@ const file_woodpecker_proto_rawDesc = "" +
 	"\texit_code\x18\x05 \x01(\x05R\bexitCode\x12\x14\n" +
 	"\x05error\x18\x06 \x01(\tR\x05error\x12\x1a\n" +
 	"\bcanceled\x18\a \x01(\bR\bcanceled\x12\x18\n" +
-	"\askipped\x18\b \x01(\bR\askipped\"w\n" +
+	"\askipped\x18\b \x01(\bR\askipped\"\x9e\x01\n" +
 	"\rWorkflowState\x12\x18\n" +
 	"\astarted\x18\x01 \x01(\x03R\astarted\x12\x1a\n" +
 	"\bfinished\x18\x02 \x01(\x03R\bfinished\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1a\n" +
-	"\bcanceled\x18\x04 \x01(\bR\bcanceled\"w\n" +
+	"\bcanceled\x18\x04 \x01(\bR\bcanceled\x12%\n" +
+	"\x0eagent_shutdown\x18\x05 \x01(\bR\ragentShutdown\"w\n" +
 	"\bLogEntry\x12\x1b\n" +
 	"\tstep_uuid\x18\x01 \x01(\tR\bstepUuid\x12\x12\n" +
 	"\x04time\x18\x02 \x01(\x03R\x04time\x12\x12\n" +
