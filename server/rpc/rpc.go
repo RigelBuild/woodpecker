@@ -61,7 +61,6 @@ type RPC struct {
 }
 
 // Next blocks until it provides the next workflow to execute.
-// TODO (6038): Server does not release waiting agents on graceful shutdown.
 func (s *RPC) Next(c context.Context, agentFilter rpc.Filter) (*rpc.Workflow, error) {
 	if hostname, err := s.getHostnameFromContext(c); err == nil {
 		log.Debug().Msgf("agent connected: %s: polling", hostname)
@@ -436,7 +435,16 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 	}
 
 	if !model.IsThereRunningStage(currentPipeline.Workflows) {
-		if currentPipeline, err = pipeline.UpdateStatusToDone(s.store, *currentPipeline, pipeline.PipelineStatus(currentPipeline.Workflows), workflow.Finished); err != nil {
+		// use the latest finish time of all workflows
+		finished := workflow.Finished
+		for _, w := range currentPipeline.Workflows {
+			finished = max(finished, w.Finished)
+		}
+		if finished == 0 {
+			finished = time.Now().Unix()
+		}
+
+		if currentPipeline, err = pipeline.UpdateStatusToDone(s.store, *currentPipeline, pipeline.PipelineStatus(currentPipeline.Workflows), finished); err != nil {
 			logger.Error().Err(err).Msgf("pipeline.UpdateStatusToDone: cannot update workflows final state")
 		}
 	}
@@ -448,8 +456,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		for _, step := range workflow.Children {
 			if step.State != model.StatusSkipped {
 				if err := s.logger.Close(c, step.ID); err != nil {
-					// A step that never opened a log stream (e.g. killed before it ran)
-					// has nothing to close; that is expected, not an error.
+					// A step killed before it ran never opened a stream.
 					if errors.Is(err, logging.ErrNotFound) {
 						logger.Debug().Err(err).Msgf("done: no log stream to close for step %d", step.ID)
 					} else {

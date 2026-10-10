@@ -18,7 +18,7 @@ package github
 import (
 	"testing"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v92/github"
 	"github.com/stretchr/testify/assert"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -64,7 +64,7 @@ func Test_convertStatus(t *testing.T) {
 	}
 }
 
-func Test_convertDesc(t *testing.T) {
+func TestConvertDesc(t *testing.T) {
 	assert.Equal(t, descSuccess, convertDesc(model.StatusSuccess))
 	assert.Equal(t, descPending, convertDesc(model.StatusPending))
 	assert.Equal(t, descPending, convertDesc(model.StatusRunning))
@@ -75,22 +75,22 @@ func Test_convertDesc(t *testing.T) {
 	assert.Equal(t, descError, convertDesc(model.StatusError))
 }
 
-func Test_convertRepoList(t *testing.T) {
+func TestConvertRepoList(t *testing.T) {
 	from := []*github.Repository{
 		{
-			Private:  github.Ptr(false),
-			FullName: github.Ptr("octocat/hello-world"),
-			Name:     github.Ptr("hello-world"),
+			Private:  new(false),
+			FullName: new("octocat/hello-world"),
+			Name:     new("hello-world"),
 			Owner: &github.User{
-				AvatarURL: github.Ptr("http://..."),
-				Login:     github.Ptr("octocat"),
+				AvatarURL: new("http://..."),
+				Login:     new("octocat"),
 			},
-			HTMLURL:  github.Ptr("https://github.com/octocat/hello-world"),
-			CloneURL: github.Ptr("https://github.com/octocat/hello-world.git"),
+			HTMLURL:  new("https://github.com/octocat/hello-world"),
+			CloneURL: new("https://github.com/octocat/hello-world.git"),
 			Permissions: &github.RepositoryPermissions{
-				Admin: github.Ptr(true),
-				Push:  github.Ptr(true),
-				Pull:  github.Ptr(true),
+				Admin: new(true),
+				Push:  new(true),
+				Pull:  new(true),
 			},
 		},
 	}
@@ -102,22 +102,22 @@ func Test_convertRepoList(t *testing.T) {
 	assert.Equal(t, "hello-world", to[0].Name)
 }
 
-func Test_convertRepo(t *testing.T) {
+func TestConvertRepo(t *testing.T) {
 	from := github.Repository{
-		FullName:      github.Ptr("octocat/hello-world"),
-		Name:          github.Ptr("hello-world"),
-		HTMLURL:       github.Ptr("https://github.com/octocat/hello-world"),
-		CloneURL:      github.Ptr("https://github.com/octocat/hello-world.git"),
-		DefaultBranch: github.Ptr("develop"),
-		Private:       github.Ptr(true),
+		FullName:      new("octocat/hello-world"),
+		Name:          new("hello-world"),
+		HTMLURL:       new("https://github.com/octocat/hello-world"),
+		CloneURL:      new("https://github.com/octocat/hello-world.git"),
+		DefaultBranch: new("develop"),
+		Private:       new(true),
 		Owner: &github.User{
-			AvatarURL: github.Ptr("http://..."),
-			Login:     github.Ptr("octocat"),
+			AvatarURL: new("http://..."),
+			Login:     new("octocat"),
 		},
 		Permissions: &github.RepositoryPermissions{
-			Admin: github.Ptr(true),
-			Push:  github.Ptr(true),
-			Pull:  github.Ptr(true),
+			Admin: new(true),
+			Push:  new(true),
+			Pull:  new(true),
 		},
 	}
 
@@ -132,12 +132,12 @@ func Test_convertRepo(t *testing.T) {
 	assert.Equal(t, "https://github.com/octocat/hello-world", to.ForgeURL)
 }
 
-func Test_convertPerm(t *testing.T) {
+func TestConvertPerm(t *testing.T) {
 	from := &github.Repository{
 		Permissions: &github.RepositoryPermissions{
-			Admin: github.Ptr(true),
-			Push:  github.Ptr(true),
-			Pull:  github.Ptr(true),
+			Admin: new(true),
+			Push:  new(true),
+			Pull:  new(true),
 		},
 	}
 
@@ -147,21 +147,21 @@ func Test_convertPerm(t *testing.T) {
 	assert.True(t, to.Admin)
 }
 
-func Test_convertTeam(t *testing.T) {
+func TestConvertTeam(t *testing.T) {
 	from := &github.Organization{
-		Login:     github.Ptr("octocat"),
-		AvatarURL: github.Ptr("http://..."),
+		Login:     new("octocat"),
+		AvatarURL: new("http://..."),
 	}
 	to := convertTeam(from)
 	assert.Equal(t, "octocat", to.Login)
 	assert.Equal(t, "http://...", to.Avatar)
 }
 
-func Test_convertTeamList(t *testing.T) {
+func TestConvertTeamList(t *testing.T) {
 	from := []*github.Organization{
 		{
-			Login:     github.Ptr("octocat"),
-			AvatarURL: github.Ptr("http://..."),
+			Login:     new("octocat"),
+			AvatarURL: new("http://..."),
 		},
 	}
 	to := convertTeamList(from)
@@ -169,17 +169,17 @@ func Test_convertTeamList(t *testing.T) {
 	assert.Equal(t, "http://...", to[0].Avatar)
 }
 
-func Test_convertRepoHook(t *testing.T) {
+func TestConvertRepoHook(t *testing.T) {
 	t.Run("should convert a repository from webhook", func(t *testing.T) {
 		from := &github.PushEventRepository{Owner: &github.User{}}
-		from.Owner.Login = github.Ptr("octocat")
-		from.Owner.Name = github.Ptr("octocat")
-		from.Name = github.Ptr("hello-world")
-		from.FullName = github.Ptr("octocat/hello-world")
-		from.Private = github.Ptr(true)
-		from.HTMLURL = github.Ptr("https://github.com/octocat/hello-world")
-		from.CloneURL = github.Ptr("https://github.com/octocat/hello-world.git")
-		from.DefaultBranch = github.Ptr("develop")
+		from.Owner.Login = new("octocat")
+		from.Owner.Name = new("octocat")
+		from.Name = new("hello-world")
+		from.FullName = new("octocat/hello-world")
+		from.Private = new(true)
+		from.HTMLURL = new("https://github.com/octocat/hello-world")
+		from.CloneURL = new("https://github.com/octocat/hello-world.git")
+		from.DefaultBranch = new("develop")
 
 		repo := convertRepoHook(from)
 		assert.Equal(t, *from.Owner.Login, repo.Owner)
@@ -193,8 +193,8 @@ func Test_convertRepoHook(t *testing.T) {
 
 	t.Run("should derive full name from owner and name when missing", func(t *testing.T) {
 		from := &github.PushEventRepository{Owner: &github.User{}}
-		from.Owner.Login = github.Ptr("octocat")
-		from.Name = github.Ptr("hello-world")
+		from.Owner.Login = new("octocat")
+		from.Name = new("hello-world")
 		// FullName intentionally left empty to hit the fallback branch
 
 		repo := convertRepoHook(from)

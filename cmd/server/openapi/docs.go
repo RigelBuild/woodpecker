@@ -82,7 +82,7 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "the agent's data (only 'name' and 'no_schedule' are read)",
+                        "description": "the agent's data (only 'name', 'no_schedule' and 'filters' are read)",
                         "name": "agent",
                         "in": "body",
                         "required": true,
@@ -1139,7 +1139,7 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "the agent's data (only 'name' and 'no_schedule' are read)",
+                        "description": "the agent's data (only 'name', 'no_schedule' and 'filters' are read)",
                         "name": "agent",
                         "in": "body",
                         "required": true,
@@ -4687,6 +4687,13 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "filters": {
+                    "description": "Server side enforced agent filters",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
                 "id": {
                     "type": "integer"
                 },
@@ -5769,6 +5776,12 @@ const docTemplate = `{
         "Step": {
             "type": "object",
             "properties": {
+                "depends_on": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "error": {
                     "type": "string"
                 },
@@ -6436,6 +6449,12 @@ const docTemplate = `{
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/Step"
+                    }
+                },
+                "depends_on": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
                     }
                 },
                 "environ": {

@@ -19,7 +19,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v92/github"
 	"github.com/rs/zerolog/log"
 )
 
@@ -68,24 +68,21 @@ func doForgeWrite(ctx context.Context, fn func() (*github.Response, error)) (*gi
 // worth retrying at all.
 func forgeRetryWait(err error, backoff time.Duration) (wait time.Duration, retriable bool) {
 	// Secondary (burst) rate limit: the 403 GitHub returns with Retry-After.
-	var abuse *github.AbuseRateLimitError
-	if errors.As(err, &abuse) {
+	if abuse, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
 		if abuse.RetryAfter != nil && *abuse.RetryAfter > 0 {
 			return *abuse.RetryAfter, true
 		}
 		return backoff, true
 	}
 	// Primary rate limit: wait until the window resets.
-	var rl *github.RateLimitError
-	if errors.As(err, &rl) {
+	if rl, ok := errors.AsType[*github.RateLimitError](err); ok {
 		if d := time.Until(rl.Rate.Reset.Time); d > 0 {
 			return d, true
 		}
 		return backoff, true
 	}
 	// Store reads before a write: plain backoff.
-	var refreshErr *refreshError
-	if errors.As(err, &refreshErr) {
+	if _, ok := errors.AsType[*refreshError](err); ok {
 		return backoff, true
 	}
 	// Transient server-side failures: plain backoff.

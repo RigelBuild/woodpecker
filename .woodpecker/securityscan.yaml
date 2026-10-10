@@ -11,7 +11,7 @@ when:
       - rigel-release
 
 variables:
-  - &trivy_plugin docker.io/woodpeckerci/plugin-trivy:1.6.0
+  - &trivy_plugin docker.io/woodpeckerci/plugin-trivy:1.6.1
 
 steps:
   backend:

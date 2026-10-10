@@ -468,17 +468,10 @@ func TestCreatePipeline(t *testing.T) {
 	})
 }
 
-// TestPostPipeline covers restart (PostPipeline -> pipeline.Restart). The
-// regression case: a pipeline that errored before persisting any config (e.g. a
-// transient config-extension outage) has no old config rows, but a healthy
-// refetch on restart still yields a valid definition. It must restart, not fail
-// with "pipeline definition not found". The guard case: when the refetch is also
-// empty, that error still fires.
 func TestPostPipeline(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	// erroredParent mimics a pipeline that failed during creation before its
-	// config was persisted: status error, and ConfigsForPipeline returns nothing.
+	// A pipeline that failed before its config was persisted.
 	newErroredParent := func() *model.Pipeline {
 		return &model.Pipeline{
 			ID:      2,
@@ -492,13 +485,14 @@ func TestPostPipeline(t *testing.T) {
 
 	fakeRepo := &model.Repo{ID: 1, UserID: 1, FullName: "test/repo", CancelPreviousPipelineEvents: []model.WebhookEvent{}}
 	fakeUser := &model.User{ID: 1, Login: "testuser", Email: "test@example.com", Avatar: "avatar.png", Hash: "hash123"}
+	// The event must match the parent's, or the workflow is filtered out.
 	validConfig := []*forge_types.FileMeta{
-		{Name: ".woodpecker.yml", Data: []byte("when:\n  event: manual\nsteps:\n  test:\n    image: alpine:latest\n    commands:\n      - echo test")},
+		{Name: ".woodpecker.yml", Data: []byte("when:\n  event: pull_request\nsteps:\n  test:\n    image: alpine:latest\n    commands:\n      - echo test")},
 	}
 
-	// setupPost wires the full handler mock surface and invokes PostPipeline.
-	// fetchResult is what the config service serves on the restart refetch.
-	setupPost := func(t *testing.T, parent *model.Pipeline, fetchResult []*forge_types.FileMeta) *httptest.ResponseRecorder {
+	// fetchResult is what the config service serves on the fetch. The store is
+	// returned so callers can assert which persist calls ran.
+	setupPost := func(t *testing.T, parent *model.Pipeline, fetchResult []*forge_types.FileMeta) (*httptest.ResponseRecorder, *store_mocks.MockStore) {
 		mockStore := store_mocks.NewMockStore(t)
 		mockConfigService := config_service_mocks.NewMockService(t)
 		mockSecretService := secret_service_mocks.NewMockService(t)
@@ -527,7 +521,6 @@ func TestPostPipeline(t *testing.T) {
 		mockQueue.On("PushAtOnce", mock.Anything, mock.Anything).Return(nil).Maybe()
 		server.Config.Services.Scheduler = scheduler.NewScheduler(t.Context(), mockStore, mockQueue, memory.New())
 
-		// restart=true refetch: the parent had no persisted config rows.
 		mockConfigService.On("Fetch", mock.Anything, mockForge, fakeUser, fakeRepo, mock.Anything, mock.Anything, true).Return(fetchResult, nil)
 
 		mockStore.On("GetUser", int64(1)).Return(fakeUser, nil)
@@ -550,28 +543,30 @@ func TestPostPipeline(t *testing.T) {
 		c.Request, _ = http.NewRequest(http.MethodPost, "", nil)
 
 		PostPipeline(c)
-		return w
+		return w, mockStore
 	}
 
-	// Regression: config-less errored parent + a healthy refetch must restart,
-	// not report "pipeline definition not found". Before the fix, Restart guarded
-	// on the (empty) old config rows and errored here.
-	t.Run("restart of a config-less errored pipeline succeeds when the refetch yields config", func(t *testing.T) {
-		w := setupPost(t, newErroredParent(), validConfig)
+	// Before the fix, Restart guarded on the empty old config rows.
+	t.Run("restart of a config-less errored pipeline succeeds when the fetch yields config", func(t *testing.T) {
+		w, mockStore := setupPost(t, newErroredParent(), validConfig)
 
 		require.Equal(t, http.StatusOK, w.Code)
 		var got model.Pipeline
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-		assert.Equal(t, model.StatusPending, got.Status, "restart should proceed to the normal start path, not error")
+		assert.NotEqual(t, model.StatusError, got.Status, "restart should not land in error status")
 		for _, e := range got.Errors {
 			assert.NotEqual(t, "pipeline definition not found", e.Message)
 		}
+		// The config must be compiled into real work, not just fetched.
+		assert.NotEmpty(t, got.Workflows, "restart should produce workflows from the fetched config")
+		mockStore.AssertCalled(t, "ConfigPersist", mock.Anything)
+		mockStore.AssertCalled(t, "PipelineConfigCreate", mock.Anything)
+		mockStore.AssertCalled(t, "WorkflowsCreate", mock.Anything)
 	})
 
-	// Guard preserved: no old config AND an empty refetch is a genuine
-	// "definition not found".
-	t.Run("restart still errors when no old config and the refetch is empty", func(t *testing.T) {
-		w := setupPost(t, newErroredParent(), []*forge_types.FileMeta{})
+	// No old config and an empty fetch is a genuine "not found".
+	t.Run("restart still errors when no old config and the fetch is empty", func(t *testing.T) {
+		w, _ := setupPost(t, newErroredParent(), []*forge_types.FileMeta{})
 
 		require.Equal(t, http.StatusOK, w.Code)
 		var got model.Pipeline

@@ -411,7 +411,7 @@ var flags = []cli.Flag{
 	},
 	&cli.Int64Flag{
 		Sources: cli.EnvVars("CI_PREV_COMMIT_TIMESTAMP"),
-		Name:    "prev-commit-message",
+		Name:    "prev-commit-timestamp",
 		Usage:   "Set the metadata environment variable \"CI_PREV_COMMIT_TIMESTAMP\".",
 	},
 	&cli.StringFlag{

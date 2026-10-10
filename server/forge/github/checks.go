@@ -19,7 +19,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v92/github"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -103,20 +103,20 @@ func (c *client) createOrUpdateCheckRun(ctx context.Context, gh *github.Client, 
 	}
 
 	output := &github.CheckRunOutput{
-		Title:   github.Ptr(name),
-		Summary: github.Ptr(common.GetPipelineStatusDescription(workflow.State)),
+		Title:   new(name),
+		Summary: new(common.GetPipelineStatusDescription(workflow.State)),
 	}
 
 	if found {
 		opts := github.UpdateCheckRunOptions{
 			Name:       name,
-			DetailsURL: github.Ptr(detailsURL),
-			ExternalID: github.Ptr(externalID),
-			Status:     github.Ptr(status),
+			DetailsURL: new(detailsURL),
+			ExternalID: new(externalID),
+			Status:     new(status),
 			Output:     output,
 		}
 		if status == checkRunStatusCompleted {
-			opts.Conclusion = github.Ptr(checkRunConclusion(workflow.State))
+			opts.Conclusion = new(checkRunConclusion(workflow.State))
 		}
 		resp, err := doForgeWrite(ctx, func() (*github.Response, error) {
 			_, r, e := gh.Checks.UpdateCheckRun(ctx, repo.Owner, repo.Name, runID, opts)
@@ -139,13 +139,13 @@ func (c *client) createOrUpdateCheckRun(ctx context.Context, gh *github.Client, 
 	opts := github.CreateCheckRunOptions{
 		Name:       name,
 		HeadSHA:    pipeline.Commit,
-		DetailsURL: github.Ptr(detailsURL),
-		ExternalID: github.Ptr(externalID),
-		Status:     github.Ptr(status),
+		DetailsURL: new(detailsURL),
+		ExternalID: new(externalID),
+		Status:     new(status),
 		Output:     output,
 	}
 	if status == checkRunStatusCompleted {
-		opts.Conclusion = github.Ptr(checkRunConclusion(workflow.State))
+		opts.Conclusion = new(checkRunConclusion(workflow.State))
 	}
 	var run *github.CheckRun
 	_, err := doForgeWrite(ctx, func() (*github.Response, error) {
@@ -164,7 +164,7 @@ func (c *client) createOrUpdateCheckRun(ctx context.Context, gh *github.Client, 
 // with the given external ID, or nil if none exists.
 func (c *client) findCheckRun(ctx context.Context, gh *github.Client, repo *model.Repo, sha, externalID string) (*github.CheckRun, error) {
 	opts := &github.ListCheckRunsOptions{
-		ListOptions: github.ListOptions{PerPage: defaultPageSize},
+		PerPage: defaultPageSize,
 	}
 	for {
 		result, resp, err := gh.Checks.ListCheckRunsForRef(ctx, repo.Owner, repo.Name, sha, opts)

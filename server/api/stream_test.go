@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
@@ -71,13 +72,11 @@ func TestEventStreamSSEConcurrentDisconnect(t *testing.T) {
 			// Fire concurrent publishes while canceling the request.
 			var wg sync.WaitGroup
 			for range 20 {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_ = broker.Publish(ctx, topic, pubsub.Message{
 						Data: []byte(`{"pipeline":1}`),
 					})
-				}()
+				})
 			}
 
 			// Simulate client disconnect mid-publish.
@@ -148,13 +147,11 @@ func TestLogStreamSSEConcurrentDisconnect(t *testing.T) {
 			// Fire concurrent log writes while canceling the request.
 			var wg sync.WaitGroup
 			for i := range 20 {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_ = logService.Write(t.Context(), stepID, []*model.LogEntry{
 						{Line: i, Data: []byte("log line")},
 					})
-				}()
+				})
 			}
 
 			// Simulate client disconnect mid-write.
@@ -1005,4 +1002,48 @@ func getAndReadFirstPing(t *testing.T, url string) *http.Response {
 	require.Equal(t, ": ping\n\n", string(buf))
 
 	return resp
+}
+
+// The handlers must not leave a goroutine behind that still reads
+// server.Config after the handler returned: the t.Cleanup of the stress tests
+// above resets the service, and the race detector reports the unsynchronized
+// read/write pair (issue #6766). Swapping the service around every request
+// reproduces that reliably.
+func TestEventStreamSSEDisconnectedClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for range 50 {
+		server.Config.Services.Scheduler = scheduler.NewScheduler(t.Context(), nil, nil, memory.New())
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+
+		ctx, cancel := context.WithCancelCause(t.Context())
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/stream/events", nil)
+		c.Request = req
+
+		// The client is already gone when the handler starts.
+		cancel(nil)
+		EventStreamSSE(c)
+		assert.Contains(t, w.Body.String(), ": ping\n\n")
+
+		server.Config.Services.Scheduler = nil
+	}
+}
+
+func TestLogStreamSSEDisconnectedClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for range 50 {
+		server.Config.Services.Logs = logging.New()
+
+		w, c, cancel := setupLogStreamContext(t)
+
+		// The client is already gone when the handler starts.
+		cancel(nil)
+		LogStreamSSE(c)
+		assert.Contains(t, w.Body.String(), ": ping\n\n")
+
+		server.Config.Services.Logs = nil
+	}
 }

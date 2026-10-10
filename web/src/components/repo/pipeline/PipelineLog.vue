@@ -179,8 +179,7 @@ import useConfig from '~/compositions/useConfig';
 import { requiredInject } from '~/compositions/useInjectProvide';
 import useNotifications from '~/compositions/useNotifications';
 import useUserConfig from '~/compositions/useUserConfig';
-import type { Pipeline, PipelineConfig } from '~/lib/api/types';
-import { findStep } from '~/components/repo/pipeline/findStep';
+import type { Pipeline, PipelineStep, PipelineWorkflow } from '~/lib/api/types';
 import { debounce } from '~/lib/utils';
 
 interface LogLine {
@@ -215,7 +214,6 @@ const pipeline = toRef(props, 'pipeline');
 const stepId = toRef(props, 'stepId');
 const repo = requiredInject('repo');
 const repoPermissions = requiredInject('repo-permissions');
-const pipelineConfigs = requiredInject('pipeline-configs');
 const apiClient = useApiClient();
 const route = useRoute();
 
@@ -249,54 +247,15 @@ const hasPushPermission = computed(() => repoPermissions?.value?.push);
 
 const collapsedCommands = ref(new Set<number>());
 
-const commandRegex = /^\s*-\s(.+)$/gm;
-const specialCharsRegex = /[.*+?^${}()|[\]\\]/g;
-const matrixVariableRegex = /\\\$(\\\{\w+\\\})/g;
-
-const knownCommandMatchers = computed(() => {
-  if (!pipelineConfigs.value) return [];
-  const patterns: RegExp[] = [];
-  pipelineConfigs.value.forEach((config: PipelineConfig) => {
-    const decoded = decode(config.data);
-    const matches = decoded.matchAll(commandRegex);
-    for (const match of matches) {
-      const rawCommand = match[1].trim();
-      // Replace matrix variable ${VAR} with a wildcard match (non-greedy)
-      const patternString = rawCommand
-        .replace(specialCharsRegex, '\\$&') // escape all
-        .replace(matrixVariableRegex, '.*'); // match ${VAR}
-
-      patterns.push(new RegExp(`^${patternString}$`));
-    }
-  });
-  return patterns;
-});
-
 const groupedLogs = computed(() => {
   if (!log.value) return [];
-
-  if (!pipelineConfigs.value || pipelineConfigs.value.length === 0) {
-    return [
-      {
-        id: 0,
-        command: null,
-        lines: log.value,
-        isActualCommand: false,
-      },
-    ];
-  }
 
   const blocks: LogBlock[] = [];
   let currentBlock: LogBlock | null = null;
 
   log.value.forEach((line) => {
     const trimmedText = (line.rawText || '').trim();
-
-    let isCommand = false;
-    if (trimmedText.startsWith('+ ')) {
-      const cmdPart = trimmedText.slice(2).trim();
-      isCommand = knownCommandMatchers.value.some((matcher) => matcher.test(cmdPart));
-    }
+    const isCommand = trimmedText.startsWith('▶  ') && trimmedText.slice(3).trim().length > 0;
 
     if (isCommand) {
       currentBlock = {
@@ -327,7 +286,9 @@ const hasGroupedLogs = computed(() => {
   return groupedLogs.value.find((g) => g.isActualCommand);
 });
 
-const urlRegex = /https?:\/\/\S+/g;
+// Stop a URL at a '<' so that if we are also converting ansi escapes at the end of a URL
+// we don't include their closing </span> in the URL match.
+const urlRegex = /https?:\/\/[^\s<]+/g;
 
 function isScrolledToBottom(): boolean {
   if (!consoleElement.value) {
@@ -484,6 +445,30 @@ async function deleteLogs() {
   } catch (e) {
     notifications.notifyError(e as Error, i18n.t('repo.pipeline.log_delete_error'));
   }
+}
+
+// A stepless workflow has no `children`, so the deref is guarded.
+function findStep(workflows: PipelineWorkflow[], pid: number): PipelineStep | undefined {
+  return workflows.reduce(
+    (prev, workflow) => {
+      const result = (workflow.children ?? []).reduce(
+        (prevChild, step) => {
+          if (step.pid === pid) {
+            return step;
+          }
+
+          return prevChild;
+        },
+        undefined as PipelineStep | undefined,
+      );
+      if (result) {
+        return result;
+      }
+
+      return prev;
+    },
+    undefined as PipelineStep | undefined,
+  );
 }
 
 onMounted(async () => {
