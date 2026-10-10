@@ -8,6 +8,7 @@ mkdir -p "$dir/bin"
 cat >"$dir/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DOCKER_LOG"
+if [ "$1" = buildx ] && [ "$2" = imagetools ] && [ "$3" = create ] && [ -n "${FAIL_TAG:-}" ] && [ "$5" = "$FAIL_TAG" ]; then exit 1; fi
 if [ "$1" = buildx ] && [ "$2" = imagetools ] && [ "$3" = inspect ]; then
   case "$4" in
     *woodpecker-agent*) printf '%s\n' "$AGENT_DIGEST" ;;
@@ -37,3 +38,12 @@ grep -q 'woodpecker-server:3.17.0-rigel.9@sha256:bbbb' "$GITHUB_STEP_SUMMARY" ||
 grep -q 'woodpecker-server:sha-0123456789abcdef0123456789abcdef01234567@sha256:bbbb' "$GITHUB_STEP_SUMMARY" || { echo 'FAIL server commit digest summary'; exit 1; }
 echo 'ok   both immutable digests receive version and commit tags'
 echo 'ok   all four tag@digest pins appear in the summary'
+
+: >"$DOCKER_LOG"
+: >"$GITHUB_STEP_SUMMARY"
+FAIL_TAG="ghcr.io/rigelbuild/woodpecker-server:sha-${COMMIT_SHA}" "$script" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then echo 'FAIL later server tag failure propagates'; exit 1; fi
+if [ -s "$GITHUB_STEP_SUMMARY" ]; then echo 'FAIL failed finalization leaves summary empty'; exit 1; fi
+echo 'ok   later server tag failure propagates'
+echo 'ok   failed finalization leaves summary empty'

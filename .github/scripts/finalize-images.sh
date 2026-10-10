@@ -17,9 +17,11 @@ finalize_image() {
       echo "::error::${reference} resolves to ${resolved}, expected ${digest}" >&2
       return 1
     fi
-    printf '%s@%s\n' "$reference" "$resolved" >> "$GITHUB_STEP_SUMMARY"
+    summary_lines+=("${reference}@${resolved}")
   done
 }
 
+summary_lines=()
 finalize_image ghcr.io/rigelbuild/woodpecker-agent "$AGENT_DIGEST"
 finalize_image ghcr.io/rigelbuild/woodpecker-server "$SERVER_DIGEST"
+printf '%s\n' "${summary_lines[@]}" >> "$GITHUB_STEP_SUMMARY"

@@ -31,6 +31,25 @@ done
 [ "$(yq -r '.jobs.server-rehearsal.permissions.packages // "read"' "$publisher")" = read ] || fail 'server rehearsal cannot write packages'
 [ "$(yq -r '.jobs.agent-rehearsal.steps | map(select(.uses | test("docker/login-action")) ) | length' "$publisher")" = 0 ] || fail 'agent rehearsal has no registry login'
 [ "$(yq -r '.jobs.server-rehearsal.steps | map(select(.uses | test("docker/login-action")) ) | length' "$publisher")" = 0 ] || fail 'server rehearsal has no registry login'
+for job in agent-publish agent-rehearsal server-publish server-rehearsal; do
+  platforms="$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.platforms" "$publisher")"
+  [ "$platforms" = 'linux/amd64,linux/arm64' ] || fail "$job builds both required platforms"
+done
+[ "$(yq -r '.jobs.agent-publish.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.file' "$publisher")" = docker/Dockerfile.agent.multiarch ] || fail 'agent tag build uses upstream Dockerfile'
+[ "$(yq -r '.jobs.agent-rehearsal.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.file' "$publisher")" = docker/Dockerfile.agent.multiarch ] || fail 'agent rehearsal uses upstream Dockerfile'
+[ "$(yq -r '.jobs.server-publish.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.file' "$publisher")" = docker/Dockerfile.server.multiarch.rootless ] || fail 'server tag build uses upstream Dockerfile'
+[ "$(yq -r '.jobs.server-rehearsal.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.file' "$publisher")" = docker/Dockerfile.server.multiarch.rootless ] || fail 'server rehearsal uses upstream Dockerfile'
+[ "$(yq -r '.jobs.agent-rehearsal.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.push' "$publisher")" = false ] || fail 'agent rehearsal does not push'
+[ "$(yq -r '.jobs.server-rehearsal.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.push' "$publisher")" = false ] || fail 'server rehearsal does not push'
+[ "$(yq -r '.jobs.agent-rehearsal.if' "$publisher")" = "github.event_name == 'workflow_dispatch'" ] || fail 'agent rehearsal is dispatch-only'
+[ "$(yq -r '.jobs.server-rehearsal.if' "$publisher")" = "github.event_name == 'workflow_dispatch'" ] || fail 'server rehearsal is dispatch-only'
+[ "$(yq -r '.jobs.finalize.if' "$publisher")" = "github.event_name == 'push'" ] || fail 'finalize is tag-push-only'
+[ "$(yq -r '.jobs.finalize.needs | sort | join(",")' "$publisher")" = 'agent-publish,resolve,server-publish' ] || fail 'finalize needs both image digests and resolve'
+for job in agent-publish server-publish; do
+  [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.push" "$publisher")" = true ] || fail "$job pushes its manifest"
+  [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.outputs" "$publisher" | grep -c 'push-by-digest=true')" = 1 ] || fail "$job pushes by digest"
+done
+pass 'publisher build, rehearsal, and finalize contracts'
 while IFS= read -r line; do
   if [[ ! "$line" =~ uses:[[:space:]]+[^[:space:]#]+@[0-9a-f]{40}[[:space:]]+#\ v[^[:space:]]+[[:space:]]*$ ]]; then
     fail "third-party action is not SHA-pinned with a version trailer: $line"
