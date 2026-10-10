@@ -388,6 +388,10 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			if changed {
 				user := &model.User{ID: repo.UserID}
 				storeMock.On("GetUser", repo.UserID).Return(user, nil).Once()
+				if !tt.pipelineFinalized {
+					// A non-terminal post re-reads the pipeline first (stale-pending guard).
+					storeMock.On("GetPipeline", pipeline.ID).Return(pipeline, nil).Once()
+				}
 				if tt.forgeStatus {
 					forgeMock := forge_mocks.NewMockForge(t)
 					forgeMock.On("Status", mock.Anything, user, repo, mock.MatchedBy(func(got *model.Pipeline) bool {
