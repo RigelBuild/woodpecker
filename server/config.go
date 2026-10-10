@@ -61,6 +61,8 @@ var Config = struct {
 		AsyncRepositoryUpdate  bool
 		WebhookSyncTimeout     time.Duration
 		HookDedupWindow        time.Duration
+		OrphanReapInterval     time.Duration
+		OrphanReapGrace        time.Duration
 	}
 	Agent struct {
 		DisableUserRegisteredAgentRegistration bool

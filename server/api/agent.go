@@ -46,7 +46,7 @@ func GetAgents(c *gin.Context) {
 		c.String(http.StatusInternalServerError, "Error getting agent list. %s", err)
 		return
 	}
-	c.JSON(http.StatusOK, agents)
+	c.JSON(http.StatusOK, withoutTokens(agents))
 }
 
 // GetAgent
@@ -70,7 +70,7 @@ func GetAgent(c *gin.Context) {
 		handleDBError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, agent)
+	c.JSON(http.StatusOK, withoutToken(agent))
 }
 
 // GetAgentTasks
@@ -154,7 +154,7 @@ func PatchAgent(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, agent)
+	c.JSON(http.StatusOK, withoutToken(agent))
 }
 
 // PostAgent
@@ -303,7 +303,7 @@ func GetOrgAgents(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, agents)
+	c.JSON(http.StatusOK, withoutTokens(agents))
 }
 
 // PatchOrgAgent
@@ -359,7 +359,7 @@ func PatchOrgAgent(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, agent)
+	c.JSON(http.StatusOK, withoutToken(agent))
 }
 
 // DeleteOrgAgent
@@ -411,4 +411,20 @@ func DeleteOrgAgent(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// withoutToken copies agent with its token cleared. For system agents the
+// token is the fleet-wide agent secret, so only create may return it.
+func withoutToken(agent *model.Agent) *model.Agent {
+	redacted := *agent
+	redacted.Token = ""
+	return &redacted
+}
+
+func withoutTokens(agents []*model.Agent) []*model.Agent {
+	redacted := make([]*model.Agent, len(agents))
+	for i, agent := range agents {
+		redacted[i] = withoutToken(agent)
+	}
+	return redacted
 }
