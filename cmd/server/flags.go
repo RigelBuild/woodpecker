@@ -116,6 +116,18 @@ var flags = append([]cli.Flag{
 		Usage:   "max time to wait for pipeline creation triggered by an incoming webhook before responding 202 Accepted and finishing it in the background; 0 disables the fallback and always responds synchronously",
 		Value:   5 * time.Second,
 	},
+	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_ORPHAN_REAP_INTERVAL"),
+		Name:    "orphan-reap-interval",
+		Usage:   "interval for reaping orphaned workflows; 0 disables reaping",
+		Value:   5 * time.Minute,
+	},
+	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_ORPHAN_REAP_GRACE"),
+		Name:    "orphan-reap-grace",
+		Usage:   "minimum age before an orphaned workflow can be reaped",
+		Value:   10 * time.Minute,
+	},
 	&cli.StringFlag{
 		Sources: cli.EnvVars("WOODPECKER_GRPC_ADDR"),
 		Name:    "grpc-addr",
