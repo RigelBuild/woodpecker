@@ -49,6 +49,15 @@ for job in agent-publish server-publish; do
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.push" "$publisher")" = true ] || fail "$job pushes its manifest"
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.outputs" "$publisher" | grep -c 'push-by-digest=true')" = 1 ] || fail "$job pushes by digest"
 done
+# A job that runs a repo script must check out before it; a bare runner has no tree.
+for wf in "$publisher" "$release"; do
+  for job in $(yq -r '.jobs | keys | .[]' "$wf"); do
+    first_script="$(yq -r ".jobs.\"$job\".steps | to_entries | map(select(.value.run // \"\" | test(\"\\.github/scripts/\"))) | .[0].key // \"\"" "$wf")"
+    [ -n "$first_script" ] || continue
+    first_checkout="$(yq -r ".jobs.\"$job\".steps | to_entries | map(select(.value.uses // \"\" | test(\"^actions/checkout@\"))) | .[0].key // \"\"" "$wf")"
+    [ -n "$first_checkout" ] && [ "$first_checkout" -lt "$first_script" ] || fail "$job checks out before running repo scripts"
+  done
+done
 pass 'publisher build, rehearsal, and finalize contracts'
 while IFS= read -r line; do
   if [[ ! "$line" =~ uses:[[:space:]]+[^[:space:]#]+@[0-9a-f]{40}[[:space:]]+#\ v[^[:space:]]+[[:space:]]*$ ]]; then

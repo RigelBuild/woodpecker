@@ -14,7 +14,7 @@
         # Fork build version. Must not collide with upstream tags (`v3.16.x`)
         # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
         # fork release.
-        version = "3.17.0-rigel.10";
+        version = "3.17.0-rigel.11";
 
         # The repo requires Go 1.27 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
