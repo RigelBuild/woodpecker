@@ -16,9 +16,9 @@
         # fork release.
         version = "3.17.0-rigel.9";
 
-        # The repo requires Go 1.26 (go.mod toolchain); pin it so the sandboxed
+        # The repo requires Go 1.27 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
-        buildGoModule = pkgs.buildGoModule.override { go = pkgs.go_1_26; };
+        buildGoModule = pkgs.buildGoModule.override { go = pkgs.go_1_27; };
 
         ldflags = [
           "-s"
@@ -35,8 +35,8 @@
 
         # Locked against this fork's go.sum / web pnpm-lock. To refresh: set to
         # pkgs.lib.fakeHash, build, and paste the hash nix reports.
-        vendorHash = "sha256-rEI9M770VpUVVSuQmqr/GP49fV0jJE5aYvKowfeF9Tg=";
-        webuiHash = "sha256-6d6I2L5jvIduC4E6r7SzA3QMvj+c8lRjFPUj6eggRBE=";
+        vendorHash = "sha256-uik9NsKUHegaEmQFtfLHVNkptxX2E0QBPlnk5eI42Dc=";
+        webuiHash = "sha256-rne9xyew62ItTfLL7Vq3CxDQa/O/13iANWFqfnl4lp4=";
 
         # Re-rooted to a content-addressed copy of this fork's own subtree
         # (SEA-1860): `self.outPath` is a subpath into the whole-repo store
@@ -127,10 +127,21 @@
         devShells.default =
           with pkgs;
           let
-            go = go_1_26;
+            go = go_1_27;
+
+            # rebuild Go based tools with the go version above
+            buildGoModule = pkgs.buildGoModule.override { inherit go; };
+            withGo =
+              pkg:
+              let
+                builderArgs = lib.filterAttrs (name: _: lib.hasPrefix "buildGo" name) (
+                  if pkg ? override then lib.functionArgs pkg.override else { }
+                );
+              in
+              if builderArgs == { } then pkg else pkg.override (lib.mapAttrs (_: _: buildGoModule) builderArgs);
           in
           pkgs.mkShell {
-            buildInputs = [
+            buildInputs = map withGo [
               # generic
               gnumake
               gnutar
@@ -146,7 +157,6 @@
 
               # backend
               go
-              glibc.static
               gofumpt
               golangci-lint
               go-mockery
@@ -165,6 +175,8 @@
             LDFLAGS = "-L${pkgs.glibc}/lib";
             GO = "${go}/bin/go";
             GOROOT = "${go}/share/go";
+            STATIC_BUILD = "false";
+            pnpm_config_pm_on_fail = "ignore";
           };
       }
     );

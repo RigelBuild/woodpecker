@@ -19,7 +19,7 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v92/github"
 	"github.com/rs/zerolog/log"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
@@ -191,10 +191,10 @@ func (c *client) postAggregate(ctx context.Context, client *github.Client, repo 
 				return github.RepoStatus{}, err
 			}
 			return github.RepoStatus{
-				Context:     github.Ptr(statusContext),
-				State:       github.Ptr(convertStatus(state)),
-				Description: github.Ptr(common.GetPipelineStatusDescription(state)),
-				TargetURL:   github.Ptr(common.GetPipelineStatusURL(repo, p, nil)),
+				Context:     new(statusContext),
+				State:       new(convertStatus(state)),
+				Description: new(common.GetPipelineStatusDescription(state)),
+				TargetURL:   new(common.GetPipelineStatusURL(repo, p, nil)),
 			}, nil
 		}, func(s github.RepoStatus) (*github.Response, error) {
 			_, resp, err := client.Repositories.CreateStatus(ctx, repo.Owner, repo.Name, p.Commit, s)

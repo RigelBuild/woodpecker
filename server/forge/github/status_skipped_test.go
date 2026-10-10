@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v92/github"
 	github_mock "github.com/migueleliasweb/go-github-mock/src/mock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,15 +69,15 @@ func skippedGateAppClient(t *testing.T, posts *atomic.Int32) (*client, context.C
 	mockedHTTPClient := github_mock.NewMockedHTTPClient(
 		github_mock.WithRequestMatch(
 			github_mock.GetReposInstallationByOwnerByRepo,
-			github.Installation{ID: github.Ptr(int64(99))},
+			github.Installation{ID: new(int64(99))},
 		),
 		github_mock.WithRequestMatch(
 			github_mock.PostAppInstallationsAccessTokensByInstallationId,
-			github.InstallationToken{Token: github.Ptr("inst-token")},
+			github.InstallationToken{Token: new("inst-token")},
 		),
 		github_mock.WithRequestMatch(
 			github_mock.GetReposCommitsCheckRunsByOwnerByRepoByRef,
-			github.ListCheckRunsResults{Total: github.Ptr(0), CheckRuns: []*github.CheckRun{}},
+			github.ListCheckRunsResults{Total: new(0), CheckRuns: []*github.CheckRun{}},
 		),
 		github_mock.WithRequestMatchHandler(
 			github_mock.PostReposCheckRunsByOwnerByRepo,

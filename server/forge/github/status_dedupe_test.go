@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v92/github"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -153,7 +153,7 @@ func TestStatusDedupeSerializesOneKey(t *testing.T) {
 	go func() {
 		defer close(done)
 		_, _ = d.post(ctx, "k", func() (github.RepoStatus, error) {
-			return github.RepoStatus{State: github.Ptr(statusPending)}, nil
+			return github.RepoStatus{State: new(statusPending)}, nil
 		}, func(github.RepoStatus) (*github.Response, error) {
 			close(inSend)
 			<-release
@@ -167,7 +167,7 @@ func TestStatusDedupeSerializesOneKey(t *testing.T) {
 		defer close(second)
 		_, _ = d.post(ctx, "k", func() (github.RepoStatus, error) {
 			secondBuilt.Store(true)
-			return github.RepoStatus{State: github.Ptr(statusSuccess)}, nil
+			return github.RepoStatus{State: new(statusSuccess)}, nil
 		}, func(github.RepoStatus) (*github.Response, error) { return nil, nil })
 	}()
 	// Wait until the second report is queued on the key, so a broken lock
@@ -175,7 +175,7 @@ func TestStatusDedupeSerializesOneKey(t *testing.T) {
 	require.Eventually(t, func() bool { return lockRefs(d, "k") == 2 }, time.Second, time.Millisecond)
 	// Another key is not blocked by the held one.
 	_, err := d.post(ctx, "other", func() (github.RepoStatus, error) {
-		return github.RepoStatus{State: github.Ptr(statusPending)}, nil
+		return github.RepoStatus{State: new(statusPending)}, nil
 	}, func(github.RepoStatus) (*github.Response, error) { return nil, nil })
 	require.NoError(t, err)
 	assert.False(t, secondBuilt.Load(), "a second report for the key must wait for the first send")
