@@ -258,7 +258,6 @@ cross-compile-server: ## Cross compile the server
 		TARGETARCH_BUILDX=$(subst arm64/v8,arm64,$(subst arm/v7,arm,$(word 2,$(subst |, ,$(platform))))) \
 		make release-server-xgo || exit 1; \
 	)
-	tree ${DIST_DIR}
 
 release-server-xgo: check-xgo ## Create server binaries for release using xgo
 	@echo "Building for:"

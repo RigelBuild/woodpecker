@@ -75,18 +75,22 @@ steps:
         path:
           - '.woodpecker/**'
 
-  # Unit tests for the GitHub Actions image publishers' version and source guards.
+  # Unit tests for the release mint, image publishers' guards and workflow contract.
   test-image-version:
     depends_on: []
     image: docker.io/bash:5
     commands:
-      - apk add --no-cache git
+      - apk add --no-cache git yq-go
       - .github/scripts/resolve-image-version.test.sh
       - .github/scripts/check-release-source.test.sh
+      - .github/scripts/release-tag.test.sh
+      - .github/scripts/finalize-images.test.sh
+      - .github/scripts/workflow-contract.test.sh
     when:
       - event: pull_request
         path:
           - '.github/scripts/**'
+          - '.github/workflows/**'
           - '.woodpecker/test-checks.yaml'
 
   lint:
