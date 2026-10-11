@@ -268,6 +268,25 @@ func TestGetAgent(t *testing.T) {
 		assert.Contains(t, err.Error(), "timeout")
 	})
 
+	for _, tc := range []struct{ name, master string }{
+		{"rotated master token does not authenticate as a system agent", "new"},
+		{"stored system-agent token does not authenticate with no master configured", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			systemAgent := &model.Agent{ID: 2, OwnerID: model.IDNotSet, OrgID: model.IDNotSet}
+			store := store_mocks.NewMockStore(t)
+			store.On("AgentFindByToken", "old").Return(systemAgent, nil).Once()
+
+			srv := newAuthServer(t, tc.master, store)
+			got, err := srv.getAgent(2, "old")
+
+			require.Error(t, err)
+			assert.Nil(t, got)
+		})
+	}
+
 	t.Run("master token configured but wrong token falls through to individual auth", func(t *testing.T) {
 		t.Parallel()
 

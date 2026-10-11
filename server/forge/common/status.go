@@ -53,11 +53,67 @@ func GetPipelineStatusContext(repo *model.Repo, pipeline *model.Pipeline, workfl
 	return ctx.String()
 }
 
+// GetPipelineAggregateStatusContext returns the context for the single
+// pipeline-level aggregate status. It has no per-workflow component, so it is
+// stable across an affected-aware fan-out and usable as a required
+// branch-protection check.
+func GetPipelineAggregateStatusContext(repo *model.Repo, pipeline *model.Pipeline) string {
+	event := string(pipeline.Event)
+	if pipeline.Event == model.EventPull {
+		event = "pr"
+	}
+
+	tmpl, err := template.New("aggregate-context").Parse(server.Config.Server.StatusAggregateFormat)
+	if err != nil {
+		log.Error().Err(err).Msg("could not create aggregate status from template")
+		return ""
+	}
+	var ctx bytes.Buffer
+	err = tmpl.Execute(&ctx, map[string]any{
+		"context": server.Config.Server.StatusContext,
+		"event":   event,
+		"owner":   repo.Owner,
+		"repo":    repo.Name,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("could not create aggregate status context")
+		return ""
+	}
+
+	return ctx.String()
+}
+
+// GetPipelineMetaStatusContext returns the context for the selective
+// meta-aggregate status. Unlike GetPipelineAggregateStatusContext it renders
+// StatusMetaContext with NO event variable, so the context string is
+// byte-identical across a pull_request and a pull_request_metadata pipeline —
+// that identity is the whole point: it lets a metadata-only pipeline re-post the
+// same required context without ever masking the code aggregate.
+func GetPipelineMetaStatusContext(repo *model.Repo, _ *model.Pipeline) string {
+	tmpl, err := template.New("meta-context").Parse(server.Config.Server.StatusMetaContext)
+	if err != nil {
+		log.Error().Err(err).Msg("could not create meta status from template")
+		return ""
+	}
+	var ctx bytes.Buffer
+	err = tmpl.Execute(&ctx, map[string]any{
+		"context": server.Config.Server.StatusContext,
+		"owner":   repo.Owner,
+		"repo":    repo.Name,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("could not create meta status context")
+		return ""
+	}
+
+	return ctx.String()
+}
+
 // GetPipelineStatusDescription is a helper function that generates a description
 // message for the current pipeline status.
 func GetPipelineStatusDescription(status model.StatusValue) string {
 	switch status {
-	case model.StatusPending, model.StatusCreated:
+	case model.StatusPending:
 		return "Pipeline is pending"
 	case model.StatusRunning:
 		return "Pipeline is running"
@@ -71,12 +127,10 @@ func GetPipelineStatusDescription(status model.StatusValue) string {
 		return "Pipeline is pending approval"
 	case model.StatusDeclined:
 		return "Pipeline was rejected"
-	case model.StatusCanceled:
-		return "Pipeline was canceled"
-	case model.StatusSkipped:
-		return "Pipeline was skipped"
+	case model.StatusCanceled, model.StatusSkipped, model.StatusCreated:
+		return "Pipeline is pending"
 	default:
-		return "unknown status"
+		return "Pipeline is pending"
 	}
 }
 

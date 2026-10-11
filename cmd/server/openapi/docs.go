@@ -4776,7 +4776,8 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "enabled": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "default": true
                 },
                 "id": {
                     "type": "integer"
@@ -5150,6 +5151,9 @@ const docTemplate = `{
                 },
                 "parent": {
                     "type": "integer"
+                },
+                "pr_body": {
+                    "type": "string"
                 },
                 "pr_draft": {
                     "type": "boolean"
@@ -6018,6 +6022,9 @@ const docTemplate = `{
                 "author": {
                     "$ref": "#/definitions/metadata.Author"
                 },
+                "body": {
+                    "type": "string"
+                },
                 "branch": {
                     "type": "string"
                 },
@@ -6467,6 +6474,9 @@ const docTemplate = `{
                 },
                 "name": {
                     "type": "string"
+                },
+                "on_metadata_edit": {
+                    "type": "boolean"
                 },
                 "pid": {
                     "type": "integer"

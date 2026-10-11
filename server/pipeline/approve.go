@@ -75,7 +75,7 @@ func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipe
 		return nil, fmt.Errorf("error updating pipeline. %w", err)
 	}
 
-	publishPipeline(ctx, forge, currentPipeline, repo, user)
+	publishPipeline(ctx, forge, store, currentPipeline, repo, user)
 
 	currentPipeline, err = start(ctx, forge, store, currentPipeline, user, repo, pipelineItems)
 	if err != nil {

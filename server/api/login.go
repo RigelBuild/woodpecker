@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base32"
 	"errors"
 	"fmt"
@@ -147,7 +148,17 @@ func HandleAuth(c *gin.Context) {
 	allowedOrgs := server.Config.Permissions.Orgs.With(forgeModel.Orgs)
 	if allowedOrgs.IsConfigured {
 		isMember := false
+		// This paging blocks the login redirect and can outrun the server-wide
+		// WriteTimeout on an org-filtered account with many teams. Re-arm per
+		// page like updateRepoPermissions below, and stop paging if the browser
+		// gives up waiting.
+		onPage := slowHandlerProgress(c, newResponseController(c.Writer))
 		for page := 1; page <= maxPage; page++ {
+			if perr := onPage(); perr != nil {
+				log.Debug().Err(perr).Msgf("auth: client has gone away while verifying team membership for %s", userFromForge.Login)
+				c.AbortWithStatus(statusClientClosedRequest)
+				return
+			}
 			teams, terr := _forge.Teams(c, userFromForge, &model.ListOptions{
 				Page:    page,
 				PerPage: perPage,
@@ -315,16 +326,34 @@ func HandleAuth(c *gin.Context) {
 	}
 
 	if !server.Config.Server.AsyncRepositoryUpdate || noStoredRepositories {
-		if err := updateRepoPermissions(c, user, _store, _forge, forgeID); err != nil {
-			if err != nil {
-				log.Error().Err(err).Msgf("cannot update repo permissions for user %s", user.Login)
+		// Synchronous: the redirect below is blocked on this sync, which pages
+		// against the forge and can outrun the server-wide WriteTimeout. Re-arm
+		// per page so a login against a large account still completes, and stop
+		// paging if the browser gives up waiting for the redirect.
+		onPage := slowHandlerProgress(c, newResponseController(c.Writer))
+		if err := updateRepoPermissions(c, user, _store, _forge, forgeID, onPage); err != nil {
+			// onPage reports the browser gave up waiting for the redirect. There
+			// is nobody left to redirect, and a login abandoned mid-sync is not
+			// an internal error: log it at debug and let the access log record
+			// the disconnect rather than a 500 nobody caused.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				log.Debug().Err(err).Msgf("auth: client has gone away while syncing repo permissions for user %s", user.Login)
+				c.AbortWithStatus(statusClientClosedRequest)
+				return
 			}
+			log.Error().Err(err).Msgf("cannot update repo permissions for user %s", user.Login)
 			c.Redirect(http.StatusSeeOther, server.Config.Server.RootPath+"/login?error=internal_error")
 			return
 		}
 	} else {
 		go func() {
-			if err := updateRepoPermissions(c, user, _store, _forge, forgeID); err != nil {
+			// Detached from the response: this outlives the handler, which
+			// writes its redirect below and returns. Touching the response
+			// writer from here would race that return, so there is no deadline
+			// of ours to extend — hence the nil hook, and hence why the sync
+			// takes a progress callback rather than a ResponseController, which
+			// only its HTTP callers can supply.
+			if err := updateRepoPermissions(c, user, _store, _forge, forgeID, nil); err != nil {
 				log.Error().Err(err).Msgf("could not update repo permissions for user %s in background", user.Login)
 			}
 		}()
@@ -334,9 +363,27 @@ func HandleAuth(c *gin.Context) {
 	c.Redirect(http.StatusSeeOther, server.Config.Server.RootPath+"/")
 }
 
-func updateRepoPermissions(c *gin.Context, user *model.User, _store store.Store, _forge forge.Forge, forgeID int64) error {
+// updateRepoPermissions syncs a user's forge repo permissions into the store.
+//
+// The onPage hook, when non-nil, runs before fetching each page from the forge
+// and can abort the sync by returning an error. It is the seam an HTTP caller
+// uses both to re-arm its rolling per-response write deadline as the sync makes
+// progress and to stop paging once its client has gone away — necessary because
+// rolling the deadline removes the wall-clock bound that would otherwise end the
+// handler, and maxPage alone permits 10000 forge round-trips against a response
+// nobody is reading.
+//
+// The background caller passes nil: it has no live response to arm and must
+// keep running detached. A callback rather than a ResponseController keeps this
+// function free of a dependency only some of its callers can satisfy.
+func updateRepoPermissions(c *gin.Context, user *model.User, _store store.Store, _forge forge.Forge, forgeID int64, onPage func() error) error {
 	start := time.Now()
 	repos, err := utils.Paginate(func(page int) ([]*model.Repo, error) {
+		if onPage != nil {
+			if err := onPage(); err != nil {
+				return nil, err
+			}
+		}
 		return _forge.Repos(c, user, &model.ListOptions{
 			Page:    page,
 			PerPage: perPage,

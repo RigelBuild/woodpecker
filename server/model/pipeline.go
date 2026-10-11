@@ -54,6 +54,7 @@ type Pipeline struct {
 	PullRequestLabels    []string                `json:"pr_labels,omitempty"     xorm:"json 'pr_labels'"`
 	PullRequestMilestone string                  `json:"pr_milestone,omitempty"  xorm:"pr_milestone"`
 	PullRequestDraft     bool                    `json:"pr_draft,omitempty"      xorm:"pr_draft"`
+	PullRequestBody      string                  `json:"pr_body,omitempty"       xorm:"LONGTEXT 'pr_body'"`
 	Cron                 string                  `json:"cron,omitempty"          xorm:"cron"` // name of the cron job
 	FromFork             bool                    `json:"from_fork,omitempty"     xorm:"from_fork"`
 	Version              string                  `json:"version"                 xorm:"'version'"`

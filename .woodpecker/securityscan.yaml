@@ -1,8 +1,14 @@
+# Rigel CI runs a heterogeneous agent pool including a local-backend agent that
+# cannot run service containers or pull images; pin to docker-backend agents.
+labels:
+  backend: docker
+
 when:
   - event: [pull_request]
   - event: push
     branch:
       - ${CI_REPO_DEFAULT_BRANCH}
+      - rigel-release
 
 variables:
   - &trivy_plugin docker.io/woodpeckerci/plugin-trivy:1.6.1

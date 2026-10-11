@@ -1,0 +1,8 @@
+name: Infra / Deploy
+when:
+  event: push
+steps:
+  build:
+    image: golang
+    commands:
+      - go test

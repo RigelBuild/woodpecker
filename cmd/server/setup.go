@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/tink-crypto/tink-go/v2/subtle/random"
@@ -185,6 +186,10 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Pipeline.AuthenticatePublicRepos = c.Bool("authenticate-public-repos")
 	server.Config.Server.AsyncRepositoryUpdate = c.Bool("async-repository-update")
 	server.Config.Server.WebhookSyncTimeout = c.Duration("webhook-sync-timeout")
+	server.Config.Server.HookDedupWindow = c.Duration("hook-dedup-window")
+	server.Config.Server.OrphanReapInterval = c.Duration("orphan-reap-interval")
+	server.Config.Server.OrphanReapGrace = c.Duration("orphan-reap-grace")
+	server.Config.Server.CreationTimeout = pipelineCreationTimeout(c.Duration("extensions-timeout"), c.Duration("forge-timeout"), c.Uint("forge-retry"))
 
 	// Pull requests
 	server.Config.Pipeline.DefaultAllowPullRequests = c.Bool("default-allow-pull-requests")
@@ -255,6 +260,13 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Server.PortTLS = c.String("server-addr-tls")
 	server.Config.Server.StatusContext = c.String("status-context")
 	server.Config.Server.StatusContextFormat = c.String("status-context-format")
+	server.Config.Server.StatusAggregate = c.Bool("status-aggregate")
+	server.Config.Server.StatusAggregateFormat = c.String("status-aggregate-format")
+	server.Config.Server.StatusMeta = c.Bool("status-meta")
+	server.Config.Server.StatusMetaContext = c.String("status-meta-context")
+	server.Config.Server.StatusPerWorkflow = c.Bool("status-per-workflow")
+	server.Config.Server.ReportSkippedWorkflows = c.Bool("report-skipped-workflows")
+	server.Config.Server.ReportSkippedToForge = c.Bool("report-skipped-to-forge")
 	server.Config.Server.SessionExpires = c.Duration("session-expires")
 	u, _ := url.Parse(server.Config.Server.Host)
 	rootPath := strings.TrimSuffix(u.Path, "/")
@@ -286,4 +298,23 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Permissions.Orgs = permissions.NewOrgs(c.StringSlice("orgs"))
 	server.Config.Permissions.OwnersAllowlist = permissions.NewOwnersAllowlist(c.StringSlice("repo-owners"))
 	return nil
+}
+
+const (
+	extensionTries = 3 // matches the retry count in services/utils.Client.Send
+	// Config, secret and registry each may call a global then a repo extension, in sequence.
+	extensionCalls             = 6
+	defaultExtensionsTimeout   = 10 * time.Second // services/utils fallback for a zero or negative timeout
+	creationSlack              = time.Minute
+	minPipelineCreationTimeout = 2 * time.Minute
+)
+
+// pipelineCreationTimeout lets a background pipeline creation outlast every
+// try of each extension it calls plus every forge config read.
+func pipelineCreationTimeout(extensionsTimeout, forgeTimeout time.Duration, forgeRetries uint) time.Duration {
+	if extensionsTimeout <= 0 {
+		extensionsTimeout = defaultExtensionsTimeout
+	}
+	budget := extensionCalls*extensionTries*extensionsTimeout + time.Duration(forgeRetries)*forgeTimeout + creationSlack
+	return max(minPipelineCreationTimeout, budget)
 }

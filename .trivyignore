@@ -9,3 +9,6 @@ GO-2026-5932
 # build-time globs we control, never on user input.
 # Remove once upstream ships a fix: https://github.com/micromatch/braces/issues/70
 CVE-2026-93687
+
+# docs/ build tooling only (got via cacheable-request); no fixed release.
+CVE-2026-93748

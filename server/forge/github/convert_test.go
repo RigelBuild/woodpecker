@@ -24,7 +24,13 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
-func TestConvertStatus(t *testing.T) {
+func Test_convertStatus(t *testing.T) {
+	// Exhaustive over every model.StatusValue constant. The contract: only
+	// terminal *bad* outcomes map to GitHub "failure"; success maps to
+	// "success"; every not-yet-terminal or internal state maps to "pending".
+	// convertStatus must NEVER return "error" for a defined status — the old
+	// default turned the transient/internal StatusCreated into a spurious red
+	// required check, which failed Graphite merge-queue batches.
 	tests := []struct {
 		name   string
 		status model.StatusValue
@@ -33,21 +39,27 @@ func TestConvertStatus(t *testing.T) {
 		{name: "success", status: model.StatusSuccess, want: statusSuccess},
 		{name: "failure", status: model.StatusFailure, want: statusFailure},
 		{name: "declined", status: model.StatusDeclined, want: statusFailure},
-		{name: "killed", status: model.StatusKilled, want: statusError},
-		{name: "error", status: model.StatusError, want: statusError},
+		{name: "killed", status: model.StatusKilled, want: statusFailure},
+		{name: "error", status: model.StatusError, want: statusFailure},
 		{name: "pending", status: model.StatusPending, want: statusPending},
 		{name: "running", status: model.StatusRunning, want: statusPending},
 		{name: "blocked", status: model.StatusBlocked, want: statusPending},
 		{name: "skipped", status: model.StatusSkipped, want: statusPending},
-		{name: "canceled", status: model.StatusCanceled, want: statusPending},
-		// StatusCreated is internal-only and never terminal.
+		// A never-started supersede (StatusCanceled) is terminal → success, so it
+		// can't wedge the required aggregate check / block the merge queue.
+		{name: "canceled", status: model.StatusCanceled, want: statusSuccess},
+		// Regression: StatusCreated ("internal use only") briefly surfaces
+		// during a merge-queue re-run. It used to fall through to statusError.
 		{name: "created", status: model.StatusCreated, want: statusPending},
-		{name: "out of enum", status: model.StatusValue("bogus"), want: statusError},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, convertStatus(tt.status))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := convertStatus(tc.status)
+			assert.Equal(t, tc.want, got)
+			// The fix removed the error-default: no defined status may
+			// report a red GitHub "error" commit status.
+			assert.NotEqual(t, statusError, got, "convertStatus must never return statusError for a defined status")
 		})
 	}
 }

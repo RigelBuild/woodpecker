@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -54,6 +55,9 @@ type RPC struct {
 	store         store.Store
 	pipelineTime  *prometheus.GaugeVec
 	pipelineCount *prometheus.CounterVec
+	// reportWG, when non-nil, tracks in-flight background forge reports so tests
+	// can await them deterministically. Nil in production (fire-and-forget).
+	reportWG *sync.WaitGroup
 }
 
 // Next blocks until it provides the next workflow to execute.
@@ -288,7 +292,7 @@ func (s *RPC) Init(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		}
 	}
 
-	s.updateForgeStatus(c, repo, currentPipeline, workflow)
+	s.reportForgeStatusAsync(c, repo, currentPipeline, workflow)
 
 	defer func() {
 		currentPipeline.Workflows, _ = s.store.WorkflowGetTree(currentPipeline)
@@ -302,7 +306,7 @@ func (s *RPC) Init(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 	if err != nil {
 		return err
 	}
-	s.updateForgeStatus(c, repo, currentPipeline, workflow)
+	s.reportForgeStatusAsync(c, repo, currentPipeline, workflow)
 
 	return s.updateAgentLastWork(agent)
 }
@@ -349,6 +353,40 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 
 	// check workflow's own state to prevent finishing an already-finished or blocked workflow
 	if err := checkWorkflowState(workflow.State); err != nil {
+		// RIG-1129: the guard correctly REJECTS the illegal state change, but
+		// returning here also skips the terminal aggregate POST further down,
+		// which is the only forge report on the Done path. An agent-fault
+		// double-finish (a killed step cascade-canceling its siblings, then the
+		// agent re-running Done on the already-terminal workflow) therefore leaves the
+		// required CI (pr) check stranded pending forever, even though the
+		// pipeline is terminal.
+		//
+		// So before returning: if the PIPELINE itself is terminal, drive the
+		// terminal aggregate through the same async poster the clean path uses,
+		// then still return the rejection.
+		//
+		// The pipeline's own stored status is the sole, authoritative terminality
+		// signal, and it is the right one: the other shape this same guard rejects
+		// is a BLOCKED workflow (awaiting approval), whose pipeline status is
+		// StatusBlocked — non-terminal — so it is excluded here and never gets a
+		// premature verdict. A pipeline with still-running siblings is likewise
+		// non-terminal and excluded. We deliberately do NOT gate on whether the
+		// stored workflow tree still has a running stage: a cascade-cancel leaves
+		// running sibling rows untouched (cancel.go — they finish on the agent
+		// stop signal), so a terminal pipeline routinely still carries a running
+		// row, and gating on it would re-suppress the very POST this fixes. The
+		// aggregate poster loads the tree itself and reconcileTerminalStatus makes
+		// the terminal pipeline verdict win over any stale running row.
+		//
+		// The report is aggregate-only (workflow=nil) because the workflow's own
+		// state is unchanged — we add the missing pipeline-level report, never a
+		// state mutation, and never weaken the rejection. Scoped to this abnormal
+		// branch on purpose: the happy path already POSTs below, so the two never
+		// overlap and there is no double-post.
+		if model.IsTerminalStatus(currentPipeline.Status) {
+			s.reportForgeStatusAsync(c, repo, currentPipeline, nil)
+		}
+
 		return err
 	}
 
@@ -411,7 +449,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		}
 	}
 
-	s.updateForgeStatus(c, repo, currentPipeline, workflow)
+	s.reportForgeStatusAsync(c, repo, currentPipeline, workflow)
 
 	// make sure writes to pubsub are non blocking (https://github.com/woodpecker-ci/woodpecker/blob/c919f32e0b6432a95e1a6d3d0ad662f591adf73f/server/logging/log.go#L9)
 	go func() {
@@ -602,13 +640,59 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 
 	forge.Refresh(ctx, _forge, s.store, user)
 
-	// only do status updates for parent steps
-	if workflow != nil {
+	// only do status updates for parent steps; per-workflow reporting is opt-out
+	// (StatusPerWorkflow, default on) — off, only the aggregate below is posted,
+	// avoiding a forge write per workflow on an affected-aware fan-out.
+	if workflow != nil && server.Config.Server.StatusPerWorkflow {
 		err = _forge.Status(ctx, user, repo, pipeline, workflow)
 		if err != nil {
 			log.Error().Err(err).Msgf("error setting commit status for %s/%d", repo.FullName, pipeline.Number)
 		}
 	}
+
+	if server.Config.Server.StatusAggregate {
+		if err := forge.ReportAggregateStatus(ctx, _forge, s.store, user, repo, pipeline); err != nil {
+			log.Error().Err(err).Msgf("error setting aggregate status for %s/%d", repo.FullName, pipeline.Number)
+		}
+	}
+
+	if server.Config.Server.StatusMeta {
+		if err := forge.ReportMetaStatus(ctx, _forge, s.store, user, repo, pipeline); err != nil {
+			log.Error().Err(err).Msgf("error setting meta status for %s/%d", repo.FullName, pipeline.Number)
+		}
+	}
+}
+
+// forgeReportTimeout backstops a backgrounded forge status report; it is longer
+// than the per-call statusReportTimeout so the report's own retry/backoff runs
+// to completion, while still guaranteeing the goroutine cannot leak.
+const forgeReportTimeout = 60 * time.Second
+
+// reportForgeStatusAsync runs updateForgeStatus in the background so a slow or
+// rate-limited forge never blocks the agent gRPC call that triggered it. GitHub's
+// secondary-limit backoff can be tens of seconds; a synchronous report would burn
+// the RPC deadline and error the pipeline even though its steps already ran. The
+// pipeline and workflow are snapshotted so the caller's later mutations cannot
+// race the report.
+func (s *RPC) reportForgeStatusAsync(ctx context.Context, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow) {
+	pipelineCopy := *pipeline
+	var workflowCopy *model.Workflow
+	if workflow != nil {
+		wc := *workflow
+		workflowCopy = &wc
+	}
+	if s.reportWG != nil {
+		s.reportWG.Add(1)
+	}
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		if s.reportWG != nil {
+			defer s.reportWG.Done()
+		}
+		ctx, cancel := context.WithTimeout(detached, forgeReportTimeout)
+		defer cancel()
+		s.updateForgeStatus(ctx, repo, &pipelineCopy, workflowCopy)
+	}()
 }
 
 func (s *RPC) getAgentFromContext(ctx context.Context) (*model.Agent, error) {

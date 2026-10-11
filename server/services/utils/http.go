@@ -42,8 +42,10 @@ type Client struct {
 	*httpsign.Client
 }
 
-func getHTTPClient(privateKey crypto.PrivateKey, allowedHostListValue string) (*httpsign.Client, error) {
-	timeout := 10 * time.Second //nolint:mnd
+func getHTTPClient(privateKey crypto.PrivateKey, allowedHostListValue string, timeout time.Duration) (*httpsign.Client, error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second //nolint:mnd
+	}
 
 	if allowedHostListValue == "" {
 		allowedHostListValue = hostmatcher.MatchBuiltinExternal
@@ -83,8 +85,8 @@ func getHTTPClient(privateKey crypto.PrivateKey, allowedHostListValue string) (*
 	return httpsign.NewClient(client, config), nil
 }
 
-func NewHTTPClient(privateKey crypto.PrivateKey, allowedHostList string) (*Client, error) {
-	client, err := getHTTPClient(privateKey, allowedHostList)
+func NewHTTPClient(privateKey crypto.PrivateKey, allowedHostList string, timeout time.Duration) (*Client, error) {
+	client, err := getHTTPClient(privateKey, allowedHostList, timeout)
 	if err != nil {
 		return nil, err
 	}

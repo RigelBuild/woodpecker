@@ -21,6 +21,9 @@ import (
 type (
 	// Workflow defines a workflow configuration.
 	Workflow struct {
+		// Name overrides the file-derived workflow name shown in the web UI
+		// and forge status checks, and used for depends_on and CI_WORKFLOW_NAME.
+		Name        string               `yaml:"name,omitempty"`
 		When        constraint.When      `yaml:"when,omitempty"`
 		Workspace   Workspace            `yaml:"workspace,omitempty"`
 		Clone       ContainerList        `yaml:"clone,omitempty"`

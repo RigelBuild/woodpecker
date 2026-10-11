@@ -60,10 +60,17 @@
       <span>{{ $t('repo.pipeline.no_pipeline_steps') }}</span>
     </Panel>
 
+    <div v-if="skippedWorkflowCount > 0" class="flex shrink-0 items-center justify-between gap-2 px-1">
+      <Checkbox v-model="showSkippedWorkflows" class="mb-0!" :label="$t('repo.pipeline.show_skipped_workflows')" />
+      <span v-if="skippedHiddenCount > 0" class="text-wp-text-alt-100 text-sm">
+        {{ $t('repo.pipeline.skipped_workflows_hidden', { count: skippedHiddenCount }) }}
+      </span>
+    </div>
+
     <div class="relative min-h-0 w-full grow">
       <div class="absolute top-0 right-0 left-0 flex h-full flex-col gap-y-2 md:overflow-y-auto">
         <div
-          v-for="workflow in pipeline.workflows"
+          v-for="workflow in visibleWorkflows"
           :key="workflow.id"
           class="border-wp-background-400 dark:border-wp-background-100 bg-wp-background-200 rounded-md border p-2"
         >
@@ -128,11 +135,14 @@ import { computed, nextTick, ref, toRef, useTemplateRef, watch } from 'vue';
 
 import Badge from '~/components/atomic/Badge.vue';
 import Icon from '~/components/atomic/Icon.vue';
+import Checkbox from '~/components/form/Checkbox.vue';
 import Panel from '~/components/layout/Panel.vue';
 import PipelineStatusIcon from '~/components/repo/pipeline/PipelineStatusIcon.vue';
 import PipelineStepDuration from '~/components/repo/pipeline/PipelineStepDuration.vue';
+import { orderWorkflows } from '~/components/repo/pipeline/orderWorkflows';
 import { requiredInject } from '~/compositions/useInjectProvide';
 import usePipeline from '~/compositions/usePipeline';
+import useUserConfig from '~/compositions/useUserConfig';
 import { StepType } from '~/lib/api/types';
 import type { Pipeline, PipelineStep } from '~/lib/api/types';
 
@@ -166,6 +176,36 @@ const workflowsCollapsed = ref<Record<PipelineStep['id'], boolean>>(
 
 const singleConfig = computed(
   () => pipelineConfigs?.value?.length === 1 && pipeline.value.workflows && pipeline.value.workflows.length === 1,
+);
+
+const { userConfig, setUserConfig } = useUserConfig();
+const showSkippedWorkflows = computed({
+  get: () => userConfig.value.showSkippedWorkflows,
+  set: (value) => setUserConfig('showSkippedWorkflows', value),
+});
+
+// The workflows actually rendered: skipped ones are hidden unless the toggle is
+// on (or a skipped workflow owns the selected step), and the rest are ordered
+// attention-first so a fan-out's grey skipped workflows never bury the failures.
+const visibleWorkflows = computed(() =>
+  orderWorkflows(pipeline.value.workflows ?? [], {
+    showSkipped: showSkippedWorkflows.value,
+    selectedStepId: selectedStepId.value,
+  }),
+);
+
+// Total skipped workflows in the pipeline. Gates the toggle: no toggle is shown
+// when there is nothing to reveal.
+const skippedWorkflowCount = computed(
+  () => (pipeline.value.workflows ?? []).filter((workflow) => workflow.state === 'skipped').length,
+);
+
+// Skipped workflows that exist but are not currently rendered -- surfaced next to
+// the toggle ("N skipped hidden") so the toggle is discoverable. When the toggle
+// is on this is 0; a skipped workflow kept because it owns the selected step is
+// visible and so does not count as hidden.
+const skippedHiddenCount = computed(
+  () => skippedWorkflowCount.value - visibleWorkflows.value.filter((workflow) => workflow.state === 'skipped').length,
 );
 
 const steps = useTemplateRef('steps');

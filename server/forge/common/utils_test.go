@@ -80,6 +80,11 @@ func TestNormalizeEventReason(t *testing.T) {
 func TestGetPipelineStatusDescription(t *testing.T) {
 	t.Parallel()
 
+	// Exhaustive over every model.StatusValue constant. The fix removed the
+	// "unknown status" default: StatusCreated ("internal use only") briefly
+	// surfaces during a merge-queue re-run and previously produced
+	// "unknown status", which paired with a spurious red commit status and
+	// failed Graphite merge-queue batches. No defined status may yield it now.
 	tests := map[model.StatusValue]string{
 		model.StatusPending:  "Pipeline is pending",
 		model.StatusRunning:  "Pipeline is running",
@@ -89,13 +94,16 @@ func TestGetPipelineStatusDescription(t *testing.T) {
 		model.StatusKilled:   "Pipeline was canceled",
 		model.StatusBlocked:  "Pipeline is pending approval",
 		model.StatusDeclined: "Pipeline was rejected",
-		model.StatusCanceled: "Pipeline was canceled",
-		model.StatusSkipped:  "Pipeline was skipped",
-		model.StatusCreated:  "Pipeline is pending",
+		model.StatusCanceled: "Pipeline is pending",
+		model.StatusSkipped:  "Pipeline is pending",
+		// Regression: StatusCreated used to yield the "unknown status" default.
+		model.StatusCreated: "Pipeline is pending",
 	}
 
 	for status, want := range tests {
-		assert.Equalf(t, want, common.GetPipelineStatusDescription(status), "status %q", status)
+		got := common.GetPipelineStatusDescription(status)
+		assert.Equalf(t, want, got, "status %q", status)
+		assert.NotEqualf(t, "unknown status", got, "GetPipelineStatusDescription must never return \"unknown status\" for defined status %q", status)
 	}
 }
 

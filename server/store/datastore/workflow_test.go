@@ -57,6 +57,41 @@ func TestWorkflowLoad(t *testing.T) {
 	assert.Len(t, workflowGet.Children, 0)
 }
 
+// TestWorkflowOnMetadataEditRoundTrip pins the persisted meta-gate column: a
+// workflow written with OnMetadataEdit=true reads it back true, and — the
+// migration-safety case — a LEGACY row written WITHOUT the column (via a shadow
+// struct that lacks the field) reads back false, never a garbage value. That
+// false is exactly what a pre-028 row must present so it is treated as a non-gate.
+func TestWorkflowOnMetadataEditRoundTrip(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+	defer closer()
+
+	gate := &model.Workflow{PipelineID: 1, PID: 1, Name: "gate", OnMetadataEdit: true}
+	assert.NoError(t, store.WorkflowsCreate([]*model.Workflow{gate}))
+
+	got, err := store.WorkflowLoad(gate.ID)
+	assert.NoError(t, err)
+	assert.True(t, got.OnMetadataEdit, "a persisted meta gate must read back as one")
+
+	// Legacy row: insert through a shadow struct with no OnMetadataEdit field,
+	// mapped to the same table, so the column is left at its DB default. A read
+	// through the real model must surface false, not a stray value.
+	type workflows struct {
+		ID         int64  `xorm:"pk autoincr 'id'"`
+		PipelineID int64  `xorm:"'pipeline_id'"`
+		PID        int    `xorm:"'pid'"`
+		Name       string `xorm:"'name'"`
+	}
+	legacy := &workflows{PipelineID: 1, PID: 2, Name: "legacy"}
+	inserted, err := store.engine.Table("workflows").Insert(legacy)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 1, inserted)
+
+	gotLegacy, err := store.WorkflowLoad(legacy.ID)
+	assert.NoError(t, err)
+	assert.False(t, gotLegacy.OnMetadataEdit, "a legacy row written without the column must read back false")
+}
+
 func TestWorkflowGetTree(t *testing.T) {
 	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
 	defer closer()

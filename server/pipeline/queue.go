@@ -30,6 +30,9 @@ import (
 func pipelineTasks(repo *model.Repo, activePipeline *model.Pipeline, pipelineItems []*builder.Item) ([]*model.Task, error) {
 	var tasks []*model.Task
 	for _, item := range pipelineItems {
+		if item.Skipped {
+			continue
+		}
 		task := &model.Task{
 			ID:         fmt.Sprint(item.Workflow.ID),
 			PID:        item.Workflow.PID,
@@ -83,7 +86,7 @@ func pipelineTasks(repo *model.Repo, activePipeline *model.Pipeline, pipelineIte
 func getTaskDependencies(dependsOn []string, items []*builder.Item) (taskIDs []string) {
 	for _, dep := range dependsOn {
 		for _, pipelineItem := range items {
-			if pipelineItem.Workflow.Name == dep {
+			if pipelineItem.Workflow.Name == dep && !pipelineItem.Skipped {
 				taskIDs = append(taskIDs, fmt.Sprint(pipelineItem.Workflow.ID))
 			}
 		}

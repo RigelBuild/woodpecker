@@ -31,7 +31,7 @@ type Cron struct {
 	Timezone  string            `json:"timezone"   xorm:"timezone NOT NULL DEFAULT 'UTC'"`
 	Created   int64             `json:"created"    xorm:"created NOT NULL DEFAULT 0"`
 	Branch    string            `json:"branch"     xorm:"branch"`
-	Enabled   bool              `json:"enabled"    xorm:"enabled NOT NULL DEFAULT TRUE"`
+	Enabled   bool              `json:"enabled"    xorm:"enabled NOT NULL DEFAULT TRUE" default:"true"`
 	Variables map[string]string `json:"variables"  xorm:"json 'variables'"`
 } //	@name	Cron
 

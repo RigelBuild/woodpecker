@@ -60,11 +60,10 @@ func getAgentName(store store.Store, agentNameMap map[int64]string, agentID int6
 	return "", false
 }
 
-// backgroundPipelineCreationTimeout caps how long a webhook-triggered pipeline
-// creation may keep running after the HTTP handler has already responded 202
-// Accepted (see PostHook). It bounds the detached background goroutine so a
-// stuck creation cannot leak indefinitely.
-const backgroundPipelineCreationTimeout = 2 * time.Minute
+// defaultPipelineCreationTimeout caps how long a webhook-triggered pipeline
+// creation may keep running after PostHook has responded 202 Accepted, when
+// server.Config.Server.CreationTimeout is unset.
+const defaultPipelineCreationTimeout = 2 * time.Minute
 
 // PostHook
 //
@@ -209,7 +208,56 @@ func PostHook(c *gin.Context) {
 	}
 
 	//
-	// 6. Finally create a pipeline
+	// 6. Coalesce duplicate deliveries for the same push
+	//
+	// One push can reach us as several pull_request deliveries: a Graphite
+	// `gt submit` force-push makes GitHub emit two ~1s apart, each with its own
+	// delivery GUID but the same head commit. Left alone, each spawns a pipeline;
+	// the two then mutually cancel and race their status posts, and because
+	// commit-status is last-write-wins per context, a creation-time `pending` can
+	// land after the terminal status and wedge the required check forever.
+	//
+	// So drop the duplicate here, before anything is created: respond 200 like
+	// the other ignored-hook paths, mirroring the forge-driver ignore above.
+	//
+	// The window is opt-in (0 disables) and scoped to pull-request pipelines, so
+	// the push path and its branch-keyed supersede behavior are untouched, and
+	// two DISTINCT head commits — a real new push — still create and supersede
+	// exactly as before.
+	//
+	// A close purges the window for its refspec so a following reopen is never
+	// swallowed; see purgeOnClose for why the carve-out has to hang off the close
+	// rather than off the reopen delivery itself.
+	// Deliberately unconditional, ahead of the window > 0 gate: if the flag is
+	// enabled at runtime the window is then already clear of closed refspecs.
+	purgeOnClose(repo.ID, pipelineFromForge)
+
+	if window := server.Config.Server.HookDedupWindow; window > 0 && isDedupableHook(pipelineFromForge) {
+		key := hookDedupKey{
+			RepoID:  repo.ID,
+			Refspec: pipelineFromForge.Refspec,
+			Commit:  pipelineFromForge.Commit,
+		}
+		if hookDedupWindow.seenWithin(key, window) {
+			// Accepted edge: if the first delivery's creation filtered out
+			// (pipeline.ErrFiltered), this duplicate would have filtered
+			// identically — same commit, same config — so nothing is lost. A
+			// transient creation error inside the window does cost one retry
+			// opportunity, bounded by how short the window is.
+			msg := "ignoring hook: duplicate delivery for the same commit within the dedup window"
+			log.Debug().
+				Str("repo", repo.FullName).
+				Str("commit", pipelineFromForge.Commit).
+				Str("refspec", pipelineFromForge.Refspec).
+				Dur("window", window).
+				Msg(msg)
+			c.String(http.StatusOK, msg)
+			return
+		}
+	}
+
+	//
+	// 7. Finally create a pipeline
 	//
 	// Pipeline creation can be slow (forge round-trips, config fetching). To
 	// avoid the forge timing out and retrying the webhook delivery, we wait only
@@ -217,7 +265,12 @@ func PostHook(c *gin.Context) {
 	// respond synchronously with the created pipeline (preserving the old
 	// behavior and API response). If it takes longer we respond 202 Accepted and
 	// let creation finish in the background.
-	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), backgroundPipelineCreationTimeout)
+	creationTimeout := server.Config.Server.CreationTimeout
+	if creationTimeout <= 0 {
+		creationTimeout = defaultPipelineCreationTimeout
+	}
+	// Detached so creation survives the 202 response; derived to keep request values.
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), creationTimeout)
 
 	done := make(chan struct{})
 	var pl *model.Pipeline

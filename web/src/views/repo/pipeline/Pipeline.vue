@@ -66,6 +66,7 @@ import Icon from '~/components/atomic/Icon.vue';
 import Container from '~/components/layout/Container.vue';
 import Panel from '~/components/layout/Panel.vue';
 import PipelineLog from '~/components/repo/pipeline/PipelineLog.vue';
+import { defaultSelectedStepPid } from '~/components/repo/pipeline/defaultSelectedStep';
 import PipelineStepList from '~/components/repo/pipeline/PipelineStepList.vue';
 import useApiClient from '~/compositions/useApiClient';
 import { useAsyncAction } from '~/compositions/useAsyncAction';
@@ -91,7 +92,7 @@ const repoPermissions = requiredInject('repo-permissions');
 
 const stepId = toRef(props, 'stepId');
 
-const defaultStepId = computed(() => pipeline.value?.workflows?.[0]?.children?.[0]?.pid ?? null);
+const defaultStepId = computed(() => defaultSelectedStepPid(pipeline.value?.workflows));
 
 // Replace the log view with the error panel for parse errors, or for workflow
 // runtime errors when no step produced logs yet. If steps already ran (e.g.

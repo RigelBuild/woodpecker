@@ -371,6 +371,17 @@ As an alternative, the token can also be read from a file:
 List of Prometheus metrics specific to Woodpecker:
 
 ```yaml
+# HELP woodpecker_github_ratelimit_remaining Remaining GitHub API requests in the current window, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_remaining gauge
+woodpecker_github_ratelimit_remaining{resource="core",token_kind="user"} 4832
+woodpecker_github_ratelimit_remaining{resource="core",token_kind="app"} 12103
+# HELP woodpecker_github_ratelimit_limit Total GitHub API request quota for the current window, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_limit gauge
+woodpecker_github_ratelimit_limit{resource="core",token_kind="user"} 5000
+woodpecker_github_ratelimit_limit{resource="core",token_kind="app"} 12500
+# HELP woodpecker_github_ratelimit_reset_timestamp_seconds Unix time at which the GitHub API quota window resets, per quota resource and token kind.
+# TYPE woodpecker_github_ratelimit_reset_timestamp_seconds gauge
+woodpecker_github_ratelimit_reset_timestamp_seconds{resource="core",token_kind="user"} 1751330400
 # HELP woodpecker_pipeline_count Pipeline count.
 # TYPE woodpecker_pipeline_count counter
 woodpecker_pipeline_count{branch="main",pipeline="total",repo="woodpecker-ci/woodpecker",status="success"} 3
@@ -824,6 +835,20 @@ The maximum time in minutes you can set in the repo settings before a pipeline g
 
 ---
 
+### ORPHAN_REAP_INTERVAL
+
+- Name: `WOODPECKER_ORPHAN_REAP_INTERVAL`
+- Default: `5m`
+
+How often the server checks for orphaned workflows. Set to `0` to disable reaping. With multiple server replicas, enable the reaper on one replica only and set this value to `0` on the others.
+
+### ORPHAN_REAP_GRACE
+
+- Name: `WOODPECKER_ORPHAN_REAP_GRACE`
+- Default: `10m`
+
+Minimum age before a missing agent or workflow is treated as orphaned.
+
 ### SESSION_EXPIRES
 
 - Name: `WOODPECKER_SESSION_EXPIRES`
@@ -1023,6 +1048,54 @@ Supported variables:
 - `workflow`: the workflow's name
 - `owner`: the repo's owner
 - `repo`: the repo's name
+
+---
+
+### STATUS_AGGREGATE
+
+- Name: `WOODPECKER_STATUS_AGGREGATE`
+- Default: `false`
+
+Report an additional single pipeline-level status that rolls up every workflow's state (pending while any run, success only when all pass). Because it has no per-workflow component, its context stays stable across an affected-aware fan-out, so it can be used as a required branch-protection check that only goes green when the whole pipeline is green. Uses the commit-status API (no GitHub App required).
+
+---
+
+### STATUS_AGGREGATE_FORMAT
+
+- Name: `WOODPECKER_STATUS_AGGREGATE_FORMAT`
+- Default: `{{ .context }} ({{ .event }})`
+
+Template for the aggregate status context. Supported variables: `context`, `event`, `owner`, `repo` (no `workflow`/`axis_id`, so the context is stable across the fan-out).
+
+---
+
+### HOOK_DEDUP_WINDOW
+
+- Name: `WOODPECKER_HOOK_DEDUP_WINDOW`
+- Default: `0`
+
+Coalesce duplicate `pull_request` webhook deliveries for the same head commit into a single pipeline when they arrive within this window.
+Some push flows deliver two webhooks for one push (for example a force-push that both updates the branch and re-targets the pull request), which otherwise creates two pipelines for the same commit, the second superseding the first and leaving the required status check stranded.
+`0` disables the window; deliveries are keyed by repository, refspec and head commit, so a genuinely new head commit always creates its own pipeline.
+Closing a pull request clears the window for its refspec, so reopening one is never swallowed.
+
+---
+
+### REPORT_SKIPPED_WORKFLOWS
+
+- Name: `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`
+- Default: `false`
+
+Persist workflows filtered out by their `when` conditions as skipped instead of dropping them, so they remain visible in the Woodpecker UI. Skipped workflows are only kept when at least one workflow in the pipeline runs. This controls persistence only; it does not report them to the forge — see `WOODPECKER_REPORT_SKIPPED_TO_FORGE`.
+
+---
+
+### REPORT_SKIPPED_TO_FORGE
+
+- Name: `WOODPECKER_REPORT_SKIPPED_TO_FORGE`
+- Default: `false`
+
+Report skipped workflows to the forge as skipped checks. Requires a forge that supports a skipped state (the GitHub Checks API; see `WOODPECKER_GITHUB_APP_ID`). Independent of `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`: persistence (UI visibility) and forge reporting are separate, so you can show skipped workflows in the UI while keeping them off the forge check list.
 
 ---
 

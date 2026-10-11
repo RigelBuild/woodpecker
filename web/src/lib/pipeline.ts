@@ -19,3 +19,11 @@ export function pipelineHasNonWarningErrors(pipeline?: Pipeline): boolean {
 export function pipelineHasErrorsToShow(pipeline?: Pipeline): boolean {
   return pipelineHasNonWarningErrors(pipeline) || workflowsWithErrors(pipeline).length > 0;
 }
+
+// Cancel context can sit on a failed pipeline too: a failure outranks killed.
+export function hasCancelInfo(pipeline?: Pipeline): boolean {
+  const info = pipeline?.cancel_info;
+  return (
+    (info?.superseded_by ?? 0) > 0 || (info?.canceled_by_user ?? '') !== '' || (info?.canceled_by_step ?? '') !== ''
+  );
+}

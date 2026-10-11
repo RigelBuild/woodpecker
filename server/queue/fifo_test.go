@@ -15,6 +15,7 @@
 package queue
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -1305,4 +1306,472 @@ func findTaskByAgent(tasks map[string]int64, agentID int64) string {
 		}
 	}
 	return ""
+}
+
+func TestFifoFairDispatch(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("older pipeline dependent dispatches before newer pipeline task", func(t *testing.T) {
+		// Core fair-dispatch bug: when an older pipeline's dependent clears its
+		// dependency it is PushBack'd to the TAIL of pending, landing behind a
+		// task from a pipeline created later and getting starved. Dispatch must
+		// order by Created, not insertion order, so the earlier task deliberately
+		// carries the HIGHER ID to prove ordering is by Created, never by ID.
+		dep := &model.Task{ID: "10", PipelineID: 1, Created: 100}
+		older := &model.Task{
+			ID:           "20",
+			PipelineID:   1,
+			Created:      100,
+			Dependencies: []string{"10"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+		newer := &model.Task{ID: "30", PipelineID: 2, Created: 200}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dep, older, newer}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 1, info.Stats.WaitingOnDeps) // older is parked on its dependency
+
+		// dep and newer are runnable; dep sorts first by Created either way.
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got.ID)
+
+		// completing dep clears older's dependency; filterWaiting PushBacks older
+		// to the tail of pending, leaving pending == [newer, older].
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		// the now-ready older dependent (lower Created) must win over newer.
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got2.ID, "older pipeline's now-ready dependent must dispatch before the newer pipeline's task")
+
+		// drain whichever task actually dispatched so the queue empties cleanly
+		// whether or not creation-order dispatch is in effect; the defended
+		// contract lives entirely in the assertion above.
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"20", "30"}, []string{got2.ID, got3.ID})
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("concurrency admission is invariant to the Created-ordered walk", func(t *testing.T) {
+		// The creation-order dispatch reorders the pending walk; the concurrency admit/defer
+		// decision (a full, position-independent scan) must be unchanged. An
+		// unlimited task whose Created falls BETWEEN the two group members must
+		// run freely without disturbing which member takes the single slot.
+		// IDs track Created only incidentally here; ordering is proved elsewhere.
+		a := &model.Task{ID: "100", PipelineID: 1, Created: 100, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+		c := &model.Task{ID: "150", PipelineID: 3, Created: 150} // unlimited, sorts BETWEEN a and b
+		b := &model.Task{ID: "200", PipelineID: 2, Created: 200, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{a, b, c}))
+		waitForProcess()
+
+		g1, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		g2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		// a (earliest group member) takes the single group slot; c (unlimited)
+		// runs freely; b is deferred even though the sorted walk visits c between.
+		assert.ElementsMatch(t, []string{"100", "150"}, []string{g1.ID, g2.ID})
+
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 2)
+		assert.Len(t, info.Pending, 1) // b deferred by the concurrency limit
+
+		// b cannot be polled while a holds the only slot.
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		_, err = q.Poll(pollCtx, 3, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err)
+
+		// freeing a's slot lets b (the remaining group member) run.
+		assert.NoError(t, q.Done(ctx, "100", model.StatusSuccess))
+		waitForProcess()
+		g3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "200", g3.ID)
+
+		assert.NoError(t, q.Done(ctx, "150", model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, g3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("expired lease retries before a newer pending task", func(t *testing.T) {
+		// An expired task is resubmitted to the pending list; the creation-order
+		// sort must keep its retry priority so it re-dispatches ahead of a task
+		// from a pipeline created later. Expiry is observed deterministically by
+		// re-inspecting the queue and re-polling — never by racing the process
+		// ticker against a Wait goroutine.
+		q.extension = 0
+		t.Cleanup(func() { q.extension = 50 * time.Millisecond })
+
+		old := &model.Task{ID: "10", Created: 100}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{old}))
+		waitForProcess()
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got.ID)
+
+		// with a zero lease the task expires immediately; the next process tick
+		// resubmits it to pending. Wait for that tick, then confirm it is back
+		// in pending and no longer running.
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 0)
+		assert.Len(t, info.Pending, 1)
+		assert.Equal(t, "10", info.Pending[0].ID) // resubmitted expired task
+
+		newer := &model.Task{ID: "20", Created: 200}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{newer}))
+		waitForProcess()
+
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got2.ID, "expired older task retries before the newer pending task")
+
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got3.ID)
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("same-Created siblings dispatch in name order", func(t *testing.T) {
+		// Two independent same-pipeline siblings share Created; the tiebreaker is
+		// the workflow Name, not insertion order or ID. "aaa" sorts before "zzz"
+		// yet carries the HIGHER ID, so a pass proves ordering is by Name, not ID.
+		zzz := &model.Task{ID: "10", PipelineID: 1, Created: 100, Name: "zzz"}
+		aaa := &model.Task{ID: "20", PipelineID: 1, Created: 100, Name: "aaa"}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{zzz, aaa}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got.ID, "same-Created siblings dispatch in name order")
+
+		// drain off the actually dispatched IDs so a regression ends as an
+		// assertion failure rather than hanging on an empty queue.
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"10", "20"}, []string{got.ID, got2.ID})
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("identical Created and Name dispatch in insertion order", func(t *testing.T) {
+		// Two tasks the comparator treats as fully equal — same Created AND same
+		// Name — must keep their relative order. This is the documented
+		// stability guarantee of the creation-order sort and the only case that
+		// reaches the comparator's equal branch. The tasks are pushed with the
+		// higher ID first so a tiebreak that reordered equal elements (e.g. by
+		// ID) would flip the result and be caught.
+		second := &model.Task{ID: "2", PipelineID: 1, Created: 100, Name: "build"}
+		first := &model.Task{ID: "1", PipelineID: 1, Created: 100, Name: "build"}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{second, first}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "2", got.ID, "equal-comparator tasks dispatch in insertion order")
+
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "1", got2.ID, "equal-comparator tasks dispatch in insertion order")
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("multiple workers dispatch the earliest-Created tasks first", func(t *testing.T) {
+		// Several runnable tasks and several waiting workers coexist within a
+		// single process tick, so the queue makes multiple back-to-back
+		// assignments while re-sorting the shrinking pending set. IDs are
+		// inverted against Created so an insertion-order (unsorted) walk would
+		// starve the earliest pipelines. With three workers and four independent
+		// tasks the three earliest-Created tasks must win the slots; the latest
+		// waits. The dispatched SET is asserted (order among the concurrent
+		// workers is not externally observable), which is deterministic
+		// regardless of goroutine and tick scheduling.
+		t4 := &model.Task{ID: "1", PipelineID: 1, Created: 400}
+		t3 := &model.Task{ID: "2", PipelineID: 2, Created: 300}
+		t2 := &model.Task{ID: "3", PipelineID: 3, Created: 200}
+		t1 := &model.Task{ID: "4", PipelineID: 4, Created: 100}
+		// pushed newest-first: insertion order is the reverse of Created order.
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{t4, t3, t2, t1}))
+
+		results := make(chan *model.Task, 3)
+		for i := range 3 {
+			agentID := int64(i + 1)
+			go func() {
+				task, _ := q.Poll(ctx, agentID, filterFnTrue)
+				results <- task
+			}()
+		}
+
+		dispatched := make([]string, 0, 3)
+		for range 3 {
+			select {
+			case task := <-results:
+				dispatched = append(dispatched, task.ID)
+			case <-time.After(2 * time.Second):
+				t.Fatal("timeout waiting for concurrent dispatch")
+			}
+		}
+		// the three earliest-Created tasks take the three slots; the
+		// latest-Created task is left pending.
+		assert.ElementsMatch(t, []string{"4", "3", "2"}, dispatched)
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 1)
+		assert.Equal(t, "1", info.Pending[0].ID, "latest-Created task waits while earlier tasks take the slots")
+
+		// draining the slots lets the last task run.
+		for _, id := range dispatched {
+			assert.NoError(t, q.Done(ctx, id, model.StatusSuccess))
+		}
+		waitForProcess()
+		got, err := q.Poll(ctx, 4, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "1", got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("dependent with lower Created still dispatches after its dependency", func(t *testing.T) {
+		// Dependency safety must never be inverted by creation-order sorting: a
+		// dependent whose Created is EARLIER than its dependency would sort first
+		// on Created alone, but filterWaiting parks it until the dependency
+		// completes, so it can never dispatch ahead of what it depends on.
+		dep := &model.Task{ID: "1", PipelineID: 1, Created: 200}
+		dependent := &model.Task{
+			ID:           "2",
+			PipelineID:   1,
+			Created:      100, // LOWER than dep — would sort first if not parked
+			Dependencies: []string{"1"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dep, dependent}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 1, info.Stats.WaitingOnDeps) // dependent parked despite its lower Created
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "1", got.ID, "dependency dispatches before its lower-Created dependent")
+
+		// completing the dependency clears the block; only now may the dependent run.
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "2", got2.ID, "lower-Created dependent runs only after its dependency completes")
+
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+}
+
+func TestFifoMultiDispatchTickOrder(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	// A single process tick dispatches in a loop, so several tasks leave the
+	// pending list in one pass. Only the earliest-Created tasks may go, however
+	// many workers are waiting: with fewer workers than tasks, the tail of the
+	// creation order must stay pending. Tasks are pushed newest-first, and in
+	// separate batches, so a pending list that is not kept in creation order
+	// dispatches the wrong ones.
+	pushes := [][]*model.Task{
+		{{ID: "50", Created: 500}, {ID: "40", Created: 400}},
+		{{ID: "30", Created: 300}},
+		{{ID: "20", Created: 200}, {ID: "10", Created: 100}},
+	}
+	for _, batch := range pushes {
+		assert.NoError(t, q.PushAtOnce(ctx, batch))
+	}
+
+	// two workers, five pending tasks: exactly the two earliest dispatch.
+	results := make(chan *model.Task, 2)
+	for agentID := int64(1); agentID <= 2; agentID++ {
+		go func() {
+			task, _ := q.Poll(ctx, agentID, filterFnTrue)
+			results <- task
+		}()
+	}
+
+	dispatched := make([]string, 0, 2)
+	for range 2 {
+		select {
+		case task := <-results:
+			assert.NotNil(t, task)
+			dispatched = append(dispatched, task.ID)
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for dispatched tasks")
+		}
+	}
+	assert.ElementsMatch(t, []string{"10", "20"}, dispatched,
+		"the two earliest-Created tasks must be the ones dispatched in the tick")
+
+	waitForProcess()
+	info := q.Info(ctx)
+	pending := make([]string, 0, len(info.Pending))
+	for _, task := range info.Pending {
+		pending = append(pending, task.ID)
+	}
+	assert.Equal(t, []string{"30", "40", "50"}, pending,
+		"the remaining tasks stay pending in creation order")
+
+	for _, id := range dispatched {
+		assert.NoError(t, q.Done(ctx, id, model.StatusSuccess))
+	}
+}
+
+func TestFifoPendingInsertOrder(t *testing.T) {
+	// The two insert helpers differ only in where they place a task among the
+	// ones it compares equal to: a normal push goes after them (the order the
+	// append-then-stable-sort it replaces produced), while a resubmitted expired
+	// task goes ahead of them, keeping the retry priority a list push-front used
+	// to give it. Asserted directly on the list: through the queue the two are
+	// indistinguishable whenever the comparator already separates the tasks.
+	pendingIDs := func(q *fifo) []string {
+		ids := make([]string, 0, q.pending.Len())
+		for element := q.pending.Front(); element != nil; element = element.Next() {
+			task, _ := element.Value.(*model.Task)
+			ids = append(ids, task.ID)
+		}
+		return ids
+	}
+
+	q := &fifo{pending: list.New()}
+	q.pushPending(&model.Task{ID: "b1", Created: 200})
+	q.pushPending(&model.Task{ID: "a", Created: 100})
+	q.pushPending(&model.Task{ID: "c", Created: 300})
+	q.pushPending(&model.Task{ID: "b2", Created: 200})
+	assert.Equal(t, []string{"a", "b1", "b2", "c"}, pendingIDs(q),
+		"a push is ordered by Created and lands after the tasks it ties with")
+
+	q.pushPendingFront(&model.Task{ID: "retry", Created: 200})
+	assert.Equal(t, []string{"a", "retry", "b1", "b2", "c"}, pendingIDs(q),
+		"a resubmitted task is ordered by Created but lands ahead of its ties")
+
+	// pushPendingFront's empty-list branch: its first call above went into a
+	// populated list, so cover the fresh-list case too (symmetric with the
+	// pushPending empty-list push at the top).
+	empty := &fifo{pending: list.New()}
+	empty.pushPendingFront(&model.Task{ID: "only", Created: 100})
+	assert.Equal(t, []string{"only"}, pendingIDs(empty),
+		"pushPendingFront into an empty list seeds the list")
+
+	// Both helpers must also handle the ends of the list, not just the middle.
+	q.pushPendingFront(&model.Task{ID: "first", Created: 50})
+	q.pushPending(&model.Task{ID: "last", Created: 400})
+	assert.Equal(t, []string{"first", "a", "retry", "b1", "b2", "c", "last"}, pendingIDs(q))
+}
+
+func TestFifoFilterWaitingDrainOrder(t *testing.T) {
+	// filterWaiting drains dependency-cleared tasks back into pending on every
+	// tick. They must land in creation order among the tasks already there —
+	// a task from an older pipeline goes ahead of the newer tail, which is the
+	// whole point of fair dispatch. Asserted on the list rather than through a
+	// dispatch, so the invariant has a guard of its own.
+	// A single drained task that sorts to the very front stops the cursor on the
+	// first comparison — the simplest merge case.
+	q := &fifo{pending: list.New(), waitingOnDeps: list.New(), running: map[string]*entry{}}
+	q.pending.PushBack(&model.Task{ID: "new1", Created: 300})
+	q.pending.PushBack(&model.Task{ID: "new2", Created: 400})
+	q.waitingOnDeps.PushBack(&model.Task{ID: "old", Created: 100})
+
+	q.filterWaiting()
+
+	pendingIDs := func(q *fifo) []string {
+		ids := make([]string, 0, q.pending.Len())
+		for element := q.pending.Front(); element != nil; element = element.Next() {
+			task, _ := element.Value.(*model.Task)
+			ids = append(ids, task.ID)
+		}
+		return ids
+	}
+	assert.Equal(t, []string{"old", "new1", "new2"}, pendingIDs(q),
+		"a drained task keeps its creation-order priority over newer pending tasks")
+
+	// Multiple drained tasks interleaving into the middle and tail of a
+	// multi-element pending list: exercises the forward cursor advancing across
+	// iterations and the at==nil tail-PushBack branch. waitingOnDeps must be
+	// ascending (the invariant filterWaiting's rebuild maintains).
+	q2 := &fifo{pending: list.New(), waitingOnDeps: list.New(), running: map[string]*entry{}}
+	for _, id := range []struct {
+		name    string
+		created int64
+	}{{"p100", 100}, {"p300", 300}, {"p500", 500}} {
+		q2.pending.PushBack(&model.Task{ID: id.name, Created: id.created})
+	}
+	for _, id := range []struct {
+		name    string
+		created int64
+	}{{"w200", 200}, {"w400", 400}, {"w600", 600}} {
+		q2.waitingOnDeps.PushBack(&model.Task{ID: id.name, Created: id.created})
+	}
+
+	q2.filterWaiting()
+
+	assert.Equal(t, []string{"p100", "w200", "p300", "w400", "p500", "w600"}, pendingIDs(q2),
+		"drained tasks merge into creation order, advancing the cursor through the middle and appending at the tail (w600)")
+
+	// A drained task whose Created ties a pending task lands AFTER the equal-key
+	// pending task, matching the append-then-stable-sort semantics the merge
+	// replaces (taskOrderLess is a strict less-than on Created, then Name).
+	q3 := &fifo{pending: list.New(), waitingOnDeps: list.New(), running: map[string]*entry{}}
+	q3.pending.PushBack(&model.Task{ID: "pending-200", Created: 200, Name: "a"})
+	q3.waitingOnDeps.PushBack(&model.Task{ID: "drained-200", Created: 200, Name: "z"})
+
+	q3.filterWaiting()
+
+	assert.Equal(t, []string{"pending-200", "drained-200"}, pendingIDs(q3),
+		"a drained task tying a pending task's Created lands after it")
 }

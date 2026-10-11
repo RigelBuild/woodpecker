@@ -56,7 +56,7 @@ func TestStatusValueMerge(t *testing.T) {
 		{
 			s: model.StatusFailure,
 			t: model.StatusKilled,
-			e: model.StatusKilled,
+			e: model.StatusFailure,
 		},
 		{
 			s: model.StatusSkipped,
@@ -81,7 +81,17 @@ func TestStatusValueMerge(t *testing.T) {
 		{
 			s: model.StatusFailure,
 			t: model.StatusCanceled,
+			e: model.StatusFailure,
+		},
+		{
+			s: model.StatusSuccess,
+			t: model.StatusKilled,
 			e: model.StatusKilled,
+		},
+		{
+			s: model.StatusError,
+			t: model.StatusFailure,
+			e: model.StatusError,
 		},
 	}
 	for _, tt := range tests {
