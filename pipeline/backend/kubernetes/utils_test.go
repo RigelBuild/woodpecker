@@ -358,7 +358,7 @@ func TestToInternalLabelValue(t *testing.T) {
 		{name: "unchanged main", in: "main", normalized: "main", want: "main"},
 		{name: "unchanged event", in: "push", normalized: "push", want: "push"},
 		{name: "unchanged number", in: "2", normalized: "2", want: "2"},
-		{name: "unchanged repository", in: "rigelbuild-orion", normalized: "rigelbuild-orion", want: "rigelbuild-orion"},
+		{name: "unchanged repository", in: "octocat-hello-world", normalized: "octocat-hello-world", want: "octocat-hello-world"},
 		{name: "trailing underscore", in: "main_", normalized: "main"},
 		{name: "uppercase", in: "Main", normalized: "main"},
 		{name: "leading dash", in: "-main", normalized: "main"},
