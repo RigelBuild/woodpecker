@@ -131,8 +131,12 @@ func podLabels(step *types.Step, config *config, options BackendOptions, taskUUI
 	if len(options.Labels) > 0 {
 		if config.PodLabelsAllowFromStep {
 			log.Trace().Msgf("using labels from the backend options: %v", options.Labels)
-			// TODO should we filter out label with internal prefix?
-			maps.Copy(labels, options.Labels)
+			// Steps must not override internal labels; admission policies trust them.
+			for k, v := range options.Labels {
+				if !strings.HasPrefix(k, pipeline.InternalLabelPrefix) {
+					labels[k] = v
+				}
+			}
 		} else {
 			log.Debug().Msg("Pod labels were defined in backend options, but its using disallowed by instance configuration")
 		}

@@ -234,6 +234,18 @@ func TestPodLabelsInternalLabelNormalization(t *testing.T) {
 	}
 }
 
+func TestPodLabelsStepCannotOverrideInternalLabels(t *testing.T) {
+	labels, err := podLabels(&types.Step{
+		Name:           "build",
+		WorkflowLabels: map[string]string{"woodpecker-ci.org/commit-branch": "feature"},
+	}, &config{PodLabelsAllowFromStep: true}, BackendOptions{
+		Labels: map[string]string{"woodpecker-ci.org/commit-branch": "main", "team": "ci"},
+	}, "")
+	assert.NoError(t, err)
+	assert.Equal(t, "feature", labels["woodpecker-ci.org/commit-branch"])
+	assert.Equal(t, "ci", labels["team"])
+}
+
 func TestPodHostnameSanitized(t *testing.T) {
 	pod, err := mkPod(&types.Step{
 		Name:        "Update repos",

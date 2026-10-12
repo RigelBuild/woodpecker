@@ -32,6 +32,16 @@ func TestNativeSecretsEnabled(t *testing.T) {
 	assert.True(t, nsp.isEnabled())
 }
 
+func TestRegistrySecretLabelsInternalLabelNormalization(t *testing.T) {
+	labels, err := registrySecretLabels(&types.Step{
+		Name:           "build",
+		WorkflowLabels: map[string]string{"woodpecker-ci.org/commit-branch": "Main"},
+	}, &config{})
+	assert.NoError(t, err)
+	assert.NotEqual(t, "main", labels["woodpecker-ci.org/commit-branch"])
+	assert.NotEmpty(t, labels["woodpecker-ci.org/commit-branch"])
+}
+
 func TestNativeSecretsDisabled(t *testing.T) {
 	nsp := newNativeSecretsProcessor(&config{
 		NativeSecretsAllowFromStep: false,

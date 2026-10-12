@@ -110,8 +110,8 @@ func toLabelValue(in string) (string, error) {
 	return res, nil
 }
 
-// toInternalLabelValue prevents internal labels from aliasing after normalization.
-// Admission decisions use these labels, so changed values retain a hash of their original.
+// toInternalLabelValue appends a hash of the original when normalization changes a value,
+// so e.g. "main_" or "Main" never yields "main". Admission policies match these values.
 func toInternalLabelValue(in string) (string, error) {
 	res, err := toLabelValue(in)
 	if err != nil || res == in {
