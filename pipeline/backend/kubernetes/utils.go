@@ -29,7 +29,10 @@ import (
 	kube_client_cmd "k8s.io/client-go/tools/clientcmd"
 )
 
-const maxDNSLabelLen = 63
+const (
+	maxDNSLabelLen       = 63
+	internalLabelHashLen = 16
+)
 
 var (
 	dnsDisallowedCharacters = regexp.MustCompile(`[^-.a-z0-9]+`)
@@ -127,10 +130,7 @@ func toInternalLabelValue(in string) (string, error) {
 	if base == "" {
 		base = "0"
 	}
-	maxLen := len(base) + 1 + 16
-	if maxLen > validation.LabelValueMaxLength {
-		maxLen = validation.LabelValueMaxLength
-	}
+	maxLen := min(len(base)+1+internalLabelHashLen, validation.LabelValueMaxLength)
 	res = truncateWithHash(base, in, maxLen, "-_.")
 	if len(validation.IsValidLabelValue(res)) > 0 {
 		return "", ErrLabelInvalid
