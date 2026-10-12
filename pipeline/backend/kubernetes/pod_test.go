@@ -190,6 +190,50 @@ func TestStepNameAsLabelLongName(t *testing.T) {
 	assert.LessOrEqual(t, len(got), 63)
 }
 
+func TestPodLabelsInternalLabelNormalization(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{
+			name:  "internal label normalization cannot alias main",
+			key:   "woodpecker-ci.org/commit-branch",
+			value: "main_",
+		},
+		{
+			name:  "unchanged internal label stays exact",
+			key:   "woodpecker-ci.org/commit-branch",
+			value: "main",
+			want:  "main",
+		},
+		{
+			name:  "user label keeps existing normalization",
+			key:   "foo",
+			value: "Main_",
+			want:  "main",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels, err := podLabels(&types.Step{
+				Name: "build",
+				WorkflowLabels: map[string]string{
+					tt.key: tt.value,
+				},
+			}, &config{PodLabelsAllowFromStep: true}, BackendOptions{}, "")
+			assert.NoError(t, err)
+			if tt.want != "" {
+				assert.Equal(t, tt.want, labels[tt.key])
+			} else {
+				assert.NotEqual(t, "main", labels[tt.key])
+			}
+		})
+	}
+}
+
 func TestPodHostnameSanitized(t *testing.T) {
 	pod, err := mkPod(&types.Step{
 		Name:        "Update repos",
