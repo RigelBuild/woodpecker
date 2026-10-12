@@ -179,10 +179,6 @@ func runExec(ctx context.Context, c *cli.Command, yamls []*builder.YamlFile, rep
 			HTTPSProxy: c.String("backend-https-proxy"),
 		}),
 		compiler.WithLocal(c.Bool("local")),
-		compiler.WithNetrc(
-			"x-access-token",
-			c.String("netrc-machine"),
-		),
 		compiler.WithSecret(secrets...),
 		compiler.WithEnviron(pipelineEnv),
 	}

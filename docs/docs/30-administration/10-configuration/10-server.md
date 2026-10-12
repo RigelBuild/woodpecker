@@ -757,7 +757,9 @@ Enable to allow user registration.
 - Name: `WOODPECKER_AUTHENTICATE_PUBLIC_REPOS`
 - Default: `false`
 
-Always use authentication to clone repositories even if they are public. Needed if the forge requires to always authenticate as used by many companies.
+Always use read-only authentication to clone repositories even if they are public. Needed if the forge requires authentication for public repositories.
+
+For GitHub, repository-scoped read-only clone authentication is minted only when a GitHub App ID and private key are configured. Other forges and GitHub installations without a configured App do not receive an alternate clone credential; Woodpecker never falls back to the triggering user's OAuth token in pipeline containers. Public repositories receive no dispatch credential unless this setting is enabled.
 
 ---
 
@@ -1143,11 +1145,9 @@ If you enable this, all repos will exclusively use the global config service end
 - Name: `WOODPECKER_CONFIG_EXTENSION_NETRC`
 - Default: false
 
-Send `netrc` to the config extension endpoint.
+When enabled, the config extension receives a short-lived, repository-scoped, read-only GitHub App token. This requires GitHub with `WOODPECKER_GITHUB_APP_ID` and `WOODPECKER_GITHUB_APP_PRIVATE_KEY` configured; other forges and GitHub installations without an App cannot use this option, and config fetch fails rather than falling back to the triggering user's OAuth token.
 
-:::warning
-The `netrc` data is pretty powerful as it contains credentials to access the repository. You can use this to clone the repository or even use the forge API to get more information about the repository.
-:::
+The token can clone the repository but cannot push changes. Configure the GitHub App only for repositories Woodpecker builds.
 
 ---
 
@@ -1165,11 +1165,7 @@ Specify a secret extension endpoint, see [Secret Extension](../../20-usage/72-ex
 - Name: `WOODPECKER_SECRET_EXTENSION_NETRC`
 - Default: false
 
-Send `netrc` to the secret extension endpoint.
-
-:::warning
-The `netrc` data is pretty powerful as it contains credentials to access the repository. You can use this to clone the repository or even use the forge API to get more information about the repository.
-:::
+When enabled, the secret extension receives the short-lived, repository-scoped, read-only GitHub App token instead of the triggering user's OAuth netrc. Without GitHub App credentials the extension receives no netrc. The token can clone the repository but cannot push changes.
 
 ---
 
@@ -1187,11 +1183,7 @@ Specify a registry extension endpoint, see [Registry Extension](../../20-usage/7
 - Name: `WOODPECKER_REGISTRY_EXTENSION_NETRC`
 - Default: false
 
-Send `netrc` to the registry extension endpoint.
-
-:::warning
-The `netrc` data is pretty powerful as it contains credentials to access the repository. You can use this to clone the repository or even use the forge API to get more information about the repository.
-:::
+When enabled, the registry extension receives the short-lived, repository-scoped, read-only GitHub App token instead of the triggering user's OAuth netrc. Without GitHub App credentials the extension receives no netrc. The token can clone the repository but cannot push changes.
 
 ---
 

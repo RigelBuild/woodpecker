@@ -15,6 +15,7 @@
 package pipeline
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,6 +25,7 @@ import (
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types" //nolint:depguard // needed to construct builder.Item.Config in tests; will be resolved when backend-specific fields move to BackendOptions (see enrichPipelineItemSteps TODO)
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/builder"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	forge_mocks "go.woodpecker-ci.org/woodpecker/v3/server/forge/mocks"
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -32,6 +34,15 @@ import (
 	secret_service_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/secret/mocks"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
+
+type readOnlyNetrcForge struct {
+	forge.Forge
+	netrc *model.Netrc
+}
+
+func (f *readOnlyNetrcForge) ReadOnlyNetrc(context.Context, *model.Repo) (*model.Netrc, error) {
+	return f.netrc, nil
+}
 
 func TestSetPipelineStepsOnPipeline(t *testing.T) {
 	t.Parallel()
@@ -170,6 +181,71 @@ func TestSaveWorkflowsRejectsExistingWithoutReplace(t *testing.T) {
 
 	_, err := saveWorkflowsFromPipelineBuilder(s, pipeline, nil, false)
 	require.Error(t, err)
+}
+
+func TestParsePipelineTrustedSecurityNoUserTokenForCustomClonePluginOrExtensions(t *testing.T) {
+	previousPlugins := server.Config.Pipeline.TrustedClonePlugins
+	server.Config.Pipeline.TrustedClonePlugins = []string{"custom/clone:latest"}
+	t.Cleanup(func() { server.Config.Pipeline.TrustedClonePlugins = previousPlugins })
+	pipeline := &model.Pipeline{ID: 1, Event: model.EventPush}
+	user := &model.User{ID: 1}
+	repo := &model.Repo{
+		ID:                     1,
+		Visibility:             model.VisibilityPublic,
+		SecretExtensionNetrc:   true,
+		RegistryExtensionNetrc: true,
+		Trusted:                model.TrustedConfiguration{Security: true},
+	}
+	mockForge := forge_mocks.NewMockForge(t)
+	userNetrc := &model.Netrc{Login: "user-oauth-token", Password: "x-oauth-basic", Machine: "github.com", Type: model.ForgeTypeGithub}
+	extensionNetrc := &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "read-only-token"}
+	mockForge.On("Netrc", user, repo).Return(userNetrc, nil)
+	mockForge.On("Name").Return("github")
+	mockForge.On("URL").Return("https://github.com")
+	forge := &readOnlyNetrcForge{Forge: mockForge, netrc: extensionNetrc}
+
+	store := store_mocks.NewMockStore(t)
+	store.On("GetPipelineLastBefore", repo, pipeline.Branch, pipeline.Number).Return(&model.Pipeline{}, nil)
+	secretService := secret_service_mocks.NewMockService(t)
+	secretService.On("SecretListPipeline", mock.Anything, repo, pipeline, extensionNetrc).Return([]*model.Secret{}, nil).Once()
+	registryService := registry_service_mocks.NewMockService(t)
+	registryService.On("RegistryListPipeline", mock.Anything, repo, pipeline, extensionNetrc).Return([]*model.Registry{}, nil).Once()
+	manager := manager_mocks.NewMockManager(t)
+	previousManager := server.Config.Services.Manager
+	server.Config.Services.Manager = manager
+	t.Cleanup(func() { server.Config.Services.Manager = previousManager })
+	manager.On("SecretServiceFromRepo", repo).Return(secretService)
+	manager.On("RegistryServiceFromRepo", repo).Return(registryService)
+	manager.On("EnvironmentService").Return(nil)
+
+	yaml := &forge_types.FileMeta{Name: "woodpecker.yml", Data: []byte(`
+when:
+  - event: push
+clone:
+  - name: custom clone
+    image: custom/clone:latest
+steps:
+  - name: custom plugin
+    image: custom/plugin:latest
+    settings:
+      token: plugin-token
+`)}
+	items, err := parsePipeline(t.Context(), forge, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil)
+	require.NoError(t, err)
+	var sawClone, sawPlugin bool
+	for _, stage := range items[0].Config.Stages {
+		for _, step := range stage.Steps {
+			sawClone = sawClone || step.Name == "custom clone"
+			sawPlugin = sawPlugin || step.Name == "custom plugin"
+			assert.NotContains(t, step.Environment, "CI_NETRC_PASSWORD")
+			for _, value := range step.Environment {
+				assert.NotContains(t, value, "user-oauth-token")
+				assert.NotContains(t, value, "x-oauth-basic")
+			}
+		}
+	}
+	assert.True(t, sawClone)
+	assert.True(t, sawPlugin)
 }
 
 func TestParsePipeline(t *testing.T) {

@@ -54,7 +54,6 @@ func TestFetchReadOnlyNetrc(t *testing.T) {
 		name          string
 		mintErr       error
 		supportsNetrc bool
-		nilNetrc      bool
 		wantNetrc     *model.Netrc
 	}{
 		{
@@ -76,7 +75,11 @@ func TestFetchReadOnlyNetrc(t *testing.T) {
 		{
 			name:          "does not fetch config when netrc is nil",
 			supportsNetrc: true,
-			nilNetrc:      true,
+		},
+		{
+			name:          "does not fetch config when netrc is incomplete",
+			supportsNetrc: true,
+			wantNetrc:     &model.Netrc{Machine: "github.com", Login: "x-access-token"},
 		},
 		{
 			name: "does not fetch config without netrc capability",
@@ -109,7 +112,7 @@ func TestFetchReadOnlyNetrc(t *testing.T) {
 			}
 			service := config.NewHTTP(server.URL, client, true)
 			files, err := service.Fetch(t.Context(), forgeClient, nil, &model.Repo{}, &model.Pipeline{}, nil, false)
-			if tt.mintErr != nil || !tt.supportsNetrc || tt.nilNetrc {
+			if tt.mintErr != nil || !tt.supportsNetrc || tt.wantNetrc == nil || tt.wantNetrc.Machine == "" || tt.wantNetrc.Login == "" || tt.wantNetrc.Password == "" {
 				if tt.mintErr != nil {
 					require.ErrorContains(t, err, tt.mintErr.Error())
 				} else {

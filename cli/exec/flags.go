@@ -122,13 +122,6 @@ var flags = []cli.Flag{
 		Value:   "src",
 	},
 	//
-	// netrc parameters
-	//
-	&cli.StringFlag{
-		Sources: cli.EnvVars("CI_NETRC_MACHINE"),
-		Name:    "netrc-machine",
-	},
-	//
 	// metadata parameters
 	//
 	&cli.StringFlag{

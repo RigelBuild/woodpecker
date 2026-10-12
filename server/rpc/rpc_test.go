@@ -31,6 +31,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
+	forge_mocks "go.woodpecker-ci.org/woodpecker/v3/server/forge/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 	queue_mocks "go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks"
@@ -47,14 +48,18 @@ func (f *readOnlyNetrcForge) ReadOnlyNetrc(ctx context.Context, repo *model.Repo
 	return f.readOnlyNetrc(ctx, repo)
 }
 
-func setReadOnlyNetrcForge(t *testing.T, repo *model.Repo, readOnlyNetrc func(context.Context, *model.Repo) (*model.Netrc, error)) {
+func setForgeForRepo(t *testing.T, repo *model.Repo, forgeClient forge.Forge) {
 	t.Helper()
-	readOnlyForge := &readOnlyNetrcForge{readOnlyNetrc: readOnlyNetrc}
 	manager := manager_mocks.NewMockManager(t)
-	manager.On("ForgeFromRepo", repo).Return(readOnlyForge, nil)
+	manager.On("ForgeFromRepo", repo).Return(forgeClient, nil)
 	previousManager := server.Config.Services.Manager
 	server.Config.Services.Manager = manager
 	t.Cleanup(func() { server.Config.Services.Manager = previousManager })
+}
+
+func setReadOnlyNetrcForge(t *testing.T, repo *model.Repo, readOnlyNetrc func(context.Context, *model.Repo) (*model.Netrc, error)) {
+	t.Helper()
+	setForgeForRepo(t, repo, &readOnlyNetrcForge{readOnlyNetrc: readOnlyNetrc})
 }
 
 func TestUsableFor(t *testing.T) {
@@ -77,12 +82,18 @@ func TestUsableFor(t *testing.T) {
 
 func TestInjectNetrc(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55}
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true}
 	makeWorkflow := func() *rpc.Workflow {
-		return &rpc.Workflow{Timeout: 55, Config: &backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{
-			{Name: "clone", Environment: map[string]string{"CI_NETRC_MACHINE": "github.com", "CI_NETRC_USERNAME": "x-access-token", "CI_NETRC_PASSWORD": "approver-token", "CI_NETRC_EXTRA": "stale"}},
-			{Name: "step", Environment: map[string]string{"CI_NETRC_MACHINE": "github.com", "CI_NETRC_USERNAME": "x-access-token", "CI_NETRC_PASSWORD": "approver-token", "CI_NETRC_EXTRA": "stale"}},
-		}}}}}
+		return &rpc.Workflow{Timeout: 55, Config: &backend_types.Config{
+			Secrets: []*backend_types.Secret{
+				{Name: "__WOODPECKER_READ_ONLY_NETRC__", Value: "stale-token"},
+				{Name: "unrelated-secret", Value: "keep-masking"},
+			},
+			Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{
+				{Name: "clone", Environment: map[string]string{"CI_NETRC_MACHINE": "github.com", "CI_NETRC_USERNAME": "x-access-token", "CI_NETRC_PASSWORD": "approver-token", "CI_NETRC_EXTRA": "stale"}},
+				{Name: "step", Environment: map[string]string{"CI_NETRC_MACHINE": "github.com", "CI_NETRC_USERNAME": "x-access-token", "CI_NETRC_PASSWORD": "approver-token", "CI_NETRC_EXTRA": "stale"}},
+			}}},
+		}}
 	}
 
 	t.Run("injects a fresh token in clone and every step", func(t *testing.T) {
@@ -95,7 +106,10 @@ func TestInjectNetrc(t *testing.T) {
 		assert.Equal(t, "dispatch-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
 		assert.Equal(t, "x-access-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_USERNAME"])
 		assert.NotContains(t, workflow.Config.Stages[0].Steps[0].Environment, "approver-token")
-		assert.Equal(t, "dispatch-token", workflow.Config.Stages[0].Steps[1].Environment["CI_NETRC_PASSWORD"])
+		require.Len(t, workflow.Config.Secrets, 2)
+		assert.Equal(t, "unrelated-secret", workflow.Config.Secrets[0].Name)
+		assert.Equal(t, "__WOODPECKER_READ_ONLY_NETRC__", workflow.Config.Secrets[1].Name)
+		assert.Equal(t, "dispatch-token", workflow.Config.Secrets[1].Value)
 	})
 
 	t.Run("strips the approver token when expiry is too soon", func(t *testing.T) {
@@ -144,13 +158,74 @@ func TestInjectNetrc(t *testing.T) {
 		assertNoNetrc(t, workflow)
 	})
 	t.Run("nonpositive timeout strips netrc values", func(t *testing.T) {
-		setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
-			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "new-token", ExpiresAt: now.Add(time.Hour)}, nil
-		})
 		workflow := makeWorkflow()
 		workflow.Timeout = 0
 		s := RPC{now: func() time.Time { return now }}
 		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
+		assertNoNetrc(t, workflow)
+	})
+	t.Run("bounded mint failure strips stale netrc", func(t *testing.T) {
+		setReadOnlyNetrcForge(t, repo, func(ctx context.Context, _ *model.Repo) (*model.Netrc, error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok)
+			assert.LessOrEqual(t, time.Until(deadline), readOnlyNetrcMintTimeout)
+			return nil, context.DeadlineExceeded
+		})
+		workflow := makeWorkflow()
+		s := RPC{now: func() time.Time { return now }}
+		require.ErrorIs(t, s.injectNetrc(t.Context(), workflow, repo), context.DeadlineExceeded)
+		assertNoNetrc(t, workflow)
+	})
+	t.Run("public repositories skip minting by default", func(t *testing.T) {
+		previous := server.Config.Pipeline.AuthenticatePublicRepos
+		server.Config.Pipeline.AuthenticatePublicRepos = false
+		t.Cleanup(func() { server.Config.Pipeline.AuthenticatePublicRepos = previous })
+		publicRepo := *repo
+		publicRepo.IsSCMPrivate = false
+		workflow := makeWorkflow()
+		s := RPC{now: func() time.Time { return now }}
+		require.NoError(t, s.injectNetrc(t.Context(), workflow, &publicRepo))
+		assertNoNetrc(t, workflow)
+	})
+	t.Run("public repository authentication honors setting", func(t *testing.T) {
+		previous := server.Config.Pipeline.AuthenticatePublicRepos
+		server.Config.Pipeline.AuthenticatePublicRepos = true
+		t.Cleanup(func() { server.Config.Pipeline.AuthenticatePublicRepos = previous })
+		publicRepo := *repo
+		publicRepo.IsSCMPrivate = false
+		setReadOnlyNetrcForge(t, &publicRepo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "public-token", ExpiresAt: now.Add(time.Hour)}, nil
+		})
+		workflow := makeWorkflow()
+		s := RPC{now: func() time.Time { return now }}
+		require.NoError(t, s.injectNetrc(t.Context(), workflow, &publicRepo))
+		assert.Equal(t, "public-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
+	})
+	t.Run("timeout above safe duration skips mint", func(t *testing.T) {
+		manager := manager_mocks.NewMockManager(t)
+		manager.On("ForgeFromRepo", repo).Return(&readOnlyNetrcForge{readOnlyNetrc: func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "token", ExpiresAt: now.Add(time.Hour)}, nil
+		}}, nil).Maybe()
+		previousManager := server.Config.Services.Manager
+		server.Config.Services.Manager = manager
+		t.Cleanup(func() { server.Config.Services.Manager = previousManager })
+		workflow := makeWorkflow()
+		workflow.Timeout = maxWorkflowTimeoutMinutes + 1
+		s := RPC{now: func() time.Time { return now }}
+		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
+		assertNoNetrc(t, workflow)
+	})
+	t.Run("maximum safe timeout reaches lifetime check without overflow", func(t *testing.T) {
+		mints := 0
+		setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+			mints++
+			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "token", ExpiresAt: now.Add(time.Hour)}, nil
+		})
+		workflow := makeWorkflow()
+		workflow.Timeout = maxWorkflowTimeoutMinutes
+		s := RPC{now: func() time.Time { return now }}
+		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
+		assert.Equal(t, 1, mints)
 		assertNoNetrc(t, workflow)
 	})
 
@@ -178,11 +253,14 @@ func assertNoNetrc(t *testing.T, workflow *rpc.Workflow) {
 			}
 		}
 	}
+	for _, secret := range workflow.Config.Secrets {
+		assert.NotEqual(t, "__WOODPECKER_READ_ONLY_NETRC__", secret.Name)
+	}
 }
 
 func TestRPCNextInjectsReadOnlyNetrc(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, FullName: "test-org/test-repo"}
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
 	currentPipeline := &model.Pipeline{ID: 20, RepoID: repo.ID}
 	config := &backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{{
 		Name:        "custom clone",
@@ -209,6 +287,75 @@ func TestRPCNextInjectsReadOnlyNetrc(t *testing.T) {
 	require.NotNil(t, workflow)
 	assert.Equal(t, int64(55), workflow.Timeout)
 	assert.Equal(t, "dispatch-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
+}
+
+func TestRPCNextStripsNetrcOnFailures(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "workflow lookup fails"},
+		{name: "pipeline lookup fails"},
+		{name: "repo lookup fails"},
+		{name: "forge lacks read-only netrc"},
+		{name: "netrc mint fails"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
+			workflowData, err := json.Marshal(rpc.Workflow{
+				ID:      "30",
+				Timeout: 55,
+				Config: &backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{{
+					Name: "clone",
+					Environment: map[string]string{
+						"CI_NETRC_MACHINE":  "github.com",
+						"CI_NETRC_USERNAME": "x-access-token",
+						"CI_NETRC_PASSWORD": "stale-password",
+					},
+				}}}}},
+			})
+			require.NoError(t, err)
+
+			queue := queue_mocks.NewMockQueue(t)
+			queue.On("Poll", mock.Anything, int64(1), mock.Anything).Return(&model.Task{ID: "30", Data: workflowData}, nil).Once()
+			mockStore := store_mocks.NewMockStore(t)
+			mockStore.On("AgentFind", int64(1)).Return(defaultAgent(), nil)
+			mockStore.On("WorkflowUpdate", mock.Anything).Return(nil)
+			switch tt.name {
+			case "workflow lookup fails":
+				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Once()
+				mockStore.On("WorkflowLoad", int64(30)).Return((*model.Workflow)(nil), assert.AnError).Once()
+			case "pipeline lookup fails":
+				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Twice()
+				mockStore.On("GetPipeline", int64(20)).Return((*model.Pipeline)(nil), assert.AnError).Once()
+			case "repo lookup fails":
+				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Twice()
+				mockStore.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, RepoID: repo.ID}, nil).Once()
+				mockStore.On("GetRepo", repo.ID).Return((*model.Repo)(nil), assert.AnError).Once()
+			case "forge lacks read-only netrc":
+				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Twice()
+				mockStore.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, RepoID: repo.ID}, nil).Once()
+				mockStore.On("GetRepo", repo.ID).Return(repo, nil).Once()
+				unsupported := forge_mocks.NewMockForge(t)
+				unsupported.On("Name").Return("unsupported")
+				setForgeForRepo(t, repo, unsupported)
+			case "netrc mint fails":
+				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Twice()
+				mockStore.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, RepoID: repo.ID}, nil).Once()
+				mockStore.On("GetRepo", repo.ID).Return(repo, nil).Once()
+				setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+					return nil, assert.AnError
+				})
+			}
+
+			s := newTestRPC(t, mockStore, queue)
+			ctx := context.WithValue(t.Context(), agentIDKey, int64(1))
+			workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+			require.NoError(t, err)
+			require.NotNil(t, workflow)
+			assertNoNetrc(t, workflow)
+		})
+	}
 }
 
 func TestRegisterAgent(t *testing.T) {

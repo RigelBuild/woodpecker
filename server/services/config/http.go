@@ -79,6 +79,9 @@ func (h *httpService) Fetch(ctx context.Context, forgeClient forge.Forge, user *
 		if netrc == nil {
 			return nil, fmt.Errorf("forge returned an empty read-only netrc")
 		}
+		if netrc.Machine == "" || netrc.Login == "" || netrc.Password == "" {
+			return nil, fmt.Errorf("forge returned an incomplete read-only netrc")
+		}
 		body.Netrc = netrc
 	}
 

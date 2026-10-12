@@ -396,7 +396,6 @@ execute a local pipeline
 
 **--metadata-file**="": path to pipeline metadata file (normally downloaded from UI). Parameters can be adjusted by applying additional cli flags. The metadata format is only expected to work with the same Woodpecker version it was downloaded from and is not intended to be portable between versions
 
-**--netrc-machine**="": 
 **--network**="": external networks
 
 **--pipeline-changed-files**="": Set the metadata environment variable "CI_PIPELINE_FILES", either json formatted list of strings, or comma separated string list.

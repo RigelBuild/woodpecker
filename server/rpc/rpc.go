@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,11 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/queue"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+)
+
+const (
+	readOnlyNetrcMintTimeout  = 20 * time.Second
+	maxWorkflowTimeoutMinutes = (math.MaxInt64 - int64(2*time.Minute)) / int64(time.Minute)
 )
 
 type ctxKey struct{}
@@ -138,6 +144,14 @@ func (s *RPC) injectNetrcForWorkflow(ctx context.Context, w *rpc.Workflow) error
 
 func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo) error {
 	stripNetrc(w)
+	if !repo.IsSCMPrivate && !server.Config.Pipeline.AuthenticatePublicRepos {
+		return nil
+	}
+	if w.Timeout <= 0 || w.Timeout > maxWorkflowTimeoutMinutes {
+		log.Warn().Int64("timeout", w.Timeout).Msg("skipping read-only netrc injection for invalid workflow timeout")
+		return nil
+	}
+
 	_forge, err := server.Config.Services.Manager.ForgeFromRepo(repo)
 	if err != nil {
 		return fmt.Errorf("could not load forge for repo %s: %w", repo.FullName, err)
@@ -146,7 +160,9 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 	if !ok {
 		return fmt.Errorf("forge %q does not support read-only netrc", _forge.Name())
 	}
-	netrc, err := readOnlyNetrcer.ReadOnlyNetrc(ctx, repo)
+	mintCtx, cancel := context.WithTimeout(ctx, readOnlyNetrcMintTimeout)
+	defer cancel()
+	netrc, err := readOnlyNetrcer.ReadOnlyNetrc(mintCtx, repo)
 	if err != nil {
 		return fmt.Errorf("could not mint read-only netrc for repo %s: %w", repo.FullName, err)
 	}
@@ -161,7 +177,11 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 		now = s.now()
 	}
 	timeout := time.Duration(w.Timeout) * time.Minute
-	if w.Timeout <= 0 || !usableFor(netrc.ExpiresAt, now, timeout) {
+	if !usableFor(netrc.ExpiresAt, now, timeout) {
+		log.Warn().
+			Int64("timeout_minutes", w.Timeout).
+			Dur("remaining_lifetime", netrc.ExpiresAt.Sub(now)).
+			Msg("skipping read-only netrc injection because token expires before workflow timeout")
 		return nil
 	}
 	if w.Config == nil {
@@ -178,6 +198,7 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 			step.Environment["CI_NETRC_PASSWORD"] = netrc.Password
 		}
 	}
+	pipeline.AddNetrcMask(w, netrc.Password)
 	return nil
 }
 
@@ -198,6 +219,7 @@ func stripNetrc(w *rpc.Workflow) {
 			}
 		}
 	}
+	pipeline.RemoveNetrcMask(w)
 }
 
 // Wait blocks until the workflow with the given ID is completed or got canceled.

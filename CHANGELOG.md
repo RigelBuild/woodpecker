@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### 🔒 Security
+
+- Mint short-lived, repository-scoped read-only GitHub App credentials at dispatch and keep triggering-user OAuth tokens out of containers and extensions.
+
+### 🐛 Bug Fixes
+
+- Remove the local `woodpecker-cli exec` netrc flags; configure private clone plugins with local secrets instead.
+
 ## [3.19.0](https://github.com/woodpecker-ci/woodpecker/releases/tag/v3.19.0) - 2026-10-07
 
 ### ❤️ Thanks to all contributors! ❤️
