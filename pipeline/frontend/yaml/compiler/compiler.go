@@ -80,22 +80,20 @@ func (s *Secret) Match(event metadata.Event) bool {
 
 // Compiler compiles the yaml.
 type Compiler struct {
-	local                   bool
-	escalated               []string
-	prefix                  string
-	volumes                 []string
-	networks                []string
-	env                     map[string]string
-	nonPluginEnv            map[string]string
-	cloneEnv                map[string]string
-	workspaceBase           string
-	workspacePath           string
-	metadata                metadata.Metadata
-	registries              []Registry
-	secrets                 map[string]Secret
-	defaultClonePlugin      string
-	trustedClonePlugins     []string
-	securityTrustedPipeline bool
+	local              bool
+	escalated          []string
+	prefix             string
+	volumes            []string
+	networks           []string
+	env                map[string]string
+	nonPluginEnv       map[string]string
+	cloneEnv           map[string]string
+	workspaceBase      string
+	workspacePath      string
+	metadata           metadata.Metadata
+	registries         []Registry
+	secrets            map[string]Secret
+	defaultClonePlugin string
 	// TODO: remove with version 4.x
 	forceIgnoreServiceFailure bool
 }
@@ -103,12 +101,11 @@ type Compiler struct {
 // New creates a new Compiler with options.
 func New(opts ...Option) *Compiler {
 	compiler := &Compiler{
-		env:                 map[string]string{},
-		nonPluginEnv:        map[string]string{},
-		cloneEnv:            map[string]string{},
-		secrets:             map[string]Secret{},
-		defaultClonePlugin:  constant.DefaultClonePlugin,
-		trustedClonePlugins: constant.TrustedClonePlugins,
+		env:                map[string]string{},
+		nonPluginEnv:       map[string]string{},
+		cloneEnv:           map[string]string{},
+		secrets:            map[string]Secret{},
+		defaultClonePlugin: constant.DefaultClonePlugin,
 	}
 	for _, opt := range opts {
 		opt(compiler)
@@ -194,10 +191,7 @@ func (c *Compiler) Compile(conf *yaml_types.Workflow) (*backend_types.Config, er
 				return nil, err
 			}
 
-			// only inject netrc if it's a trusted repo or a trusted plugin
-			if c.securityTrustedPipeline || (container.IsPlugin() && container.IsTrustedCloneImage(c.trustedClonePlugins)) {
-				maps.Copy(step.Environment, c.cloneEnv)
-			}
+			maps.Copy(step.Environment, c.cloneEnv)
 
 			stage.Steps = append(stage.Steps, step)
 
@@ -220,7 +214,7 @@ func (c *Compiler) Compile(conf *yaml_types.Workflow) (*backend_types.Config, er
 			if err != nil {
 				return nil, err
 			}
-
+			maps.Copy(step.Environment, c.cloneEnv)
 			stage.Steps = append(stage.Steps, step)
 		}
 		config.Stages = append(config.Stages, stage)
@@ -254,10 +248,7 @@ func (c *Compiler) Compile(conf *yaml_types.Workflow) (*backend_types.Config, er
 			return nil, err
 		}
 
-		// only inject netrc if it's a trusted repo or a trusted plugin
-		if c.securityTrustedPipeline || (container.IsPlugin() && container.IsTrustedCloneImage(c.trustedClonePlugins)) {
-			maps.Copy(step.Environment, c.cloneEnv)
-		}
+		maps.Copy(step.Environment, c.cloneEnv)
 
 		steps = append(steps, &dagCompilerStep{
 			step:      step,

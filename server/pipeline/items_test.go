@@ -187,10 +187,7 @@ func TestParsePipeline(t *testing.T) {
 		ID: 1,
 	}
 
-	repo := &model.Repo{
-		ID: 1,
-	}
-
+	repo := &model.Repo{ID: 1, Visibility: model.VisibilityPublic}
 	yamls := []*forge_types.FileMeta{
 		{
 			Name: "woodpecker.yml",
@@ -216,8 +213,10 @@ steps:
 
 	forge := forge_mocks.NewMockForge(t)
 	forge.On("Netrc", mock.Anything, mock.Anything).Return(&model.Netrc{
-		Login:    "user",
-		Password: "password",
+		Login:    "user-oauth-token",
+		Password: "x-oauth-basic",
+		Machine:  "github.com",
+		Type:     model.ForgeTypeGithub,
 	}, nil)
 	forge.On("Name").Return("github")
 	forge.On("URL").Return("https://github.com")
@@ -229,7 +228,7 @@ steps:
 	server.Config.Services.Manager = mockManager
 
 	secretService := secret_service_mocks.NewMockService(t)
-	secretService.On("SecretListPipeline", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]*model.Secret{
+	secretService.On("SecretListPipeline", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]*model.Secret{
 		{
 			Name:  "hello",
 			Value: "secret world",
@@ -260,4 +259,9 @@ steps:
 	assert.Equal(t, "value", step.Environment["ADDITIONAL"])
 	assert.Equal(t, "bar", step.Environment["FOO"])
 	assert.Equal(t, "secret world", step.Environment["HELLO"])
+	assert.Equal(t, "x-access-token", step.Environment["CI_NETRC_USERNAME"])
+	assert.Equal(t, "github.com", step.Environment["CI_NETRC_MACHINE"])
+	assert.NotContains(t, step.Environment, "CI_NETRC_PASSWORD")
+	assert.NotContains(t, step.Environment, "user-oauth-token")
+	assert.NotContains(t, step.Environment, "x-oauth-basic")
 }

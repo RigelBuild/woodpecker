@@ -179,6 +179,12 @@ type Forge interface {
 	Org(ctx context.Context, u *model.User, org string) (*model.Org, error)
 }
 
+// ReadOnlyNetrcer is an optional forge capability for minting a per-dispatch,
+// repository-scoped credential that is safe to expose to pipeline steps.
+type ReadOnlyNetrcer interface {
+	ReadOnlyNetrc(ctx context.Context, r *model.Repo) (*model.Netrc, error)
+}
+
 // AggregateStatusReporter is an optional Forge capability: report a single
 // pipeline-level status that rolls up the CODE (non-meta) workflows' state.
 // Because it has no per-workflow component, it is stable across an

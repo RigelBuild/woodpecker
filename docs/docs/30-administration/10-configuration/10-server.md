@@ -873,8 +873,7 @@ You should specify the tag of your images too, as this enforces exact matches.
 - Name: `WOODPECKER_PLUGINS_TRUSTED_CLONE`
 - Default: `docker.io/woodpeckerci/plugin-git,docker.io/woodpeckerci/plugin-git,quay.io/woodpeckerci/plugin-git`
 
-Plugins which are trusted to handle the Git credential info in clone steps.
-If a clone step use an image not in this list, Git credentials will not be injected and users have to use other methods (e.g. secrets) to clone non-public repos.
+This list identifies images trusted to handle clone credentials. Other images can still receive a short-lived, repository-scoped, read-only credential at dispatch; the compiler warns when a custom clone image is not listed.
 
 You should specify the tag of your images too, as this enforces exact matches.
 

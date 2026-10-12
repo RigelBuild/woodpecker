@@ -291,7 +291,6 @@ func (b *PipelineBuilder) toInternalRepresentation(parsed *yaml_types.Workflow, 
 		compiler.WithNonPluginEnviron(b.AdditionalEnvs),
 		compiler.WithEnviron(b.Envs),
 		compiler.WithEscalated(b.PrivilegedPlugins...),
-		compiler.WithTrustedClonePlugins(b.TrustedClonePlugins),
 		compiler.WithPrefix(
 			fmt.Sprintf(
 				"wp_%s_%d",
@@ -300,7 +299,6 @@ func (b *PipelineBuilder) toInternalRepresentation(parsed *yaml_types.Workflow, 
 			),
 		),
 		compiler.WithMetadata(metadata),
-		compiler.WithTrustedSecurity(b.RepoTrusted.Security),
 	)
 
 	// by adding the passed in options last, we allow them

@@ -79,12 +79,10 @@ func WithMetadata(metadata metadata.Metadata) Option {
 	}
 }
 
-// WithNetrc configures the compiler with netrc authentication
-// credentials added by default to every container in the pipeline.
-func WithNetrc(username, password, machine string) Option {
+// WithNetrc configures the compiler with netrc machine and username metadata.
+func WithNetrc(username, machine string) Option {
 	return func(compiler *Compiler) {
 		compiler.cloneEnv["CI_NETRC_USERNAME"] = username
-		compiler.cloneEnv["CI_NETRC_PASSWORD"] = password
 		compiler.cloneEnv["CI_NETRC_MACHINE"] = machine
 	}
 }
@@ -165,19 +163,6 @@ func WithNetworks(networks ...string) Option {
 func WithDefaultClonePlugin(cloneImage string) Option {
 	return func(compiler *Compiler) {
 		compiler.defaultClonePlugin = cloneImage
-	}
-}
-
-func WithTrustedClonePlugins(images []string) Option {
-	return func(compiler *Compiler) {
-		compiler.trustedClonePlugins = images
-	}
-}
-
-// WithTrustedSecurity configures the compiler with the trusted repo option.
-func WithTrustedSecurity(trusted bool) Option {
-	return func(compiler *Compiler) {
-		compiler.securityTrustedPipeline = trusted
 	}
 }
 

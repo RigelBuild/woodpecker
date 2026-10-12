@@ -40,6 +40,10 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 		log.Error().Err(err).Msg("failed to generate netrc file")
 		netrc = &model.Netrc{}
 	}
+	compileNetrc := &model.Netrc{Login: "x-access-token", Machine: netrc.Machine, Type: netrc.Type}
+	if netrc.Type != model.ForgeTypeGithub {
+		compileNetrc.Login = netrc.Login
+	}
 
 	// get the previous pipeline so that we can send status change notifications
 	prev, err := store.GetPipelineLastBefore(repo, currentPipeline.Branch, currentPipeline.Number)
@@ -133,13 +137,9 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 			}),
 			compiler.WithVolumes(server.Config.Pipeline.Volumes...),
 			compiler.WithNetworks(server.Config.Pipeline.Networks...),
-			compiler.WithOption(
-				compiler.WithNetrc(
-					netrc.Login,
-					netrc.Password,
-					netrc.Machine,
-				),
-				repo.IsSCMPrivate || server.Config.Pipeline.AuthenticatePublicRepos,
+			compiler.WithNetrc(
+				compileNetrc.Login,
+				compileNetrc.Machine,
 			),
 			compiler.WithDefaultClonePlugin(server.Config.Pipeline.DefaultClonePlugin),
 			compiler.WithWorkspaceFromURL(compiler.DefaultWorkspaceBase, repo.ForgeURL),

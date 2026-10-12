@@ -15,6 +15,7 @@
 package config_test
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -31,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yaronf/httpsign"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/mocks"
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -38,6 +40,15 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/services/utils"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
 )
+
+type combinedReadOnlyNetrcForge struct {
+	forge.Forge
+	netrc *model.Netrc
+}
+
+func (f *combinedReadOnlyNetrcForge) ReadOnlyNetrc(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+	return f.netrc, nil
+}
 
 func TestFetchFromConfigService(t *testing.T) {
 	t.Parallel()
@@ -141,6 +152,7 @@ func TestFetchFromConfigService(t *testing.T) {
 		type incoming struct {
 			Repo          *model.Repo     `json:"repo"`
 			Build         *model.Pipeline `json:"pipeline"`
+			Netrc         *model.Netrc    `json:"netrc"`
 			Configuration []*config       `json:"config"`
 		}
 
@@ -155,6 +167,7 @@ func TestFetchFromConfigService(t *testing.T) {
 			http.Error(w, "Failed to parse JSON"+err.Error(), http.StatusBadRequest)
 			return
 		}
+		assert.Equal(t, "read-only", req.Netrc.Password)
 
 		if req.Repo.Name == "Fetch empty" {
 			w.WriteHeader(http.StatusNotFound)
@@ -218,12 +231,13 @@ func TestFetchFromConfigService(t *testing.T) {
 			f.On("Dir", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, fmt.Errorf("directory not found"))
 
 			f.On("Netrc", mock.Anything, mock.Anything).Return(&model.Netrc{Machine: "mock", Login: "mock", Password: "mock"}, nil)
+			readOnlyForge := &combinedReadOnlyNetrcForge{Forge: f, netrc: &model.Netrc{Machine: "mock", Login: "mock", Password: "read-only"}}
 
 			forgeFetcher := config.NewForge(time.Second*3, 3, constant.DefaultConfigOrder, []string{".yaml", ".yml"})
 			configFetcher := config.NewCombined(forgeFetcher, httpFetcher)
 			files, err := configFetcher.Fetch(
 				t.Context(),
-				f,
+				readOnlyForge,
 				&model.User{AccessToken: "xxx"},
 				repo,
 				&model.Pipeline{Commit: "89ab7b2d6bfb347144ac7c557e638ab402848fee"},

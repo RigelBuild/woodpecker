@@ -211,7 +211,7 @@ func TestLintErrors(t *testing.T) {
 		},
 		{
 			from: "{steps: { build: { image: golang, settings: { test: 'true' } } }, when: { branch: main, event: push }, clone: { git: { image: some-other/plugin-git:v1.1.0 } } }",
-			want: "Specified clone image does not match allow list, netrc is not injected",
+			want: "Specified clone image is not in the trusted allowlist and may receive dispatch-time read-only netrc credentials",
 		},
 		{
 			from: "steps: { build: { image: golang }, publish: { image: golang, depends_on: [ binary ] } }",
@@ -326,4 +326,26 @@ func TestBadHabits(t *testing.T) {
 		}
 		assert.True(t, found, "Expected error %q, got %q", tt.want, lerrors)
 	}
+}
+
+func TestLintUntrustedCloneWarnsThatItMayReceiveReadOnlyNetrc(t *testing.T) {
+	config, err := yaml.ParseString(`clone:
+  git:
+    image: custom/clone:latest
+`)
+	require.NoError(t, err)
+
+	err = linter.New(linter.WithTrustedClonePlugins([]string{"woodpeckerci/plugin-git"})).Lint([]*linter.WorkflowConfig{{
+		File:     "woodpecker.yml",
+		Workflow: config,
+	}})
+	require.Error(t, err)
+	var found bool
+	for _, issue := range errors.GetPipelineErrors(err) {
+		if strings.Contains(issue.Message, "may receive dispatch-time read-only netrc credentials") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected an explicit warning about clone credential exposure")
 }
