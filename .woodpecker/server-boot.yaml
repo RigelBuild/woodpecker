@@ -1,8 +1,9 @@
 # Builds the nix woodpecker-server and boots it (nix/server-boot-check.nix), so
 # a rev whose server compiles but cannot start fails here before it is pinned.
+# Any docker agent: the check builds for the agent's own system, so it runs on
+# the arm64 elastic pool (the rpi5 server's arch) as well as amd64 hosts.
 labels:
   backend: docker
-  platform: linux/amd64
 
 when:
   - event: pull_request
@@ -24,4 +25,4 @@ steps:
     environment:
       NIX_CONFIG: 'experimental-features = nix-command flakes'
     commands:
-      - nix build .#checks.x86_64-linux.woodpecker-server-boot --no-link -L
+      - nix build ".#checks.$(nix eval --raw --impure --expr builtins.currentSystem).woodpecker-server-boot" --no-link -L
