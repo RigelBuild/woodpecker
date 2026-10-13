@@ -26,11 +26,12 @@ pkgs.runCommand "woodpecker-server-boot-check"
     pid=$!
 
     ok=0
-    for _ in $(seq 1 120); do
+    deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ]; do
       if ! kill -0 "$pid" 2>/dev/null; then
         break
       fi
-      if curl -fs -o /dev/null http://127.0.0.1:19000/healthz; then
+      if curl -fs --max-time 2 -o /dev/null http://127.0.0.1:19000/healthz; then
         ok=1
         break
       fi
@@ -42,7 +43,7 @@ pkgs.runCommand "woodpecker-server-boot-check"
       cat "$log" >&2
       exit 1
     fi
-    if ! curl -fsS -o "$TMPDIR/index.html" http://127.0.0.1:19000/; then
+    if ! curl -fsS --max-time 10 -o "$TMPDIR/index.html" http://127.0.0.1:19000/; then
       echo "woodpecker-server did not serve the UI index:" >&2
       cat "$log" >&2
       exit 1
