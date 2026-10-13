@@ -264,7 +264,12 @@ build: build-agent build-server build-cli ## Build all binaries
 .PHONY: release-frontend
 release-frontend: build-ui ## Build frontend
 
-cross-compile-server: ## Cross compile the server
+# The tracked web/dist/.gitkeep satisfies go:embed, so a missing UI only fails at server boot.
+.PHONY: check-web-dist
+check-web-dist: ## Fail unless the built UI is staged in web/dist
+	@test -f web/dist/index.html || { echo "web/dist/index.html missing: run 'make build-ui' or stage the UI first" >&2; exit 1; }
+
+cross-compile-server: check-web-dist ## Cross compile the server
 	$(foreach platform,$(subst ;, ,$(PLATFORMS)),\
 		TARGETOS=$(firstword $(subst |, ,$(platform))) \
 		TARGETARCH_XGO=$(subst arm64/v8,arm64,$(subst arm/v7,arm-7,$(word 2,$(subst |, ,$(platform))))) \
@@ -272,7 +277,7 @@ cross-compile-server: ## Cross compile the server
 		make release-server-xgo || exit 1; \
 	)
 
-release-server-xgo: check-xgo ## Create server binaries for release using xgo
+release-server-xgo: check-xgo check-web-dist ## Create server binaries for release using xgo
 	@echo "Building for:"
 	@echo "os:$(TARGETOS)"
 	@echo "arch orgi:$(TARGETARCH)"
@@ -302,7 +307,7 @@ release-server-xgo: check-xgo ## Create server binaries for release using xgo
 	  echo "skip creating '${DIST_DIR}/woodpecker-server_$(TARGETOS)_$(TARGETARCH_BUILDX).tar.gz'"; \
 	fi
 
-release-server: ## Create server binaries for release
+release-server: check-web-dist ## Create server binaries for release
 	# compile
 	GOOS=$(TARGETOS) GOARCH=$(TARGETARCH) CGO_ENABLED=${CGO_ENABLED} go build -ldflags '${LDFLAGS}' -tags 'grpcnotrace $(TAGS)' -o ${DIST_DIR}/server/$(TARGETOS)_$(TARGETARCH)/woodpecker-server$(BIN_SUFFIX) go.woodpecker-ci.org/woodpecker/v3/cmd/server
 	# tar binary files
