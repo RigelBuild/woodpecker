@@ -15,5 +15,5 @@
 package proto
 
 // Version is the version of the woodpecker.proto file. Increase it by 1 for any
-// change an older peer would misread; peers must match it exactly to connect.
+// change an older peer would misread; a peer that reports a version must match it.
 const Version int32 = 16
