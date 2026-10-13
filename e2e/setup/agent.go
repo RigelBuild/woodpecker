@@ -58,8 +58,11 @@ type AgentEnv struct {
 type AgentOption func(*agentConfig)
 
 type agentConfig struct {
-	// hostname is sent to the server as the agent's hostname metadata and label.
+	// hostname is sent to the server as the agent's hostname (request body and metadata) and label.
 	hostname string
+
+	// metadataHostname, when set, replaces hostname in the gRPC metadata only.
+	metadataHostname string
 
 	// customLabels are merged into the agent's filter labels.
 	// They are matched against task Labels set in pipeline YAML (labels: key: value).
@@ -76,6 +79,12 @@ type agentConfig struct {
 // WithHostname sets the agent's hostname label (default: "test-agent").
 func WithHostname(name string) AgentOption {
 	return func(c *agentConfig) { c.hostname = name }
+}
+
+// WithMetadataHostname sends a different hostname in gRPC metadata than in the
+// RegisterAgent request body, to tell the two sources apart.
+func WithMetadataHostname(name string) AgentOption {
+	return func(c *agentConfig) { c.metadataHostname = name }
 }
 
 // WithCustomLabels merges extra labels into the agent's filter set.
@@ -154,7 +163,11 @@ func StartAgent(t *testing.T, grpcAddr string, opts ...AgentOption) *AgentEnv {
 
 	client := agent_rpc.NewGrpcClient(agentCtx, agentConn.MainConn)
 
-	grpcCtx := metadata.NewOutgoingContext(agentCtx, metadata.Pairs("hostname", cfg.hostname))
+	metadataHostname := cfg.hostname
+	if cfg.metadataHostname != "" {
+		metadataHostname = cfg.metadataHostname
+	}
+	grpcCtx := metadata.NewOutgoingContext(agentCtx, metadata.Pairs("hostname", metadataHostname))
 
 	backend := dummy.New()
 	if !backend.IsAvailable(agentCtx) {
@@ -171,6 +184,7 @@ func StartAgent(t *testing.T, grpcAddr string, opts ...AgentOption) *AgentEnv {
 		Platform:     engInfo.Platform,
 		Capacity:     cfg.capacity,
 		CustomLabels: cfg.customLabels,
+		Hostname:     cfg.hostname,
 	})
 	require.NoErrorf(t, err, "StartAgent(%s): register with server: %v", cfg.hostname, err)
 
