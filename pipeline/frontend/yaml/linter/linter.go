@@ -132,7 +132,12 @@ func (l *Linter) lintReservedNetrcEnvironment(config *WorkflowConfig) error {
 	var linterErr error
 	for _, group := range containers {
 		for _, container := range group.items {
+			names := make([]string, 0, len(container.Environment))
 			for name := range container.Environment {
+				names = append(names, name)
+			}
+			slices.Sort(names)
+			for _, name := range names {
 				if strings.HasPrefix(name, "CI_NETRC_") {
 					field := fmt.Sprintf("%s.%s.environment.%s", group.area, container.Name, name)
 					linterErr = multierr.Append(linterErr, newLinterError(

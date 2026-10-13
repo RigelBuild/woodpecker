@@ -812,7 +812,7 @@ Example: `platform=linux/amd64,backend=docker`
 
 The default time for a repo in minutes before a pipeline gets killed.
 
-GitHub App clone credentials last about one hour, and Woodpecker requires them to outlive the workflow timeout by two minutes. Set the workflow timeout to 58 minutes or less to receive these credentials; the default 60-minute timeout is too long.
+GitHub App installation tokens last about 60 minutes from mint. Their remaining lifetime at dispatch must be at least the workflow timeout plus two minutes. Set the pipeline timeout to 55 minutes or less to allow time for dispatch and minting. The default timeout remains 60 minutes.
 
 ### MAX_PIPELINE_TIMEOUT
 

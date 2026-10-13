@@ -48,7 +48,7 @@ var Command = &cli.Command{
 		&cli.StringSliceFlag{
 			Sources: cli.EnvVars("WOODPECKER_PLUGINS_TRUSTED_CLONE"),
 			Name:    "plugins-trusted-clone",
-			Usage:   "images trusted to handle clone credentials",
+			Usage:   "allowlist of clone images exempt from lint warnings",
 			Value:   constant.TrustedClonePlugins,
 			Config: cli.StringConfig{
 				TrimSpace: true,

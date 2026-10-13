@@ -353,7 +353,7 @@ func TestLintUntrustedCloneWarnsThatItMayReceiveReadOnlyNetrc(t *testing.T) {
 func TestLintRejectsReservedNetrcEnvironment(t *testing.T) {
 	rawConfig := `when: [{event: push}]
 clone: {git: {image: alpine, environment: {CI_NETRC_MACHINE: github.com}}}
-steps: {build: {image: alpine, environment: {CI_NETRC_PASSWORD: local-secret}}}
+steps: {build: {image: alpine, environment: {CI_NETRC_USERNAME: user, CI_NETRC_PASSWORD: {from_secret: x}, CI_NETRC_MACHINE: github.com}}}
 services: {db: {image: postgres, environment: {CI_NETRC_USERNAME: user}}}`
 	config, err := yaml.ParseString(rawConfig)
 	require.NoError(t, err)
@@ -369,4 +369,17 @@ services: {db: {image: postgres, environment: {CI_NETRC_USERNAME: user}}}`
 		}
 	}
 	assert.Len(t, found, 3, "expected linter errors for reserved names in clone, steps, and services")
+	var reservedMessages []string
+	for _, issue := range errors.GetPipelineErrors(err) {
+		if strings.Contains(issue.Message, "is reserved for server-managed clone credentials") {
+			reservedMessages = append(reservedMessages, issue.Message)
+		}
+	}
+	assert.Equal(t, []string{
+		"`CI_NETRC_MACHINE` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_MACHINE` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_PASSWORD` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_USERNAME` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_USERNAME` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+	}, reservedMessages)
 }

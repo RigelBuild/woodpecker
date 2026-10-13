@@ -47,7 +47,7 @@ Only server admins can set this option. If you are not a server admin this optio
 
 For GitHub repositories with a configured GitHub App, Woodpecker can provide a short-lived, repository-scoped, read-only credential to clone and pipeline containers, including custom clone steps. Other forges and GitHub installations without an App do not receive this credential.
 
-The username and forge host are included at compile time. At dispatch, the server injects the password only when its lifetime covers the workflow timeout plus two minutes. If the credential is withheld or cannot be minted, no `CI_NETRC_*` variables are set.
+The username and forge host are included at compile time. At dispatch, the server injects the password only when its remaining lifetime is at least the workflow timeout plus two minutes. GitHub App installation tokens last about 60 minutes from mint, so allow time for dispatch and minting when setting the timeout.
 
 Pipeline code can read the current repository while the token is available, but it cannot push changes or access other repositories. To push changes, provide a separate credential as a secret or use a dedicated plugin, such as [appleboy/drone-git-push](https://woodpecker-ci.org/plugins/git-push).
 
@@ -62,6 +62,8 @@ You can change the visibility of your project by this setting. If a user has acc
 ## Timeout
 
 After this timeout a pipeline has to finish or will be treated as timed out.
+
+For a GitHub App clone credential, the token's remaining lifetime must be at least the pipeline timeout plus two minutes. Tokens last about 60 minutes from mint, so set the pipeline timeout to 55 minutes or less to allow time for dispatch and minting. The default timeout remains 60 minutes and does not meet this limit.
 
 ## Cancel previous pipelines
 
