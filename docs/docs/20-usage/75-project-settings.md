@@ -63,7 +63,7 @@ You can change the visibility of your project by this setting. If a user has acc
 
 After this timeout a pipeline has to finish or will be treated as timed out.
 
-For a GitHub App clone credential, the token's remaining lifetime must be at least the pipeline timeout plus two minutes. Tokens last about 60 minutes from mint, so set the pipeline timeout to 55 minutes or less to allow time for dispatch and minting. The default timeout remains 60 minutes and does not meet this limit.
+For a GitHub App clone credential, the token's remaining lifetime must be at least the pipeline timeout plus two minutes. Tokens last about 60 minutes from mint, so the timeout must be 55 minutes or less. Newly activated repos get a 55-minute default; a repo that still has a longer timeout gets no clone credential until it is lowered.
 
 ## Cancel previous pipelines
 

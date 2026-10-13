@@ -28,7 +28,7 @@ import (
 	store_types "go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
-// defaultReapTimeout mirrors the timeout a repo with no explicit setting gets.
+// defaultReapTimeout covers a stored timeout of zero, which the agent runs as one hour.
 const defaultReapTimeout = 60 * time.Minute
 
 // ReapOrphanedWorkflows finalizes active workflows that cannot finish through an agent.
