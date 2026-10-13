@@ -45,11 +45,19 @@ Only server admins can set this option. If you are not a server admin this optio
 
 ## Custom trusted clone plugins
 
-During clone and pipeline steps, read-only Git credentials may be required. Woodpecker provides a short-lived credential for private repository access.
+During the clone process, Git credentials (e.g., for private repositories) may be required.
+These credentials are provided via [`netrc`](https://everything.curl.dev/usingcurl/netrc.html).
 
-The username and forge host are included at compile time. At dispatch, the server injects a repository-scoped, read-only password into every container, including custom clone steps, only when the token can outlast the workflow timeout by at least two minutes. If the token expires sooner or cannot be minted, the password is not injected and the compiled netrc username and host cannot authenticate.
+These credentials are injected only into trusted plugins specified in the environment variable `WOODPECKER_PLUGINS_TRUSTED_CLONE` (an instance-wide Woodpecker server setting) or declared in this repository-level setting.
 
-Pipeline code can read the current repository while the token is available, but it cannot push changes or access other repositories. To push changes, provide a separate credential as a secret or use a dedicated plugin, such as [appleboy/drone-git-push](https://woodpecker-ci.org/plugins/git-push).
+With these credentials, it’s possible to perform any Git operations, including pushing changes back to the repo.
+To prevent unauthorized access or misuse, a plugin allowlist is required, either on the instance level or the repository level.
+Without an explicit allowlist, a malicious contributor could exploit a custom clone plugin in a Pull Request to reveal or transfer these credentials during the clone step.
+
+:::info
+This setting does not affect subsequent steps, nor does it allow direct pushes to the repository.
+To enable pushing changes, you can inject Git credentials as a secret or use a dedicated plugin, such as [appleboy/drone-git-push](https://woodpecker-ci.org/plugins/git-push).
+:::
 
 ## Project visibility
 

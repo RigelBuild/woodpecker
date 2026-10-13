@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 
 	"go.uber.org/multierr"
 
@@ -85,6 +86,9 @@ func (l *Linter) lintFile(config *WorkflowConfig) error {
 	if len(config.Workflow.Steps.ContainerList) == 0 {
 		linterErr = multierr.Append(linterErr, newLinterError("Invalid or missing `steps` section", config.File, "steps", false))
 	}
+	if err := l.lintReservedNetrcEnvironment(config); err != nil {
+		linterErr = multierr.Append(linterErr, err)
+	}
 
 	if err := l.lintCloneSteps(config); err != nil {
 		linterErr = multierr.Append(linterErr, err)
@@ -113,6 +117,32 @@ func (l *Linter) lintFile(config *WorkflowConfig) error {
 		linterErr = multierr.Append(linterErr, err)
 	}
 
+	return linterErr
+}
+
+func (l *Linter) lintReservedNetrcEnvironment(config *WorkflowConfig) error {
+	containers := []struct {
+		area  string
+		items []*types.Container
+	}{
+		{area: "clone", items: config.Workflow.Clone.ContainerList},
+		{area: "steps", items: config.Workflow.Steps.ContainerList},
+		{area: "services", items: config.Workflow.Services.ContainerList},
+	}
+	var linterErr error
+	for _, group := range containers {
+		for _, container := range group.items {
+			for name := range container.Environment {
+				if strings.HasPrefix(name, "CI_NETRC_") {
+					field := fmt.Sprintf("%s.%s.environment.%s", group.area, container.Name, name)
+					linterErr = multierr.Append(linterErr, newLinterError(
+						fmt.Sprintf("`%s` is reserved for server-managed clone credentials and cannot be set in a pipeline", name),
+						config.File, field, false,
+					))
+				}
+			}
+		}
+	}
 	return linterErr
 }
 

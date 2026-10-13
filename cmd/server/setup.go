@@ -184,6 +184,8 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 
 	// authentication
 	server.Config.Pipeline.AuthenticatePublicRepos = c.Bool("authenticate-public-repos")
+	server.Config.Pipeline.SecretExtensionNetrc = c.Bool("secret-extension-netrc")
+	server.Config.Pipeline.RegistryExtensionNetrc = c.Bool("registry-extension-netrc")
 	server.Config.Server.AsyncRepositoryUpdate = c.Bool("async-repository-update")
 	server.Config.Server.WebhookSyncTimeout = c.Duration("webhook-sync-timeout")
 	server.Config.Server.HookDedupWindow = c.Duration("hook-dedup-window")

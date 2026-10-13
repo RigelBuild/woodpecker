@@ -88,7 +88,7 @@ woodpecker-cli exec \
 
 ## Private repository cloning
 
-Local execution has no server dispatch to mint a repository-scoped GitHub App credential, so the clone step receives no authentication password. The `--netrc-machine` option and the `CI_NETRC_USERNAME` and `CI_NETRC_PASSWORD` environment inputs are no longer supported by `woodpecker-cli exec`. For a private clone, configure a clone plugin with credentials provided through a local secret. Do not pass a user OAuth token through pipeline environment variables.
+Local execution does not mint a server-side GitHub App credential. All `CI_NETRC_*` names are reserved for server-managed clone credentials and are rejected when declared in a pipeline. For private clones, use a clone plugin with a local secret; do not set these variables or pass a user OAuth token through pipeline environment variables.
 
 ## More options
 

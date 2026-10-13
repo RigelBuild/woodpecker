@@ -23,14 +23,3 @@ import (
 func AddNetrcMask(w *rpc.Workflow, password string) {
 	w.Config.Secrets = append(w.Config.Secrets, &backend_types.Secret{Name: "__WOODPECKER_READ_ONLY_NETRC__", Value: password})
 }
-
-// RemoveNetrcMask removes the short-lived token from the workflow's masked secrets.
-func RemoveNetrcMask(w *rpc.Workflow) {
-	secrets := w.Config.Secrets[:0]
-	for _, secret := range w.Config.Secrets {
-		if secret.Name != "__WOODPECKER_READ_ONLY_NETRC__" {
-			secrets = append(secrets, secret)
-		}
-	}
-	w.Config.Secrets = secrets
-}

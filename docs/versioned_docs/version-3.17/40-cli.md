@@ -99,7 +99,6 @@ woodpecker-cli [GLOBAL OPTIONS] [command [COMMAND OPTIONS]] [ARGUMENTS...]
 
 **--token, -t**="": server auth token
 
-
 # COMMANDS
 
 ## admin
@@ -390,12 +389,6 @@ execute a local pipeline
 
 **--metadata-file**="": path to pipeline metadata file (normally downloaded from UI). Parameters can be adjusted by applying additional cli flags. The metadata format is only expected to work with the same Woodpecker version it was downloaded from and is not intended to be portable between versions
 
-**--netrc-machine**="": 
-
-**--netrc-password**="": 
-
-**--netrc-username**="": 
-
 **--network**="": external networks
 
 **--pipeline-changed-files**="": Set the metadata environment variable "CI_PIPELINE_FILES", either json formatted list of strings, or comma separated string list.
@@ -514,7 +507,7 @@ lint a pipeline configuration file
 
 **--plugins-privileged**="": allow plugins to run in privileged mode, if set empty, there is no
 
-**--plugins-trusted-clone**="": plugins that are trusted to handle Git credentials in cloning steps (default: "docker.io/woodpeckerci/plugin-git:2.9.2", "docker.io/woodpeckerci/plugin-git", "quay.io/woodpeckerci/plugin-git")
+**--plugins-trusted-clone**="": lint allowlist for clone images; unlisted images trigger a warning but do not block credential injection (default: "docker.io/woodpeckerci/plugin-git:2.9.2", "docker.io/woodpeckerci/plugin-git", "quay.io/woodpeckerci/plugin-git")
 
 **--strict**: treat warnings as errors (default: false)
 

@@ -80,13 +80,22 @@ func TestUsableFor(t *testing.T) {
 	}
 }
 
+func TestAddNetrcMaskPreservesSameNameUserSecret(t *testing.T) {
+	userSecret := &backend_types.Secret{Name: "__WOODPECKER_READ_ONLY_NETRC__", Value: "user-secret"}
+	workflow := &rpc.Workflow{Config: &backend_types.Config{Secrets: []*backend_types.Secret{userSecret}}}
+	pipeline.AddNetrcMask(workflow, "dispatch-token")
+	stripNetrc(workflow)
+	require.Len(t, workflow.Config.Secrets, 2)
+	assert.Same(t, userSecret, workflow.Config.Secrets[0])
+}
+
 func TestInjectNetrc(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true}
 	makeWorkflow := func() *rpc.Workflow {
 		return &rpc.Workflow{Timeout: 55, Config: &backend_types.Config{
 			Secrets: []*backend_types.Secret{
-				{Name: "__WOODPECKER_READ_ONLY_NETRC__", Value: "stale-token"},
+				{Name: "__WOODPECKER_READ_ONLY_NETRC__", Value: "user-secret"},
 				{Name: "unrelated-secret", Value: "keep-masking"},
 			},
 			Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{
@@ -106,10 +115,15 @@ func TestInjectNetrc(t *testing.T) {
 		assert.Equal(t, "dispatch-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
 		assert.Equal(t, "x-access-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_USERNAME"])
 		assert.NotContains(t, workflow.Config.Stages[0].Steps[0].Environment, "approver-token")
-		require.Len(t, workflow.Config.Secrets, 2)
-		assert.Equal(t, "unrelated-secret", workflow.Config.Secrets[0].Name)
-		assert.Equal(t, "__WOODPECKER_READ_ONLY_NETRC__", workflow.Config.Secrets[1].Name)
-		assert.Equal(t, "dispatch-token", workflow.Config.Secrets[1].Value)
+		require.Len(t, workflow.Config.Secrets, 3)
+		assert.Equal(t, "__WOODPECKER_READ_ONLY_NETRC__", workflow.Config.Secrets[0].Name)
+		assert.Equal(t, "user-secret", workflow.Config.Secrets[0].Value)
+		assert.Equal(t, "unrelated-secret", workflow.Config.Secrets[1].Name)
+		assert.Equal(t, "keep-masking", workflow.Config.Secrets[1].Value)
+		assert.Equal(t, "__WOODPECKER_READ_ONLY_NETRC__", workflow.Config.Secrets[2].Name)
+		assert.Equal(t, "dispatch-token", workflow.Config.Secrets[2].Value)
+		stripNetrc(workflow)
+		require.Len(t, workflow.Config.Secrets, 3)
 	})
 
 	t.Run("strips the approver token when expiry is too soon", func(t *testing.T) {
@@ -253,9 +267,6 @@ func assertNoNetrc(t *testing.T, workflow *rpc.Workflow) {
 			}
 		}
 	}
-	for _, secret := range workflow.Config.Secrets {
-		assert.NotEqual(t, "__WOODPECKER_READ_ONLY_NETRC__", secret.Name)
-	}
 }
 
 func TestRPCNextInjectsReadOnlyNetrc(t *testing.T) {
@@ -287,6 +298,9 @@ func TestRPCNextInjectsReadOnlyNetrc(t *testing.T) {
 	require.NotNil(t, workflow)
 	assert.Equal(t, int64(55), workflow.Timeout)
 	assert.Equal(t, "dispatch-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
+	require.Len(t, workflow.Config.Secrets, 1)
+	assert.Equal(t, "__WOODPECKER_READ_ONLY_NETRC__", workflow.Config.Secrets[0].Name)
+	assert.Equal(t, "dispatch-token", workflow.Config.Secrets[0].Value)
 }
 
 func TestRPCNextStripsNetrcOnFailures(t *testing.T) {

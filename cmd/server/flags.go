@@ -263,7 +263,7 @@ var flags = append([]cli.Flag{
 	&cli.StringSliceFlag{
 		Sources: cli.EnvVars("WOODPECKER_PLUGINS_TRUSTED_CLONE"),
 		Name:    "plugins-trusted-clone",
-		Usage:   "Images trusted to handle clone credentials; the compiler warns when a custom clone image is not listed",
+		Usage:   "Lint allowlist for clone images; unlisted images trigger a warning but do not block credential injection",
 		Value:   constant.TrustedClonePlugins,
 		Config: cli.StringConfig{
 			TrimSpace: true,

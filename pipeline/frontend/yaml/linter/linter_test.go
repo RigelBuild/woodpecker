@@ -349,3 +349,24 @@ func TestLintUntrustedCloneWarnsThatItMayReceiveReadOnlyNetrc(t *testing.T) {
 	}
 	assert.True(t, found, "expected an explicit warning about clone credential exposure")
 }
+
+func TestLintRejectsReservedNetrcEnvironment(t *testing.T) {
+	rawConfig := `when: [{event: push}]
+clone: {git: {image: alpine, environment: {CI_NETRC_MACHINE: github.com}}}
+steps: {build: {image: alpine, environment: {CI_NETRC_PASSWORD: local-secret}}}
+services: {db: {image: postgres, environment: {CI_NETRC_USERNAME: user}}}`
+	config, err := yaml.ParseString(rawConfig)
+	require.NoError(t, err)
+	err = linter.New().Lint([]*linter.WorkflowConfig{{File: "woodpecker.yml", RawConfig: rawConfig, Workflow: config}})
+	require.Error(t, err)
+	found := map[string]bool{}
+	for _, issue := range errors.GetPipelineErrors(err) {
+		for _, name := range []string{"CI_NETRC_MACHINE", "CI_NETRC_PASSWORD", "CI_NETRC_USERNAME"} {
+			if strings.Contains(issue.Message, name) {
+				found[name] = true
+				assert.False(t, issue.IsWarning)
+			}
+		}
+	}
+	assert.Len(t, found, 3, "expected linter errors for reserved names in clone, steps, and services")
+}

@@ -219,7 +219,6 @@ func stripNetrc(w *rpc.Workflow) {
 			}
 		}
 	}
-	pipeline.RemoveNetrcMask(w)
 }
 
 // Wait blocks until the workflow with the given ID is completed or got canceled.

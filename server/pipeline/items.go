@@ -45,7 +45,7 @@ func parsePipeline(ctx context.Context, forgeClient forge.Forge, store store.Sto
 		compileNetrc.Login = netrc.Login
 	}
 	var extensionNetrc *model.Netrc
-	if readOnlyNetrcer, ok := forgeClient.(forge.ReadOnlyNetrcer); ok && (repo.SecretExtensionNetrc || repo.RegistryExtensionNetrc) {
+	if readOnlyNetrcer, ok := forgeClient.(forge.ReadOnlyNetrcer); ok && (repo.SecretExtensionNetrc || repo.RegistryExtensionNetrc || server.Config.Pipeline.SecretExtensionNetrc || server.Config.Pipeline.RegistryExtensionNetrc) {
 		extensionNetrc, err = readOnlyNetrcer.ReadOnlyNetrc(ctx, repo)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to generate read-only netrc for pipeline extensions")

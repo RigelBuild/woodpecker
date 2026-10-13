@@ -45,9 +45,9 @@ Only server admins can set this option. If you are not a server admin this optio
 
 ## Custom trusted clone plugins
 
-During clone and pipeline steps, read-only Git credentials may be required. Woodpecker provides a short-lived credential for private repository access.
+For GitHub repositories with a configured GitHub App, Woodpecker can provide a short-lived, repository-scoped, read-only credential to clone and pipeline containers, including custom clone steps. Other forges and GitHub installations without an App do not receive this credential.
 
-The username and forge host are included at compile time. At dispatch, the server injects a repository-scoped, read-only password into every container, including custom clone steps, only when the token can outlast the workflow timeout by at least two minutes. If the token expires sooner or cannot be minted, the password is not injected and the compiled netrc username and host cannot authenticate.
+The username and forge host are included at compile time. At dispatch, the server injects the password only when its lifetime covers the workflow timeout plus two minutes. If the credential is withheld or cannot be minted, no `CI_NETRC_*` variables are set.
 
 Pipeline code can read the current repository while the token is available, but it cannot push changes or access other repositories. To push changes, provide a separate credential as a secret or use a dedicated plugin, such as [appleboy/drone-git-push](https://woodpecker-ci.org/plugins/git-push).
 

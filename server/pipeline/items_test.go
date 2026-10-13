@@ -183,6 +183,43 @@ func TestSaveWorkflowsRejectsExistingWithoutReplace(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParsePipelineGlobalExtensionNetrc(t *testing.T) {
+	previousSecret := server.Config.Pipeline.SecretExtensionNetrc
+	previousRegistry := server.Config.Pipeline.RegistryExtensionNetrc
+	server.Config.Pipeline.SecretExtensionNetrc = true
+	server.Config.Pipeline.RegistryExtensionNetrc = true
+	t.Cleanup(func() {
+		server.Config.Pipeline.SecretExtensionNetrc = previousSecret
+		server.Config.Pipeline.RegistryExtensionNetrc = previousRegistry
+	})
+	pipeline := &model.Pipeline{ID: 1, Event: model.EventPush}
+	user := &model.User{ID: 1}
+	repo := &model.Repo{ID: 1, Visibility: model.VisibilityPublic}
+	mockForge := forge_mocks.NewMockForge(t)
+	userNetrc := &model.Netrc{Login: "user-oauth-token", Password: "x-oauth-basic", Machine: "github.com", Type: model.ForgeTypeGithub}
+	extensionNetrc := &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "read-only-token"}
+	mockForge.On("Netrc", user, repo).Return(userNetrc, nil)
+	mockForge.On("Name").Return("github")
+	mockForge.On("URL").Return("https://github.com")
+	forgeClient := &readOnlyNetrcForge{Forge: mockForge, netrc: extensionNetrc}
+	store := store_mocks.NewMockStore(t)
+	store.On("GetPipelineLastBefore", repo, pipeline.Branch, pipeline.Number).Return(&model.Pipeline{}, nil)
+	secretService := secret_service_mocks.NewMockService(t)
+	secretService.On("SecretListPipeline", mock.Anything, repo, pipeline, extensionNetrc).Return([]*model.Secret{}, nil).Once()
+	registryService := registry_service_mocks.NewMockService(t)
+	registryService.On("RegistryListPipeline", mock.Anything, repo, pipeline, extensionNetrc).Return([]*model.Registry{}, nil).Once()
+	manager := manager_mocks.NewMockManager(t)
+	previousManager := server.Config.Services.Manager
+	server.Config.Services.Manager = manager
+	t.Cleanup(func() { server.Config.Services.Manager = previousManager })
+	manager.On("SecretServiceFromRepo", repo).Return(secretService)
+	manager.On("RegistryServiceFromRepo", repo).Return(registryService)
+	manager.On("EnvironmentService").Return(nil)
+	yaml := &forge_types.FileMeta{Name: "woodpecker.yml", Data: []byte("when:\n  - event: push\nsteps:\n  build:\n    image: alpine\n")}
+	_, err := parsePipeline(t.Context(), forgeClient, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil)
+	require.NoError(t, err)
+}
+
 func TestParsePipelineTrustedSecurityNoUserTokenForCustomClonePluginOrExtensions(t *testing.T) {
 	previousPlugins := server.Config.Pipeline.TrustedClonePlugins
 	server.Config.Pipeline.TrustedClonePlugins = []string{"custom/clone:latest"}
