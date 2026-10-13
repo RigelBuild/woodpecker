@@ -27,7 +27,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc/codes"
 	grpc_metadata "google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
@@ -581,18 +583,18 @@ func (s *RPC) RegisterAgent(ctx context.Context, info rpc.AgentInfo) (int64, err
 // UnregisterAgent removes the agent from the database.
 func (s *RPC) UnregisterAgent(ctx context.Context) error {
 	agent, err := s.getAgentFromContext(ctx)
-	if !agent.IsSystemAgent() {
-		// registered with individual agent token -> do not unregister
-		return nil
-	}
-	log.Debug().Msgf("un-registering agent with ID %d", agent.ID)
 	if err != nil {
 		return err
 	}
+	if !agent.IsSystemAgent() {
+		// Rows minted with an individual agent token are not deleted. Say so, so the agent
+		// does not log a deregistration that never happened.
+		log.Debug().Msgf("refusing to un-register agent with ID %d: individual agent token", agent.ID)
+		return status.Error(codes.PermissionDenied, "agent registered with an individual token cannot unregister")
+	}
+	log.Debug().Msgf("un-registering agent with ID %d", agent.ID)
 
-	err = s.store.AgentDelete(agent)
-
-	return err
+	return s.store.AgentDelete(agent)
 }
 
 func (s *RPC) ReportHealth(ctx context.Context, status string) error {

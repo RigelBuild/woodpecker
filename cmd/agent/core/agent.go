@@ -218,9 +218,12 @@ func run(ctx context.Context, c *cli.Command, backends []types.Backend) error {
 			if client.IsConnected() {
 				log.Debug().Msg("unregister agent from server ...")
 				err := client.UnregisterAgent(grpcClientCtx)
-				if err != nil {
+				switch {
+				case status.Code(err) == codes.PermissionDenied:
+					log.Info().Err(err).Msg("server kept agent registration: individual agent token")
+				case err != nil:
 					log.Err(err).Msg("failed to unregister agent from server")
-				} else {
+				default:
 					log.Info().Msg("agent unregistered from server")
 				}
 			} else {
