@@ -153,9 +153,34 @@ Most variables are available in both scopes. Variables scoped only to `runtime` 
 | `CI_FORGE_URL`                     | `config, runtime` | root URL of configured forge                                                                                                                     | `https://git.example.com`                                                                                                       |
 |                                    |                   | **Internal** - Please don't use!                                                                                                                 |                                                                                                                                 |
 | `CI_SCRIPT`                        | `runtime`         | Internal script path. Used to call pipeline step commands.                                                                                       |                                                                                                                                 |
-| `CI_NETRC_USERNAME`                | `runtime`         | Credentials for private repos to be able to clone data. (Only available for specific images)                                                     |                                                                                                                                 |
-| `CI_NETRC_PASSWORD`                | `runtime`         | Credentials for private repos to be able to clone data. (Only available for specific images)                                                     |                                                                                                                                 |
-| `CI_NETRC_MACHINE`                 | `runtime`         | Credentials for private repos to be able to clone data. (Only available for specific images)                                                     |                                                                                                                                 |
+| `CI_NETRC_USERNAME`                | `runtime`         | Reserved for server-managed GitHub App clone credentials; set only when the dispatch credential is eligible.                                     | `x-access-token`                                                                                                                |
+| `CI_NETRC_PASSWORD`                | `runtime`         | Short-lived, repository-scoped GitHub credential. If dispatch withholds credentials, no `CI_NETRC_*` variables are set.                          |                                                                                                                                 |
+| `CI_NETRC_MACHINE`                 | `runtime`         | Forge host for the server-managed clone credential.                                                                                              | `github.com`                                                                                                                    |
+|                                    |                   |                                                                                                                                                  |                                                                                                                                 |
+All `CI_NETRC_*` names are reserved for Woodpecker-managed clone credentials. Pipeline declarations using these names are rejected by the linter. For a local or unsupported-forge clone, use a clone plugin with a secret rather than setting these variables or passing a user OAuth token.
+[wp-fork/docs/versioned_docs/version-3.17/20-usage/75-project-settings.md#3FB9]
+PUT 48.=59:
+For GitHub repositories with a configured GitHub App, Woodpecker can provide a short-lived, repository-scoped, read-only credential to clone and pipeline containers, including custom clone steps. Other forges and GitHub installations without an App do not receive this credential.
+
+The username and forge host are included at compile time. At dispatch, the server injects the password only when its lifetime covers the workflow timeout plus two minutes. If the credential is withheld or cannot be minted, no `CI_NETRC_*` variables are set.
+
+Pipeline code can read the current repository while the token is available, but it cannot push changes or access other repositories. To push changes, provide a separate credential as a secret or use a dedicated plugin, such as [appleboy/drone-git-push](https://woodpecker-ci.org/plugins/git-push).
+[wp-fork/docs/versioned_docs/version-3.17/30-administration/10-configuration/10-server.md#AF4A]
+PUT 808.=813:
+### DEFAULT_PIPELINE_TIMEOUT
+
+- Name: `WOODPECKER_DEFAULT_PIPELINE_TIMEOUT`
+- Default: 60
+
+The default time for a repo in minutes before a pipeline gets killed.
+
+GitHub App clone credentials last about one hour, and Woodpecker requires them to outlive the workflow timeout by two minutes. Set the workflow timeout to 58 minutes or less to receive these credentials; the default 60-minute timeout is too long.
+[wp-fork/docs/versioned_docs/version-3.17/30-administration/10-configuration/10-server.md#AF4A]
+PUT 848.=849:
+This list is a lint allowlist. The linter warns when a custom clone image is not listed; the list does not restrict dispatch credential injection.
+[wp-fork/docs/versioned_docs/version-3.17/40-cli.md#003E]
+CUT 393.=397 @removed
+PUT 393.=397 @removed
 
 ## Global environment variables
 
