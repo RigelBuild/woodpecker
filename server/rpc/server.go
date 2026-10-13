@@ -199,6 +199,7 @@ func (s *WoodpeckerServer) RegisterAgent(c context.Context, req *proto.RegisterA
 		Backend:      agentInfo.GetBackend(),
 		Capacity:     int(agentInfo.GetCapacity()),
 		CustomLabels: agentInfo.GetCustomLabels(),
+		Hostname:     agentInfo.GetHostname(),
 	})
 	res.AgentId = agentID
 	return res, err

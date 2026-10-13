@@ -125,6 +125,7 @@ message AgentInfo {
   string backend  = 3;
   string version  = 4;
   map<string, string> customLabels = 5;
+  string hostname = 6;
 }
 
 message RegisterAgentRequest {

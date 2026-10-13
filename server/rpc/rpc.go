@@ -559,8 +559,9 @@ func (s *RPC) RegisterAgent(ctx context.Context, info rpc.AgentInfo) (int64, err
 	}
 
 	if agent.Name == "" {
-		if hostname, err := s.getHostnameFromContext(ctx); err == nil {
-			agent.Name = hostname
+		agent.Name = s.registrationHostname(ctx, info)
+		if agent.Name == "" {
+			log.Warn().Int64("agentID", agent.ID).Msg("agent registered without a hostname; its row stays nameless")
 		}
 	}
 
@@ -706,6 +707,16 @@ func (s *RPC) getAgentFromContext(ctx context.Context) (*model.Agent, error) {
 	}
 
 	return s.store.AgentFind(agentID)
+}
+
+// registrationHostname prefers the hostname in the request body; agents older
+// than proto field AgentInfo.hostname only send it as gRPC metadata.
+func (s *RPC) registrationHostname(ctx context.Context, info rpc.AgentInfo) string {
+	if info.Hostname != "" {
+		return info.Hostname
+	}
+	hostname, _ := s.getHostnameFromContext(ctx)
+	return hostname
 }
 
 func (s *RPC) getHostnameFromContext(ctx context.Context) (string, error) {
