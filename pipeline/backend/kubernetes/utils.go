@@ -29,7 +29,10 @@ import (
 	kube_client_cmd "k8s.io/client-go/tools/clientcmd"
 )
 
-const maxDNSLabelLen = 63
+const (
+	maxDNSLabelLen       = 63
+	internalLabelHashLen = 16
+)
 
 var (
 	dnsDisallowedCharacters = regexp.MustCompile(`[^-.a-z0-9]+`)
@@ -89,11 +92,15 @@ func truncateWithHash(s, original string, maxLen int, trimChars string) string {
 	return truncated + "-" + hashStr
 }
 
-func toLabelValue(in string) (string, error) {
+func normalizeLabelValue(in string) string {
 	res := strings.ToLower(in)
 	res = labelDisallowedChars.ReplaceAllString(res, "-")
 	res = labelSeparators.ReplaceAllString(res, "-")
-	res = strings.Trim(res, "-_.")
+	return strings.Trim(res, "-_.")
+}
+
+func toLabelValue(in string) (string, error) {
+	res := normalizeLabelValue(in)
 
 	if len(res) > validation.LabelValueMaxLength {
 		res = truncateWithHash(res, in, validation.LabelValueMaxLength, "-_.")
@@ -103,6 +110,31 @@ func toLabelValue(in string) (string, error) {
 		return "", ErrLabelInvalid
 	}
 
+	return res, nil
+}
+
+// toInternalLabelValue appends a hash of the original when normalization changes a value,
+// so e.g. "main_" or "Main" never yields "main". Admission policies match these values.
+func toInternalLabelValue(in string) (string, error) {
+	res, err := toLabelValue(in)
+	if err != nil || res == in {
+		return res, err
+	}
+
+	// toLabelValue already hashes values that needed truncation.
+	if len(normalizeLabelValue(in)) > validation.LabelValueMaxLength {
+		return res, nil
+	}
+
+	base := res
+	if base == "" {
+		base = "0"
+	}
+	maxLen := min(len(base)+1+internalLabelHashLen, validation.LabelValueMaxLength)
+	res = truncateWithHash(base, in, maxLen, "-_.")
+	if len(validation.IsValidLabelValue(res)) > 0 {
+		return "", ErrLabelInvalid
+	}
 	return res, nil
 }
 

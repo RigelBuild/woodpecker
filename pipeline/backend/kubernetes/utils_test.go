@@ -15,6 +15,8 @@
 package kubernetes
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -344,6 +346,60 @@ func TestToLabelValueTruncationUniqueness(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.NotEqual(t, got1, got2, "different long inputs should produce different truncated labels")
+}
+
+func TestToInternalLabelValue(t *testing.T) {
+	tests := []struct {
+		name       string
+		in         string
+		normalized string
+		want       string
+	}{
+		{name: "unchanged main", in: "main", normalized: "main", want: "main"},
+		{name: "unchanged event", in: "push", normalized: "push", want: "push"},
+		{name: "unchanged number", in: "2", normalized: "2", want: "2"},
+		{name: "unchanged repository", in: "octocat-hello-world", normalized: "octocat-hello-world", want: "octocat-hello-world"},
+		{name: "trailing underscore", in: "main_", normalized: "main"},
+		{name: "uppercase", in: "Main", normalized: "main"},
+		{name: "leading dash", in: "-main", normalized: "main"},
+		{name: "slash", in: "feature/x", normalized: "feature-x"},
+	}
+
+	outputs := make(map[string]string)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := toInternalLabelValue(tt.in)
+			assert.NoError(t, err)
+			assert.Empty(t, validation.IsValidLabelValue(got))
+			if tt.want != "" {
+				assert.Equal(t, tt.want, got)
+			} else {
+				assert.NotEqual(t, tt.normalized, got)
+				hash := sha256.Sum256([]byte(tt.in))
+				suffix := "-" + hex.EncodeToString(hash[:])[:16]
+				assert.True(t, strings.HasSuffix(got, suffix), "expected original-value hash suffix")
+			}
+			outputs[tt.in] = got
+		})
+	}
+
+	assert.NotEqual(t, outputs["main_"], outputs["Main"])
+	assert.NotEqual(t, outputs["main_"], outputs["-main"])
+	assert.NotEqual(t, outputs["Main"], outputs["-main"])
+	for i, first := range tests {
+		for _, second := range tests[i+1:] {
+			assert.NotEqual(t, outputs[first.in], outputs[second.in], "%q and %q should normalize to distinct internal labels", first.in, second.in)
+		}
+	}
+
+	long := strings.Repeat("a", 100)
+	want, err := toLabelValue(long)
+	assert.NoError(t, err)
+	got, err := toInternalLabelValue(long)
+	assert.NoError(t, err)
+	assert.Equal(t, want, got, "the existing truncation hash must not be appended twice")
+	assert.LessOrEqual(t, len(got), validation.LabelValueMaxLength)
+	assert.Empty(t, validation.IsValidLabelValue(got))
 }
 
 func TestGetHostnameOrEmpty(t *testing.T) {
