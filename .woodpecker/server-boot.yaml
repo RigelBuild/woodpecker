@@ -1,0 +1,27 @@
+# Builds the nix woodpecker-server and boots it (nix/server-boot-check.nix), so
+# a rev whose server compiles but cannot start fails here before it is pinned.
+labels:
+  backend: docker
+  platform: linux/amd64
+
+when:
+  - event: pull_request
+    path: &when_path
+      - '.woodpecker/server-boot.yaml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - '**/*.go'
+      - 'go.*'
+      - 'web/**'
+  - event: push
+    branch: ['${CI_REPO_DEFAULT_BRANCH}', rigel-release]
+    path: *when_path
+
+steps:
+  boot-check:
+    image: docker.io/nixos/nix:2.35.2
+    environment:
+      NIX_CONFIG: 'experimental-features = nix-command flakes'
+    commands:
+      - nix build .#checks.x86_64-linux.woodpecker-server-boot --no-link -L
