@@ -727,28 +727,27 @@ Example configuration to use a custom clone plugin:
 
 ### Git Submodules
 
-To use the credentials used to clone the repository to clone its submodules, update `.gitmodules` to use `https` instead of `git`:
+The read-only clone token is scoped only to the repository that triggered the workflow. It can clone private submodules from that repository, but not private submodules from other repositories. For a private submodule in another repository, use a custom clone plugin that accepts a token setting and provide a separate credential through a plugin secret:
 
-```diff
- [submodule "my-module"]
- path = my-module
--url = git@github.com:octocat/my-module.git
-+url = https://github.com/octocat/my-module.git
+```yaml
+clone:
+  - name: git
+    image: octocat/custom-git-plugin
+    settings:
+      token:
+        from_secret: submodule_token
 ```
 
-To use the ssh git url in `.gitmodules` for users cloning with ssh, and also use the https url in Woodpecker, add `submodule_override`:
+Use HTTPS submodule URLs in `.gitmodules`. To keep SSH URLs for local clones, override them in Woodpecker with `submodule_override`:
 
-```diff
- clone:
-   - name: git
-     image: woodpeckerci/plugin-git
-     settings:
-       recursive: true
-+      submodule_override:
-+        my-module: https://github.com/octocat/my-module.git
-
-steps:
-  ...
+```yaml
+clone:
+  - name: git
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: true
+      submodule_override:
+        my-module: https://github.com/octocat/my-module.git
 ```
 
 ## `skip_clone`

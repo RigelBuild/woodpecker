@@ -17,6 +17,7 @@ package pipeline
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -37,10 +38,14 @@ import (
 
 type readOnlyNetrcForge struct {
 	forge.Forge
-	netrc *model.Netrc
+	netrc         *model.Netrc
+	readOnlyNetrc func(context.Context, *model.Repo) (*model.Netrc, error)
 }
 
-func (f *readOnlyNetrcForge) ReadOnlyNetrc(context.Context, *model.Repo) (*model.Netrc, error) {
+func (f *readOnlyNetrcForge) ReadOnlyNetrc(ctx context.Context, repo *model.Repo) (*model.Netrc, error) {
+	if f.readOnlyNetrc != nil {
+		return f.readOnlyNetrc(ctx, repo)
+	}
 	return f.netrc, nil
 }
 
@@ -218,6 +223,60 @@ func TestParsePipelineGlobalExtensionNetrc(t *testing.T) {
 	yaml := &forge_types.FileMeta{Name: "woodpecker.yml", Data: []byte("when:\n  - event: push\nsteps:\n  build:\n    image: alpine\n")}
 	_, err := parsePipeline(t.Context(), forgeClient, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil)
 	require.NoError(t, err)
+}
+
+func TestParsePipelineExtensionNetrcMintTimeout(t *testing.T) {
+	previousSecret := server.Config.Pipeline.SecretExtensionNetrc
+	previousRegistry := server.Config.Pipeline.RegistryExtensionNetrc
+	previousTimeout := readOnlyNetrcMintTimeout
+	server.Config.Pipeline.SecretExtensionNetrc = true
+	server.Config.Pipeline.RegistryExtensionNetrc = false
+	readOnlyNetrcMintTimeout = 10 * time.Millisecond
+	t.Cleanup(func() {
+		server.Config.Pipeline.SecretExtensionNetrc = previousSecret
+		server.Config.Pipeline.RegistryExtensionNetrc = previousRegistry
+		readOnlyNetrcMintTimeout = previousTimeout
+	})
+
+	pipeline := &model.Pipeline{ID: 1, Event: model.EventPush}
+	user := &model.User{ID: 1}
+	repo := &model.Repo{ID: 1, Visibility: model.VisibilityPublic}
+	mockForge := forge_mocks.NewMockForge(t)
+	mockForge.On("Netrc", user, repo).Return(&model.Netrc{Machine: "github.com", Login: "x-access-token", Type: model.ForgeTypeGithub}, nil)
+	mockForge.On("Name").Return("github")
+	mockForge.On("URL").Return("https://github.com")
+	mintDone := make(chan error, 1)
+	forgeClient := &readOnlyNetrcForge{
+		Forge: mockForge,
+		readOnlyNetrc: func(ctx context.Context, _ *model.Repo) (*model.Netrc, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) > readOnlyNetrcMintTimeout {
+				mintDone <- context.Canceled
+				return nil, context.Canceled
+			}
+			<-ctx.Done()
+			mintDone <- ctx.Err()
+			return nil, ctx.Err()
+		},
+	}
+	store := store_mocks.NewMockStore(t)
+	store.On("GetPipelineLastBefore", repo, pipeline.Branch, pipeline.Number).Return(&model.Pipeline{}, nil)
+	secretService := secret_service_mocks.NewMockService(t)
+	secretService.On("SecretListPipeline", mock.Anything, repo, pipeline, (*model.Netrc)(nil)).Return([]*model.Secret{}, nil).Once()
+	registryService := registry_service_mocks.NewMockService(t)
+	registryService.On("RegistryListPipeline", mock.Anything, repo, pipeline, (*model.Netrc)(nil)).Return([]*model.Registry{}, nil).Once()
+	manager := manager_mocks.NewMockManager(t)
+	previousManager := server.Config.Services.Manager
+	server.Config.Services.Manager = manager
+	t.Cleanup(func() { server.Config.Services.Manager = previousManager })
+	manager.On("SecretServiceFromRepo", repo).Return(secretService)
+	manager.On("RegistryServiceFromRepo", repo).Return(registryService)
+	manager.On("EnvironmentService").Return(nil)
+
+	yaml := &forge_types.FileMeta{Name: "woodpecker.yml", Data: []byte("when:\n  - event: push\nsteps:\n  build:\n    image: alpine\n")}
+	_, err := parsePipeline(t.Context(), forgeClient, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil)
+	require.NoError(t, err)
+	require.ErrorIs(t, <-mintDone, context.DeadlineExceeded)
 }
 
 func TestParsePipelineTrustedSecurityNoUserTokenForCustomClonePluginOrExtensions(t *testing.T) {

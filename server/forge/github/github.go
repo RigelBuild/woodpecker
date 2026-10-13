@@ -421,7 +421,7 @@ func (c *client) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 // ReadOnlyNetrc mints a repository-scoped GitHub App token for one dispatch.
 func (c *client) ReadOnlyNetrc(ctx context.Context, repo *model.Repo) (*model.Netrc, error) {
 	if !c.appConfigured() {
-		return nil, errors.New("GitHub App credentials are required for read-only netrc")
+		return nil, errors.New("github app credentials are required for read-only netrc")
 	}
 	if repo == nil {
 		return nil, errors.New("repository is required for read-only netrc")
@@ -431,10 +431,10 @@ func (c *client) ReadOnlyNetrc(ctx context.Context, repo *model.Repo) (*model.Ne
 	}
 	repoID, err := strconv.ParseInt(string(repo.ForgeRemoteID), 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid GitHub repository ID %q: %w", repo.ForgeRemoteID, err)
+		return nil, fmt.Errorf("invalid github repository id %q: %w", repo.ForgeRemoteID, err)
 	}
 	if repoID <= 0 {
-		return nil, errors.New("repository ID must be positive")
+		return nil, errors.New("repository id must be positive")
 	}
 	host, err := common.ExtractHostFromCloneURL(repo.Clone)
 	if err != nil {
@@ -442,7 +442,7 @@ func (c *client) ReadOnlyNetrc(ctx context.Context, repo *model.Repo) (*model.Ne
 	}
 	appJWT, err := c.appJWT()
 	if err != nil {
-		return nil, fmt.Errorf("could not create GitHub App JWT: %w", err)
+		return nil, fmt.Errorf("could not create github app JWT: %w", err)
 	}
 	appClient, err := c.newClientTokenKind(ctx, appJWT, tokenKindApp)
 	if err != nil {
@@ -450,7 +450,7 @@ func (c *client) ReadOnlyNetrc(ctx context.Context, repo *model.Repo) (*model.Ne
 	}
 	installation, _, err := appClient.Apps.GetRepositoryInstallation(ctx, repo.Owner, repo.Name)
 	if err != nil {
-		return nil, fmt.Errorf("could not find GitHub App installation for %s/%s: %w", repo.Owner, repo.Name, err)
+		return nil, fmt.Errorf("could not find github app installation for %s/%s: %w", repo.Owner, repo.Name, err)
 	}
 	token, _, err := appClient.Apps.CreateInstallationToken(ctx, installation.GetID(), &github.InstallationTokenOptions{
 		RepositoryIDs: []int64{repoID},
@@ -460,7 +460,7 @@ func (c *client) ReadOnlyNetrc(ctx context.Context, repo *model.Repo) (*model.Ne
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("could not create read-only GitHub installation token for %s/%s: %w", repo.Owner, repo.Name, err)
+		return nil, fmt.Errorf("could not create read-only github installation token for %s/%s: %w", repo.Owner, repo.Name, err)
 	}
 
 	return &model.Netrc{

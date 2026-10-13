@@ -34,6 +34,8 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
+var readOnlyNetrcMintTimeout = forge.ReadOnlyNetrcMintTimeout
+
 func parsePipeline(ctx context.Context, forgeClient forge.Forge, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, forgeYamls []*forge_types.FileMeta, envs map[string]string) ([]*builder.Item, error) {
 	netrc, err := forgeClient.Netrc(user, repo)
 	if err != nil {
@@ -46,7 +48,9 @@ func parsePipeline(ctx context.Context, forgeClient forge.Forge, store store.Sto
 	}
 	var extensionNetrc *model.Netrc
 	if readOnlyNetrcer, ok := forgeClient.(forge.ReadOnlyNetrcer); ok && (repo.SecretExtensionNetrc || repo.RegistryExtensionNetrc || server.Config.Pipeline.SecretExtensionNetrc || server.Config.Pipeline.RegistryExtensionNetrc) {
-		extensionNetrc, err = readOnlyNetrcer.ReadOnlyNetrc(ctx, repo)
+		mintCtx, cancel := context.WithTimeout(ctx, readOnlyNetrcMintTimeout)
+		extensionNetrc, err = readOnlyNetrcer.ReadOnlyNetrc(mintCtx, repo)
+		cancel()
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to generate read-only netrc for pipeline extensions")
 			extensionNetrc = nil

@@ -182,7 +182,7 @@ func TestInjectNetrc(t *testing.T) {
 		setReadOnlyNetrcForge(t, repo, func(ctx context.Context, _ *model.Repo) (*model.Netrc, error) {
 			deadline, ok := ctx.Deadline()
 			require.True(t, ok)
-			assert.LessOrEqual(t, time.Until(deadline), readOnlyNetrcMintTimeout)
+			assert.LessOrEqual(t, time.Until(deadline), forge.ReadOnlyNetrcMintTimeout)
 			return nil, context.DeadlineExceeded
 		})
 		workflow := makeWorkflow()

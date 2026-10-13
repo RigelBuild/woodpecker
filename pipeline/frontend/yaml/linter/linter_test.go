@@ -211,7 +211,7 @@ func TestLintErrors(t *testing.T) {
 		},
 		{
 			from: "{steps: { build: { image: golang, settings: { test: 'true' } } }, when: { branch: main, event: push }, clone: { git: { image: some-other/plugin-git:v1.1.0 } } }",
-			want: "Specified clone image is not in the trusted allowlist and may receive dispatch-time read-only netrc credentials",
+			want: "Specified clone image is not in the clone-image lint allowlist and may receive dispatch-time read-only netrc credentials",
 		},
 		{
 			from: "steps: { build: { image: golang }, publish: { image: golang, depends_on: [ binary ] } }",

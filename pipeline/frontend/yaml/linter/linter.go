@@ -167,7 +167,7 @@ func (l *Linter) lintCloneSteps(config *WorkflowConfig) error {
 			linterErr = multierr.Append(
 				linterErr,
 				newLinterError(
-					"Specified clone image is not in the trusted allowlist and may receive dispatch-time read-only netrc credentials",
+					"Specified clone image is not in the clone-image lint allowlist and may receive dispatch-time read-only netrc credentials",
 					config.File, fmt.Sprintf("clone.%s", container.Name), true,
 				),
 			)

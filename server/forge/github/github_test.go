@@ -145,7 +145,7 @@ func TestReadOnlyNetrc(t *testing.T) {
 func TestReadOnlyNetrcRequiresConfiguredApp(t *testing.T) {
 	c := &client{}
 	_, err := c.ReadOnlyNetrc(t.Context(), fakeRepo)
-	assert.ErrorContains(t, err, "GitHub App")
+	assert.ErrorContains(t, err, "github app")
 }
 
 func TestReadOnlyNetrcRequiresValidRepository(t *testing.T) {
@@ -159,14 +159,14 @@ func TestReadOnlyNetrcRequiresValidRepository(t *testing.T) {
 			want: "repository is required",
 		},
 		{
-			name: "zero repository ID",
+			name: "zero repository id",
 			repo: &model.Repo{ForgeRemoteID: "0", Owner: "octocat", Name: "Hello-World", Clone: "https://github.com/octocat/Hello-World.git"},
-			want: "repository ID must be positive",
+			want: "repository id must be positive",
 		},
 		{
 			name: "invalid repository id",
 			repo: &model.Repo{ForgeRemoteID: "not-a-number", Owner: "octocat", Name: "Hello-World", Clone: "https://github.com/octocat/Hello-World.git"},
-			want: "invalid GitHub repository ID",
+			want: "invalid github repository id",
 		},
 		{
 			name: "invalid clone URL",

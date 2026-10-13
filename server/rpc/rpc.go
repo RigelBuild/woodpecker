@@ -43,10 +43,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
-const (
-	readOnlyNetrcMintTimeout  = 20 * time.Second
-	maxWorkflowTimeoutMinutes = (math.MaxInt64 - int64(2*time.Minute)) / int64(time.Minute)
-)
+const maxWorkflowTimeoutMinutes = (math.MaxInt64 - int64(2*time.Minute)) / int64(time.Minute)
 
 type ctxKey struct{}
 
@@ -152,15 +149,15 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 		return nil
 	}
 
-	_forge, err := server.Config.Services.Manager.ForgeFromRepo(repo)
+	forgeClient, err := server.Config.Services.Manager.ForgeFromRepo(repo)
 	if err != nil {
 		return fmt.Errorf("could not load forge for repo %s: %w", repo.FullName, err)
 	}
-	readOnlyNetrcer, ok := _forge.(forge.ReadOnlyNetrcer)
+	readOnlyNetrcer, ok := forgeClient.(forge.ReadOnlyNetrcer)
 	if !ok {
-		return fmt.Errorf("forge %q does not support read-only netrc", _forge.Name())
+		return fmt.Errorf("forge %q does not support read-only netrc", forgeClient.Name())
 	}
-	mintCtx, cancel := context.WithTimeout(ctx, readOnlyNetrcMintTimeout)
+	mintCtx, cancel := context.WithTimeout(ctx, forge.ReadOnlyNetrcMintTimeout)
 	defer cancel()
 	netrc, err := readOnlyNetrcer.ReadOnlyNetrc(mintCtx, repo)
 	if err != nil {

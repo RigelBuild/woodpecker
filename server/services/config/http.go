@@ -27,6 +27,8 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/services/utils"
 )
 
+var readOnlyNetrcMintTimeout = forge.ReadOnlyNetrcMintTimeout
+
 type httpService struct {
 	endpoint     string
 	client       *utils.Client
@@ -72,7 +74,9 @@ func (h *httpService) Fetch(ctx context.Context, forgeClient forge.Forge, user *
 		if !ok {
 			return nil, fmt.Errorf("forge does not support read-only netrc")
 		}
-		netrc, err := readOnlyNetrcer.ReadOnlyNetrc(ctx, repo)
+		mintCtx, cancel := context.WithTimeout(ctx, readOnlyNetrcMintTimeout)
+		netrc, err := readOnlyNetrcer.ReadOnlyNetrc(mintCtx, repo)
+		cancel()
 		if err != nil {
 			return nil, fmt.Errorf("could not get read-only netrc data from forge: %w", err)
 		}
