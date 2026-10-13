@@ -284,3 +284,31 @@ func TestBlockTilQueueHasRunningItemStopsWhenTheClientDisconnects(t *testing.T) 
 		t.Fatal("handler outlived its client: the long-poll has no cancellation bound and leaks a goroutine per hangup")
 	}
 }
+
+// A half-open peer never cancels the request context, so the ceiling is the
+// only thing that ends a long-poll on a queue that never drains.
+func TestBlockTilQueueHasRunningItemStopsAtTheCeiling(t *testing.T) {
+	orig := queueLongPollMaxDuration
+	queueLongPollMaxDuration = 300 * time.Millisecond
+	t.Cleanup(func() { queueLongPollMaxDuration = orig })
+
+	s := newTestStore(t)
+	q := installScheduler(t, s)
+	info := queue.InfoT{}
+	info.Stats.Running = 1
+	q.On("Info", mock.Anything).Return(info)
+
+	tc := newTestContext(t, s)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		BlockTilQueueHasRunningItem(tc.Ctx)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("long-poll outlived its ceiling with the request context still live")
+	}
+	assert.Equal(t, http.StatusRequestTimeout, tc.Ctx.Writer.Status())
+}

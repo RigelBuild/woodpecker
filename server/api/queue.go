@@ -52,6 +52,11 @@ const slowHandlerWriteExtension = 60 * time.Second
 // draining, not by the poll.
 const queuePollInterval = 100 * time.Millisecond
 
+// queueLongPollMaxDuration ends the queue long-poll when a half-open peer never
+// cancels the request and the queue never drains. The 408 tells the client to
+// poll again. A var so tests can shorten it; mutating tests must not be parallel.
+var queueLongPollMaxDuration = time.Hour
+
 // GetQueueInfo
 //
 //	@Summary		Get pipeline queue information
@@ -141,6 +146,7 @@ func ResumeQueue(c *gin.Context) {
 //	@Router		/queue/norunningpipelines [get]
 //	@Produce	plain
 //	@Success	204
+//	@Failure	408	{string}	string	"queue still running after the long-poll ceiling; poll again"
 //	@Tags		Pipeline queues
 //	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
 func BlockTilQueueHasRunningItem(c *gin.Context) {
@@ -151,10 +157,13 @@ func BlockTilQueueHasRunningItem(c *gin.Context) {
 	//
 	// Rolling the deadline removes the only bound this handler had, so it must
 	// supply its own: the loop writes nothing, so no write can ever trip the
-	// deadline and end it. The request context is the replacement — a client
-	// hang-up ends the wait immediately. Without it, every abandoned request
+	// deadline and end it. The request context is one replacement — a client
+	// hang-up ends the wait immediately. A half-open peer never cancels it, so
+	// queueLongPollMaxDuration is the other. Without both, an abandoned request
 	// would pin a goroutine and a 10 Hz poll on the scheduler lock until the
 	// process restarted.
+	ceiling := time.NewTimer(queueLongPollMaxDuration)
+	defer ceiling.Stop()
 	progress := slowHandlerProgress(c, newResponseController(c.Writer))
 	for {
 		// A canceled request ends the wait: there is nobody to send the 204 to.
@@ -169,6 +178,9 @@ func BlockTilQueueHasRunningItem(c *gin.Context) {
 
 		select {
 		case <-c.Request.Context().Done():
+			return
+		case <-ceiling.C:
+			c.Status(http.StatusRequestTimeout)
 			return
 		case <-time.After(queuePollInterval):
 		}
