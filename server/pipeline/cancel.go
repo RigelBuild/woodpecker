@@ -54,8 +54,8 @@ func Cancel(ctx context.Context, _forge forge.Forge, store store.Store, repo *mo
 
 	// Then update the DB status for pending workflows; running ones are set when
 	// their agents stop on the cancel signal. Finished steps keep their own
-	// Stopped time and pending ones get none, so step timestamps never show
-	// when a cancel happened, and Started == 0 on its killed steps is expected.
+	// Stopped time and the pending steps canceled here never get a Started
+	// time, so step timestamps never show when a cancel happened.
 	for _, workflow := range workflows {
 		if workflow.State == model.StatusPending {
 			if _, err = UpdateWorkflowToStatusSkipped(store, *workflow); err != nil {
