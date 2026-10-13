@@ -146,7 +146,8 @@ func ResumeQueue(c *gin.Context) {
 //	@Router		/queue/norunningpipelines [get]
 //	@Produce	plain
 //	@Success	204
-//	@Failure	503	{string}	string	"queue still running at the long-poll ceiling; poll again (Retry-After: 0)"
+//	@Failure	503	{string}	string		"queue still running at the long-poll ceiling; poll again (Retry-After: 0)"
+//	@Header		503	{string}	Retry-After	"0: poll again immediately"
 //	@Tags		Pipeline queues
 //	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
 func BlockTilQueueHasRunningItem(c *gin.Context) {
