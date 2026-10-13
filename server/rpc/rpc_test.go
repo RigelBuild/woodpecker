@@ -164,7 +164,12 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 		}
 
 		mockStore := store_mocks.NewMockStore(t)
-		mockStore.On("StepUpdate", mock.Anything).Return(nil)
+		mockStore.On("StepUpdate", mock.MatchedBy(func(s *model.Step) bool {
+			return s.ID == 3 && s.State == model.StatusKilled && s.Finished == 1234567900
+		})).Once().Return(nil)
+		mockStore.On("StepUpdate", mock.MatchedBy(func(s *model.Step) bool {
+			return s.ID == 4 && s.State == model.StatusCanceled && s.Finished == 0
+		})).Once().Return(nil)
 
 		s := RPC{store: mockStore}
 		s.completeChildrenIfParentCompleted(&workflow, 1234567900, true)
@@ -173,7 +178,7 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 		assert.Equal(t, int64(1234567900), interrupted.Finished)
 		assert.Equal(t, model.StatusCanceled, pending.State)
 		assert.Zero(t, pending.Finished)
-		mockStore.AssertNumberOfCalls(t, "StepUpdate", 2)
+		mockStore.AssertExpectations(t)
 	})
 }
 
