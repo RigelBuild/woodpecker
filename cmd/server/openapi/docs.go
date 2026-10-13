@@ -1826,8 +1826,8 @@ const docTemplate = `{
                     "204": {
                         "description": "No Content"
                     },
-                    "408": {
-                        "description": "queue still running after the long-poll ceiling; poll again",
+                    "503": {
+                        "description": "queue still running at the long-poll ceiling; poll again (Retry-After: 0)",
                         "schema": {
                             "type": "string"
                         }

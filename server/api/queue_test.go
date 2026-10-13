@@ -310,5 +310,7 @@ func TestBlockTilQueueHasRunningItemStopsAtTheCeiling(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("long-poll outlived its ceiling with the request context still live")
 	}
-	assert.Equal(t, http.StatusRequestTimeout, tc.Ctx.Writer.Status())
+	assert.Equal(t, http.StatusServiceUnavailable, tc.Recorder.Code)
+	assert.Equal(t, "0", tc.Recorder.Header().Get("Retry-After"))
+	assert.NotEmpty(t, tc.Recorder.Body.String())
 }

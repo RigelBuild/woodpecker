@@ -53,8 +53,8 @@ const slowHandlerWriteExtension = 60 * time.Second
 const queuePollInterval = 100 * time.Millisecond
 
 // queueLongPollMaxDuration ends the queue long-poll when a half-open peer never
-// cancels the request and the queue never drains. The 408 tells the client to
-// poll again. A var so tests can shorten it; mutating tests must not be parallel.
+// cancels the request and the queue never drains. The 503 with Retry-After: 0
+// tells the client to poll again. A var so tests can shorten it; mutating tests must not be parallel.
 var queueLongPollMaxDuration = time.Hour
 
 // GetQueueInfo
@@ -146,7 +146,7 @@ func ResumeQueue(c *gin.Context) {
 //	@Router		/queue/norunningpipelines [get]
 //	@Produce	plain
 //	@Success	204
-//	@Failure	408	{string}	string	"queue still running after the long-poll ceiling; poll again"
+//	@Failure	503	{string}	string	"queue still running at the long-poll ceiling; poll again (Retry-After: 0)"
 //	@Tags		Pipeline queues
 //	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
 func BlockTilQueueHasRunningItem(c *gin.Context) {
@@ -180,7 +180,8 @@ func BlockTilQueueHasRunningItem(c *gin.Context) {
 		case <-c.Request.Context().Done():
 			return
 		case <-ceiling.C:
-			c.Status(http.StatusRequestTimeout)
+			c.Header("Retry-After", "0")
+			c.String(http.StatusServiceUnavailable, "queue still running; poll again")
 			return
 		case <-time.After(queuePollInterval):
 		}
