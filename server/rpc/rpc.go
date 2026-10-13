@@ -634,8 +634,11 @@ func (s *RPC) finalizeRunningChild(step model.Step, finished int64, canceled boo
 	if !canceled {
 		return pipeline.UpdateStepToStatusSkipped(s.store, step, finished, model.StatusKilled)
 	}
-	step.State = model.StatusKilled
-	if step.Started != 0 {
+	// Match Cancel: a step that never started was canceled; one that started was interrupted.
+	if step.Started == 0 {
+		step.State = model.StatusCanceled
+	} else {
+		step.State = model.StatusKilled
 		step.Finished = finished
 	}
 	return &step, s.store.StepUpdate(&step)

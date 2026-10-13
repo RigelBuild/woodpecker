@@ -149,7 +149,7 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 		assert.Equal(t, model.StatusSuccess, result.State)
 	})
 
-	t.Run("When the workflow was canceled a still-running step is recorded as killed", func(t *testing.T) {
+	t.Run("When the workflow was canceled a running step is killed and a pending step canceled", func(t *testing.T) {
 		interrupted := &model.Step{
 			ID:      3,
 			State:   model.StatusRunning,
@@ -171,7 +171,8 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 
 		assert.Equal(t, model.StatusKilled, interrupted.State)
 		assert.Equal(t, int64(1234567900), interrupted.Finished)
-		assert.Equal(t, model.StatusKilled, pending.State)
+		assert.Equal(t, model.StatusCanceled, pending.State)
+		assert.Zero(t, pending.Finished)
 		mockStore.AssertNumberOfCalls(t, "StepUpdate", 2)
 	})
 }
