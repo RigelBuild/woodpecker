@@ -489,10 +489,8 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 	return running+ahead < task.ConcurrencyLimit
 }
 
-// taskOrderLess reports whether task a should dispatch before task b. Ordering
-// is by the Created timestamp (the pipeline creation time); within a second, the
-// task blocking more of its pipeline goes first, then the workflow name decides.
-// The task ID is intentionally not used for ordering.
+// taskOrderLess orders by pipeline Created time, then by tasks blocked (most first),
+// then by workflow name. The task ID is intentionally not used.
 func taskOrderLess(a, b *model.Task) bool {
 	if a.Created != b.Created {
 		return a.Created < b.Created
