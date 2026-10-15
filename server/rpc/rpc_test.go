@@ -478,7 +478,7 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 		mockStore.On("WorkflowUpdate", mock.Anything).Return(nil)
 
 		s := RPC{store: mockStore}
-		s.completeChildrenIfParentCompleted(&workflow, 1234567900)
+		s.completeChildrenIfParentCompleted(&workflow, 1234567900, false)
 
 		assert.Equal(t, model.StatusSuccess, runningService.State)
 		assert.Equal(t, int64(1234567900), runningService.Finished)
@@ -489,6 +489,38 @@ func TestCompleteChildrenIfParentCompleted(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, model.StatusSuccess, result.State)
+	})
+
+	t.Run("When the workflow was canceled a running step is killed and a pending step canceled", func(t *testing.T) {
+		interrupted := &model.Step{
+			ID:      3,
+			State:   model.StatusRunning,
+			Type:    model.StepTypeCommands,
+			Started: 1234567800,
+		}
+		pending := &model.Step{ID: 4, State: model.StatusPending, Type: model.StepTypeCommands}
+		workflow := model.Workflow{
+			ID:       8,
+			State:    model.StatusRunning,
+			Children: []*model.Step{interrupted, pending},
+		}
+
+		mockStore := store_mocks.NewMockStore(t)
+		mockStore.On("StepUpdate", mock.MatchedBy(func(s *model.Step) bool {
+			return s.ID == 3 && s.State == model.StatusKilled && s.Finished == 1234567900
+		})).Once().Return(nil)
+		mockStore.On("StepUpdate", mock.MatchedBy(func(s *model.Step) bool {
+			return s.ID == 4 && s.State == model.StatusCanceled && s.Finished == 0
+		})).Once().Return(nil)
+
+		s := RPC{store: mockStore}
+		s.completeChildrenIfParentCompleted(&workflow, 1234567900, true)
+
+		assert.Equal(t, model.StatusKilled, interrupted.State)
+		assert.Equal(t, int64(1234567900), interrupted.Finished)
+		assert.Equal(t, model.StatusCanceled, pending.State)
+		assert.Zero(t, pending.Finished)
+		mockStore.AssertExpectations(t)
 	})
 }
 

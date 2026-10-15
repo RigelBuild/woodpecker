@@ -517,7 +517,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 
 	// Complete any still-running children (e.g. service containers) before
 	// computing the workflow status, so their final state is reflected.
-	s.completeChildrenIfParentCompleted(workflow, state.Finished)
+	s.completeChildrenIfParentCompleted(workflow, state.Finished, state.Canceled)
 
 	if workflow, err = pipeline.UpdateWorkflowStatusToDone(s.store, *workflow, state); err != nil {
 		logger.Error().Err(err).Msgf("pipeline.UpdateWorkflowStatusToDone: cannot update workflow state: %s", err)
@@ -723,18 +723,37 @@ func (s *RPC) ReportHealth(ctx context.Context, status string) error {
 	return s.store.AgentUpdate(agent)
 }
 
-func (s *RPC) completeChildrenIfParentCompleted(completedWorkflow *model.Workflow, finished int64) {
+// completeChildrenIfParentCompleted finalizes children still running when their workflow is done.
+// Normally those are detached daemons, recorded as success; on a canceled workflow they were
+// interrupted, so they are recorded as killed.
+func (s *RPC) completeChildrenIfParentCompleted(completedWorkflow *model.Workflow, finished int64, canceled bool) {
 	for _, c := range completedWorkflow.Children {
-		if c.Running() {
-			if updated, err := pipeline.UpdateStepToStatusSkipped(s.store, *c, finished, model.StatusKilled); err != nil {
-				log.Error().Err(err).Msgf("done: cannot update step_id %d child state", c.ID)
-			} else {
-				// Update in-memory state so WorkflowStatus sees the final state
-				c.State = updated.State
-				c.Finished = updated.Finished
-			}
+		if !c.Running() {
+			continue
 		}
+		updated, err := s.finalizeRunningChild(*c, finished, canceled)
+		if err != nil {
+			log.Error().Err(err).Msgf("done: cannot update step_id %d child state", c.ID)
+			continue
+		}
+		// Update in-memory state so WorkflowStatus sees the final state
+		c.State = updated.State
+		c.Finished = updated.Finished
 	}
+}
+
+func (s *RPC) finalizeRunningChild(step model.Step, finished int64, canceled bool) (*model.Step, error) {
+	if !canceled {
+		return pipeline.UpdateStepToStatusSkipped(s.store, step, finished, model.StatusKilled)
+	}
+	// Match Cancel: a step that never started was canceled; one that started was interrupted.
+	if step.Started == 0 {
+		step.State = model.StatusCanceled
+	} else {
+		step.State = model.StatusKilled
+		step.Finished = finished
+	}
+	return &step, s.store.StepUpdate(&step)
 }
 
 func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow) {
