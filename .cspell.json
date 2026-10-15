@@ -291,6 +291,7 @@
     "CHANGELOG.md",
     "docs/versioned_docs/",
     "flake.nix",
+    "nix/**",
     "go.mod",
     "Makefile",
     "package.json",

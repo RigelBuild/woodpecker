@@ -124,6 +124,13 @@
           default = woodpecker-server;
         };
 
+        # Linux only: the check binds loopback ports, which the darwin sandbox restricts.
+        checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          woodpecker-server-boot = import ./nix/server-boot-check.nix {
+            inherit pkgs woodpecker-server;
+          };
+        };
+
         devShells.default =
           with pkgs;
           let
