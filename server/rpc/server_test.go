@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"go.woodpecker-ci.org/woodpecker/v3/rpc/proto"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -114,7 +116,7 @@ func TestServerUnregisterAgent(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("non-system agent is kept", func(t *testing.T) {
+	t.Run("non-system agent is kept and the refusal is reported", func(t *testing.T) {
 		t.Parallel()
 		store := store_mocks.NewMockStore(t)
 		// OwnerID set -> individual agent token -> must not be deleted
@@ -123,8 +125,19 @@ func TestServerUnregisterAgent(t *testing.T) {
 
 		srv := newTestServer(t, store)
 		_, err := srv.UnregisterAgent(ctxWithAgentID(9), new(proto.Empty))
-		require.NoError(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
 		store.AssertNotCalled(t, "AgentDelete", mock.Anything)
+	})
+
+	t.Run("lookup error is returned before the agent is used", func(t *testing.T) {
+		t.Parallel()
+		findErr := errors.New("find failed")
+		store := store_mocks.NewMockStore(t)
+		store.On("AgentFind", int64(9)).Return(nil, findErr)
+
+		srv := newTestServer(t, store)
+		_, err := srv.UnregisterAgent(ctxWithAgentID(9), new(proto.Empty))
+		assert.ErrorIs(t, err, findErr)
 	})
 
 	t.Run("propagates delete error", func(t *testing.T) {
