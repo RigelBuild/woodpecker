@@ -37,11 +37,22 @@ type secretsReplaceWriter struct {
 	pending          []byte
 	maskUntilNewline bool
 	boundarySteps    *int // Enables deterministic complexity checks in tests.
+	maxMatchRanges   *int // Enables deterministic range-count checks in tests.
 }
 
 func (w *secretsReplaceWriter) recordBoundaryStep() {
+	w.recordBoundarySteps(1)
+}
+
+func (w *secretsReplaceWriter) recordBoundarySteps(steps int) {
 	if w.boundarySteps != nil {
-		(*w.boundarySteps)++
+		*w.boundarySteps += steps
+	}
+}
+
+func (w *secretsReplaceWriter) recordMatchRanges(count int) {
+	if w.maxMatchRanges != nil {
+		*w.maxMatchRanges = max(*w.maxMatchRanges, count)
 	}
 }
 
@@ -179,14 +190,17 @@ func (w *secretsReplaceWriter) holdPendingLine(p, data []byte, holdStart int) (i
 	return len(p), nil
 }
 
-func (w *secretsReplaceWriter) findBoundary(data []byte) int {
-	holdStart := len(data)
+func (w *secretsReplaceWriter) matchRanges(p []byte) ([]secretMatch, int) {
+	holdStart := len(p)
 	var matches []secretMatch
 	for i, secret := range w.secrets {
 		matched := 0
-		for offset, b := range data {
+		var current secretMatch
+		hasCurrent := false
+		for offset, b := range p {
 			w.recordBoundaryStep()
 			for matched > 0 && b != secret[matched] {
+				w.recordBoundaryStep()
 				matched = w.prefixTables[i][matched-1]
 			}
 			if b == secret[matched] {
@@ -194,13 +208,25 @@ func (w *secretsReplaceWriter) findBoundary(data []byte) int {
 			}
 			if matched == len(secret) {
 				start := offset + 1 - len(secret)
-				matches = append(matches, secretMatch{start: start, end: offset + 1})
+				end := offset + 1
 				w.recordBoundaryStep()
+				if hasCurrent && start <= current.end {
+					current.end = max(current.end, end)
+				} else {
+					if hasCurrent {
+						matches = append(matches, current)
+					}
+					current = secretMatch{start: start, end: end}
+					hasCurrent = true
+				}
 				matched = w.prefixTables[i][matched-1]
 			}
 		}
 		if matched > 0 {
-			holdStart = min(holdStart, len(data)-matched)
+			holdStart = min(holdStart, len(p)-matched)
+		}
+		if hasCurrent {
+			matches = append(matches, current)
 		}
 	}
 
@@ -211,57 +237,42 @@ func (w *secretsReplaceWriter) findBoundary(data []byte) int {
 		}
 		return cmp.Compare(a.end, b.end)
 	})
-	for i := 0; i < len(matches); {
-		start, end := matches[i].start, matches[i].end
+	merged := matches[:0]
+	for _, match := range matches {
 		w.recordBoundaryStep()
-		i++
-		for i < len(matches) && matches[i].start < end {
-			w.recordBoundaryStep()
-			end = max(end, matches[i].end)
-			i++
+		if len(merged) > 0 && match.start <= merged[len(merged)-1].end {
+			merged[len(merged)-1].end = max(merged[len(merged)-1].end, match.end)
+			continue
 		}
-		if start < holdStart && holdStart < end {
-			holdStart = start
+		merged = append(merged, match)
+	}
+	w.recordMatchRanges(len(merged))
+	return merged, holdStart
+}
+
+func (w *secretsReplaceWriter) findBoundary(data []byte) int {
+	matches, holdStart := w.matchRanges(data)
+	for _, match := range matches {
+		w.recordBoundaryStep()
+		if match.start < holdStart && holdStart < match.end {
+			return match.start
 		}
 	}
 	return holdStart
 }
 
 func (w *secretsReplaceWriter) writeMasked(p []byte) error {
-	var matches []secretMatch
-	for _, secret := range w.secrets {
-		for offset := 0; offset <= len(p)-len(secret); {
-			match := bytes.Index(p[offset:], secret)
-			if match < 0 {
-				break
-			}
-			start := offset + match
-			matches = append(matches, secretMatch{start: start, end: start + len(secret)})
-			offset = start + 1
-		}
-	}
+	matches, _ := w.matchRanges(p)
 	if len(matches) == 0 {
 		return w.writeOutput(p)
 	}
-	slices.SortFunc(matches, func(a, b secretMatch) int {
-		if a.start != b.start {
-			return cmp.Compare(a.start, b.start)
-		}
-		return cmp.Compare(a.end, b.end)
-	})
 
 	out := make([]byte, 0, len(p))
 	cursor := 0
-	for i := 0; i < len(matches); {
-		start, end := matches[i].start, matches[i].end
-		i++
-		for i < len(matches) && matches[i].start <= end {
-			end = max(end, matches[i].end)
-			i++
-		}
-		out = append(out, p[cursor:start]...)
+	for _, match := range matches {
+		out = append(out, p[cursor:match.start]...)
 		out = append(out, secretsMask...)
-		cursor = end
+		cursor = match.end
 	}
 	out = append(out, p[cursor:]...)
 	return w.writeOutput(out)

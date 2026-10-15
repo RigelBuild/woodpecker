@@ -315,8 +315,39 @@ func TestSecretsReplaceWriterFindsLongCandidateSuffixQuickly(t *testing.T) {
 	_, err := writer.Write([]byte(strings.Repeat("a", 64*1024)))
 	assert.NoError(t, err)
 	assert.NoError(t, writer.Close())
-	assert.LessOrEqual(t, steps, 2*64*1024)
+	assert.LessOrEqual(t, steps, 3*64*1024)
 	assert.Equal(t, []string{strings.Repeat("a", 64*1024)}, dst.strings())
+}
+
+func TestSecretsReplaceWriterCoalescesLongPeriodicMatches(t *testing.T) {
+	input := []byte(strings.Repeat("ab", pipeline.MaxLogLineLength/2))
+	var dst writeRecorder
+	var steps, maxRanges int
+	writer := newSecretsReplaceWriter(&dst, []string{strings.Repeat("ab", 32)})
+	writer.boundarySteps = &steps
+	writer.maxMatchRanges = &maxRanges
+
+	err := writer.writeMasked(input)
+	assert.NoError(t, err)
+	assert.LessOrEqual(t, steps, 4*pipeline.MaxLogLineLength)
+	assert.Greater(t, steps, len(input))
+	assert.Equal(t, 1, maxRanges)
+	assert.Equal(t, []string{"********"}, dst.strings())
+}
+
+func TestSecretsReplaceWriterCoalescesShortOverlappingMatches(t *testing.T) {
+	input := []byte(strings.Repeat("0", pipeline.MaxLogLineLength))
+	var dst writeRecorder
+	var maxRanges int
+	writer := newSecretsReplaceWriter(&dst, nil)
+	writer.secrets = [][]byte{[]byte("00")}
+	writer.prefixTables = [][]int{prefixTable(writer.secrets[0])}
+	writer.maxMatchRanges = &maxRanges
+
+	err := writer.writeMasked(input)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, maxRanges)
+	assert.Equal(t, []string{"********"}, dst.strings())
 }
 
 func TestSecretsReplaceWriterPendingLimitFailsClosed(t *testing.T) {
