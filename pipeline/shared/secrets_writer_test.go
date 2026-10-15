@@ -332,6 +332,21 @@ func TestSecretsReplaceWriterPendingLimitFailsClosed(t *testing.T) {
 	})
 }
 
+func TestSecretsReplaceWriterStreamsOversizedLineWithCandidate(t *testing.T) {
+	chunk := strings.Repeat("x", pipeline.MaxLogLineLength-1) + "s"
+	var dst writeRecorder
+	w := NewSecretsReplaceWriter(&dst, []string{"secret"})
+	for range 3 {
+		_, err := w.Write([]byte(chunk))
+		assert.NoError(t, err)
+	}
+	assert.NoError(t, w.Close())
+	for _, p := range dst.writes {
+		assert.LessOrEqual(t, len(p), pipeline.MaxLogLineLength)
+	}
+	assert.True(t, bytes.Equal([]byte(strings.Repeat(chunk, 3)), bytes.Join(dst.writes, nil)))
+}
+
 func TestSecretsReplaceWriterPreservesTailWriteBoundaries(t *testing.T) {
 	var dst writeRecorder
 	w := NewSecretsReplaceWriter(&dst, []string{"secret"})

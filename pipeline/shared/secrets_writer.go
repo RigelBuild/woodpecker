@@ -174,9 +174,15 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 	}
 
 	if len(data) > pipeline.MaxLogLineLength {
-		// The incomplete line exceeds the bound; discard it until its newline.
-		w.maskUntilNewline = true
-		return len(p), nil
+		if len(data)-holdStart > pipeline.MaxLogLineLength {
+			// A candidate larger than the bound cannot be retained safely.
+			w.maskUntilNewline = true
+			return len(p), nil
+		}
+		if err := w.writeMasked(data[:holdStart]); err != nil {
+			return 0, err
+		}
+		data = data[holdStart:]
 	}
 
 	// Hold the entire unterminated part to preserve the downstream write frame.
