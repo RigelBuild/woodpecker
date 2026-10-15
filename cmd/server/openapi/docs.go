@@ -5855,6 +5855,10 @@ const docTemplate = `{
                 "agent_id": {
                     "type": "integer"
                 },
+                "blocked_count": {
+                    "description": "BlockedCount is the number of tasks in the same pipeline that transitively\ndepend on this one. It is set at push and breaks Created ties, highest first.",
+                    "type": "integer"
+                },
                 "concurrency_group": {
                     "description": "ConcurrencyGroup identifies tasks that are limited against each other.\nIt is empty when no concurrency limit applies.",
                     "type": "string"
@@ -6366,6 +6370,10 @@ const docTemplate = `{
                 },
                 "agent_name": {
                     "type": "string"
+                },
+                "blocked_count": {
+                    "description": "BlockedCount is the number of tasks in the same pipeline that transitively\ndepend on this one. It is set at push and breaks Created ties, highest first.",
+                    "type": "integer"
                 },
                 "concurrency_group": {
                     "description": "ConcurrencyGroup identifies tasks that are limited against each other.\nIt is empty when no concurrency limit applies.",

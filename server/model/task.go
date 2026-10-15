@@ -43,6 +43,9 @@ type Task struct {
 	// Created is the unix timestamp the task's pipeline was created at. It
 	// defines the queue ordering across pipelines.
 	Created int64 `json:"created" xorm:"NOT NULL DEFAULT 0 'created'"`
+	// BlockedCount is the number of tasks in the same pipeline that transitively
+	// depend on this one. It is set at push and breaks Created ties, highest first.
+	BlockedCount int `json:"blocked_count" xorm:"NOT NULL DEFAULT 0 'blocked_count'"`
 } //	@name	Task
 
 // TableName return database table name for xorm.

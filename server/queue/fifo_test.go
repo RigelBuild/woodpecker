@@ -869,8 +869,8 @@ func TestFifoConcurrency(t *testing.T) {
 		waitForProcess()
 	})
 
-	t.Run("task ordering uses Created with name tiebreak", func(t *testing.T) {
-		// earlier Created sorts first, regardless of ID.
+	t.Run("task ordering uses Created, blocked count, then name", func(t *testing.T) {
+		// Earlier Created sorts first, regardless of ID.
 		assert.True(t, taskOrderLess(
 			&model.Task{ID: "999", Created: 100},
 			&model.Task{ID: "1", Created: 200},
@@ -879,15 +879,18 @@ func TestFifoConcurrency(t *testing.T) {
 			&model.Task{ID: "1", Created: 200},
 			&model.Task{ID: "999", Created: 100},
 		))
-		// equal Created falls back to the workflow name, alphabetically.
-		assert.True(t, taskOrderLess(
-			&model.Task{ID: "2", Created: 100, Name: "alpha"},
-			&model.Task{ID: "1", Created: 100, Name: "beta"},
-		))
-		assert.False(t, taskOrderLess(
-			&model.Task{ID: "1", Created: 100, Name: "beta"},
-			&model.Task{ID: "2", Created: 100, Name: "alpha"},
-		))
+
+		// Higher blocked count wins even when its name sorts later and its ID is higher.
+		moreBlocked := &model.Task{ID: "2", Created: 100, Name: "zzz", BlockedCount: 5}
+		lessBlocked := &model.Task{ID: "1", Created: 100, Name: "aaa", BlockedCount: 0}
+		assert.True(t, taskOrderLess(moreBlocked, lessBlocked))
+		assert.False(t, taskOrderLess(lessBlocked, moreBlocked))
+
+		// Equal Created and blocked count use the workflow name alphabetically.
+		alpha := &model.Task{ID: "2", Created: 100, Name: "alpha", BlockedCount: 3}
+		beta := &model.Task{ID: "1", Created: 100, Name: "beta", BlockedCount: 3}
+		assert.True(t, taskOrderLess(alpha, beta))
+		assert.False(t, taskOrderLess(beta, alpha))
 	})
 }
 
@@ -1476,6 +1479,31 @@ func TestFifoFairDispatch(t *testing.T) {
 
 		// drain off the actually dispatched IDs so a regression ends as an
 		// assertion failure rather than hanging on an empty queue.
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"10", "20"}, []string{got.ID, got2.ID})
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("same-Created siblings dispatch by blocked count before name", func(t *testing.T) {
+		// The higher-ID task with more blocked descendants sorts before the lower-ID task.
+		zzz := &model.Task{ID: "20", PipelineID: 1, Created: 100, Name: "zzz", BlockedCount: 5}
+		aaa := &model.Task{ID: "10", PipelineID: 1, Created: 100, Name: "aaa", BlockedCount: 0}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{zzz, aaa}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got.ID, "higher blocked count dispatches first")
+
 		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
 		waitForProcess()
 		got2, err := q.Poll(ctx, 2, filterFnTrue)

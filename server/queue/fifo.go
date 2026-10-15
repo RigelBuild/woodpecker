@@ -361,12 +361,12 @@ func (q *fifo) assignToWorker() (*list.Element, *worker) {
 }
 
 // pushPending inserts a task into the pending list, keeping the list ordered by
-// taskOrderLess (creation time, then workflow name). The sort key is immutable
-// once a task is queued, so maintaining the order at insertion time is
-// equivalent to — and replaces — re-sorting the whole pending set on every
-// dispatch. Dispatch therefore walks the list directly, and a workflow whose
-// dependencies have cleared keeps its creation-order priority instead of being
-// overtaken by tasks from pipelines created later.
+// taskOrderLess (creation time, then blocked-descendant count, then workflow
+// name). The sort key is immutable once a task is queued, so maintaining the
+// order at insertion time is equivalent to — and replaces — re-sorting the whole
+// pending set on every dispatch. Dispatch therefore walks the list directly, and
+// a workflow whose dependencies have cleared keeps its creation-order priority
+// instead of being overtaken by tasks from pipelines created later.
 //
 // A task is inserted after the tasks it compares equal to, matching the
 // append-then-stable-sort order this replaces. Expects the queue to be locked
@@ -433,9 +433,8 @@ func (q *fifo) pushPendingFront(task *model.Task) {
 // violating its workflow concurrency limit. Tasks without a limit always pass,
 // keeping the default scheduling behavior unchanged.
 //
-// Slots within a concurrency group are granted in creation order (earliest
-// pipeline first, by the task's Created timestamp, with the workflow name as a
-// deterministic tiebreaker) rather than in the order tasks become ready. This
+// Slots within a concurrency group are granted in taskOrderLess order (earliest
+// pipeline first) rather than in the order tasks become ready. This
 // guarantees that a later pipeline whose dependencies happen to finish faster
 // cannot overtake an earlier one that is still waiting.
 //
@@ -494,13 +493,16 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 	return running+ahead < task.ConcurrencyLimit
 }
 
-// taskOrderLess reports whether task a was instantiated before task b. Ordering
-// is by the Created timestamp (the pipeline creation time), with the workflow
-// name as a deterministic tiebreaker for tasks created within the same second.
+// taskOrderLess reports whether task a should dispatch before task b. Ordering
+// is by the Created timestamp (the pipeline creation time); within a second, the
+// task blocking more of its pipeline goes first, then the workflow name decides.
 // The task ID is intentionally not used for ordering.
 func taskOrderLess(a, b *model.Task) bool {
 	if a.Created != b.Created {
 		return a.Created < b.Created
+	}
+	if a.BlockedCount != b.BlockedCount {
+		return a.BlockedCount > b.BlockedCount
 	}
 	return a.Name < b.Name
 }
