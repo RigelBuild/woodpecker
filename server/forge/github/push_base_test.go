@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v92/github"
 	github_mock "github.com/migueleliasweb/go-github-mock/src/mock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -96,7 +96,7 @@ func pushHookWithBefore(t *testing.T, before string) string {
 func pushBaseTestClient(t *testing.T) (*client, context.Context) {
 	t.Helper()
 
-	changedFile := []*github.CommitFile{{Filename: github.Ptr("main.go")}}
+	changedFile := []*github.CommitFile{{Filename: new("main.go")}}
 	mockedHTTPClient := github_mock.NewMockedHTTPClient(
 		github_mock.WithRequestMatchHandler(
 			github_mock.GetReposCommitsByOwnerByRepoByRef,
