@@ -1825,6 +1825,18 @@ const docTemplate = `{
                 "responses": {
                     "204": {
                         "description": "No Content"
+                    },
+                    "503": {
+                        "description": "queue still running at the long-poll ceiling; poll again (Retry-After: 0)",
+                        "schema": {
+                            "type": "string"
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "type": "string",
+                                "description": "0: poll again immediately"
+                            }
+                        }
                     }
                 }
             }
