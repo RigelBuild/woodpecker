@@ -47,6 +47,9 @@ func (r *Runner) createLogger(_logger zerolog.Logger, workflow *rpc.Workflow) lo
 		if err := pipeline_utils.CopyLineByLine(logStream, rc, pipeline.MaxLogLineLength); err != nil {
 			logger.Error().Err(err).Msg("copy limited logStream part")
 		}
+		if err := logStream.Close(); err != nil {
+			logger.Error().Err(err).Msg("flush masked logStream")
+		}
 
 		logger.Debug().Msg("log stream copied, close ...")
 		return nil

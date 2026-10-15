@@ -15,6 +15,7 @@
 package utils_test
 
 import (
+	"bytes"
 	"io"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/shared"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/utils"
 )
 
@@ -274,6 +277,20 @@ func TestCopyLineByLineLongLine(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for goroutine to finish")
 	}
+}
+
+func TestCopyLineByLineMasksSecretAtChunkBoundary(t *testing.T) {
+	secret := "cross-boundary-secret"
+	input := strings.Repeat("x", pipeline.MaxLogLineLength-1) + secret + "\n"
+
+	var output bytes.Buffer
+	masked := shared.NewSecretsReplaceWriter(&output, []string{secret})
+	err := utils.CopyLineByLine(masked, strings.NewReader(input), pipeline.MaxLogLineLength)
+	assert.NoError(t, err)
+	assert.NoError(t, masked.Close())
+
+	want := strings.Repeat("x", pipeline.MaxLogLineLength-1) + "********\n"
+	assert.Equal(t, want, output.String())
 }
 
 // TestCopyLineByLineWriteChunks is for the writeChunks function testing.

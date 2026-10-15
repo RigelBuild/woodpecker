@@ -17,6 +17,7 @@ package shared
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -98,9 +99,112 @@ func TestSecretsReplaceWriter(t *testing.T) {
 			n, err := w.Write([]byte(c.log))
 			assert.NoError(t, err)
 			assert.Equal(t, len(c.log), n)
+			assert.NoError(t, w.Close())
 			assert.Equal(t, c.expect, buf.String())
 		})
 	}
+}
+
+func TestSecretsReplaceWriterMasksOverlappingSecrets(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		writes []string
+	}{
+		{
+			name:   "overlapping suffix in one write",
+			writes: []string{"abcdef1234", "\n"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewSecretsReplaceWriter(&buf, []string{"abcdef1234", "1234zzzzzz"})
+
+			for _, part := range tc.writes {
+				_, err := w.Write([]byte(part))
+				assert.NoError(t, err)
+			}
+			assert.NoError(t, w.Close())
+			assert.Equal(t, "********\n", buf.String())
+		})
+	}
+}
+
+func TestSecretsReplaceWriterMasksOverlappingSecretsSplitAtEveryOffset(t *testing.T) {
+	secret := "abcdef1234"
+	for split := 1; split < len(secret); split++ {
+		t.Run(fmt.Sprintf("split at %d", split), func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewSecretsReplaceWriter(&buf, []string{secret, "1234zzzzzz"})
+
+			for _, part := range []string{secret[:split], secret[split:], "\n"} {
+				_, err := w.Write([]byte(part))
+				assert.NoError(t, err)
+			}
+			assert.NoError(t, w.Close())
+			assert.Equal(t, "********\n", buf.String())
+		})
+	}
+}
+
+func TestSecretsReplaceWriterMasksSplitSecrets(t *testing.T) {
+	secret := "supersecret"
+	for split := 1; split < len(secret); split++ {
+		t.Run(fmt.Sprintf("split at %d", split), func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewSecretsReplaceWriter(&buf, []string{secret})
+
+			_, err := w.Write([]byte(secret[:split]))
+			assert.NoError(t, err)
+			_, err = w.Write([]byte(secret[split:]))
+			assert.NoError(t, err)
+			assert.NoError(t, w.Close())
+			assert.Equal(t, "********", buf.String())
+		})
+	}
+}
+
+func TestSecretsReplaceWriterMasksSecretSplitAcrossThreeWrites(t *testing.T) {
+	secret := "supersecret"
+	for first := 1; first < len(secret)-1; first++ {
+		for second := first + 1; second < len(secret); second++ {
+			t.Run(fmt.Sprintf("splits at %d and %d", first, second), func(t *testing.T) {
+				var buf bytes.Buffer
+				w := NewSecretsReplaceWriter(&buf, []string{secret})
+
+				for _, part := range [][]byte{
+					[]byte(secret[:first]),
+					[]byte(secret[first:second]),
+					[]byte(secret[second:]),
+				} {
+					_, err := w.Write(part)
+					assert.NoError(t, err)
+				}
+				assert.NoError(t, w.Close())
+				assert.Equal(t, "********", buf.String())
+			})
+		}
+	}
+}
+
+func TestSecretsReplaceWriterMasksSecretAtClose(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewSecretsReplaceWriter(&buf, []string{"supersecret", "supersecret-longer"})
+
+	_, err := w.Write([]byte("token is supersecret"))
+	assert.NoError(t, err)
+	assert.Equal(t, "token is ", buf.String())
+	assert.NoError(t, w.Close())
+	assert.Equal(t, "token is ********", buf.String())
+}
+
+func TestSecretsReplaceWriterNoSecretsPassesThroughImmediately(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewSecretsReplaceWriter(&buf, []string{"secret"})
+
+	_, err := w.Write([]byte("plain data"))
+	assert.NoError(t, err)
+	assert.Equal(t, "plain data", buf.String())
+	assert.NoError(t, w.Close())
 }
 
 // TestSecretsReplaceWriterKeepsInput guards the io.Writer contract: masking
@@ -112,6 +216,7 @@ func TestSecretsReplaceWriterKeepsInput(t *testing.T) {
 	in := []byte("token is supersecret\n")
 	_, err := w.Write(in)
 	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
 	assert.Equal(t, "token is supersecret\n", string(in))
 	assert.Equal(t, "token is ********\n", buf.String())
 }
@@ -123,6 +228,7 @@ func TestSecretsReplaceWriterNoSecrets(t *testing.T) {
 	_, err := w.Write([]byte("plain\n"))
 	assert.NoError(t, err)
 	assert.Equal(t, "plain\n", buf.String())
+	assert.NoError(t, w.Close())
 }
 
 type errWriter struct{ err error }
@@ -136,4 +242,5 @@ func TestSecretsReplaceWriterPropagatesError(t *testing.T) {
 	n, err := w.Write([]byte("x"))
 	assert.ErrorIs(t, err, wantErr)
 	assert.Zero(t, n)
+	assert.NoError(t, w.Close())
 }
