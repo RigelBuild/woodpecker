@@ -63,7 +63,7 @@ func TestSecretsReplaceWriter(t *testing.T) {
 		name:    "longer secret wins even if it starts later",
 		log:     "xabcdefx\n",
 		secrets: []string{"xabc", "bcdef"},
-		expect:  "xa********x\n",
+		expect:  "********x\n",
 	}, {
 		name:    "secret with one newline",
 		log:     "start log\ndone\nnow\nan\nmulti line secret!! ;)",
@@ -205,6 +205,70 @@ func TestSecretsReplaceWriterNoSecretsPassesThroughImmediately(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "plain data", buf.String())
 	assert.NoError(t, w.Close())
+}
+
+func TestSecretsReplaceWriterMasksFullyPresentOverlappingSecrets(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewSecretsReplaceWriter(&buf, []string{"abcdef1234", "1234zzzzzz"})
+	_, err := w.Write([]byte("abcdef1234zzzzzz"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+	assert.Equal(t, "********", buf.String())
+}
+
+func TestSecretsReplaceWriterMasksShortSecretInsideLongSecretAcrossWrites(t *testing.T) {
+	secret := "xxsecret12345yy"
+	for split := 1; split < len(secret); split++ {
+		t.Run(fmt.Sprintf("split at %d", split), func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewSecretsReplaceWriter(&buf, []string{"secret12345", secret})
+			for _, part := range []string{secret[:split], secret[split:]} {
+				_, err := w.Write([]byte(part))
+				assert.NoError(t, err)
+			}
+			assert.NoError(t, w.Close())
+			assert.Equal(t, "********", buf.String())
+		})
+	}
+}
+
+func TestSecretsReplaceWriterChunksExpandedOutput(t *testing.T) {
+	var dst writeRecorder
+	w := NewSecretsReplaceWriter(&dst, []string{"abcd"})
+	_, err := w.Write([]byte("abcdabcdabcd"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+	for _, p := range dst.writes {
+		assert.LessOrEqual(t, len(p), len("abcdabcdabcd"))
+	}
+}
+
+func TestSecretsReplaceWriterPreservesTailWriteBoundaries(t *testing.T) {
+	var dst writeRecorder
+	w := NewSecretsReplaceWriter(&dst, []string{"secret"})
+	for _, part := range []string{"plain", "tail"} {
+		_, err := w.Write([]byte(part))
+		assert.NoError(t, err)
+	}
+	assert.NoError(t, w.Close())
+	assert.Equal(t, []string{"plain", "tail"}, dst.strings())
+}
+
+type writeRecorder struct {
+	writes [][]byte
+}
+
+func (w *writeRecorder) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, bytes.Clone(p))
+	return len(p), nil
+}
+
+func (w *writeRecorder) strings() []string {
+	result := make([]string, len(w.writes))
+	for i, p := range w.writes {
+		result[i] = string(p)
+	}
+	return result
 }
 
 // TestSecretsReplaceWriterKeepsInput guards the io.Writer contract: masking

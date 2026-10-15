@@ -20,6 +20,8 @@ import (
 	"io"
 	"slices"
 	"strings"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 )
 
 // Strings not longer than minSecretLength are not considered secrets.
@@ -29,11 +31,16 @@ const minSecretLength = 3
 var secretsMask = []byte("********")
 
 type secretsReplaceWriter struct {
-	dst          io.Writer
-	secrets      [][]byte
-	maxSecretLen int
-	maxWriteSize int
-	pending      []byte
+	dst              io.Writer
+	secrets          [][]byte
+	maxSecretLen     int
+	pending          []byte
+	maskUntilNewline bool
+}
+
+type secretMatch struct {
+	start int
+	end   int
 }
 
 // NewSecretsReplaceWriter wraps dst so that the given secret values are
@@ -52,8 +59,6 @@ func NewSecretsReplaceWriter(dst io.Writer, secrets []string) io.WriteCloser {
 			w.maxSecretLen = max(w.maxSecretLen, len(secretBytes))
 		}
 	}
-	// Secrets are replaced one after another, so mask the longest first.
-	// Else a secret that is part of a longer one would leak the rest of it.
 	slices.SortStableFunc(w.secrets, func(a, b []byte) int {
 		return cmp.Compare(len(b), len(a))
 	})
@@ -67,8 +72,26 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 		}
 		return len(p), nil
 	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if w.maskUntilNewline {
+		newline := bytes.IndexByte(p, '\n')
+		if newline < 0 {
+			return len(p), nil
+		}
+		if err := w.writeOutput(append(bytes.Clone(secretsMask), '\n')); err != nil {
+			return 0, err
+		}
+		w.maskUntilNewline = false
+		if newline+1 < len(p) {
+			if _, err := w.Write(p[newline+1:]); err != nil {
+				return 0, err
+			}
+		}
+		return len(p), nil
+	}
 
-	w.maxWriteSize = max(w.maxWriteSize, len(p))
 	data := p
 	if len(w.pending) > 0 {
 		data = make([]byte, len(w.pending)+len(p))
@@ -77,7 +100,7 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 	}
 	w.pending = nil
 
-	// A secret part cannot cross a newline, so complete lines can be flushed.
+	// A secret part cannot cross a newline, so completed lines can be flushed.
 	for {
 		newline := bytes.IndexByte(data, '\n')
 		if newline < 0 {
@@ -90,7 +113,6 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 		data = data[lineEnd:]
 	}
 
-	// Keep any suffix that could become a secret when the next write arrives.
 	holdStart := len(data)
 	for i := max(0, len(data)-(w.maxSecretLen-1)); i < len(data); i++ {
 		suffix := data[i:]
@@ -100,6 +122,8 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 			}
 		}
 	}
+
+	// Keep a complete match intact when a possible secret prefix overlaps it.
 	for {
 		previousHoldStart := holdStart
 		for _, secret := range w.secrets {
@@ -111,7 +135,7 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 				matchStart := offset + match
 				matchEnd := matchStart + len(secret)
 				if matchStart < holdStart && holdStart < matchEnd {
-					holdStart = matchEnd
+					holdStart = matchStart
 				}
 				offset = matchStart + 1
 			}
@@ -121,43 +145,99 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 		}
 	}
 
-	if holdStart < len(data) {
-		w.pending = bytes.Clone(data[holdStart:])
+	if holdStart == len(data) {
+		if err := w.writeMasked(data); err != nil {
+			return 0, err
+		}
+		return len(p), nil
 	}
+
+	maxPending := pipeline.MaxLogLineLength
+	if len(data)-holdStart > maxPending {
+		if holdStart > 0 {
+			if err := w.writeMasked(data[:holdStart]); err != nil {
+				return 0, err
+			}
+		}
+		w.maskUntilNewline = true
+		return len(p), nil
+	}
+
 	if holdStart > 0 {
 		if err := w.writeMasked(data[:holdStart]); err != nil {
 			return 0, err
 		}
 	}
+	w.pending = bytes.Clone(data[holdStart:])
 	return len(p), nil
 }
 
 func (w *secretsReplaceWriter) writeMasked(p []byte) error {
-	out := p
+	var matches []secretMatch
 	for _, secret := range w.secrets {
-		// Lines without a secret are passed on as is, without a copy.
-		if bytes.Contains(out, secret) {
-			out = bytes.ReplaceAll(out, secret, secretsMask)
+		for offset := 0; offset <= len(p)-len(secret); {
+			match := bytes.Index(p[offset:], secret)
+			if match < 0 {
+				break
+			}
+			start := offset + match
+			matches = append(matches, secretMatch{start: start, end: start + len(secret)})
+			offset = start + 1
 		}
 	}
-	if len(p) <= w.maxWriteSize || len(out) <= w.maxWriteSize {
-		_, err := w.dst.Write(out)
+	if len(matches) == 0 {
+		return w.writeOutput(p)
+	}
+	slices.SortFunc(matches, func(a, b secretMatch) int {
+		if a.start != b.start {
+			return cmp.Compare(a.start, b.start)
+		}
+		return cmp.Compare(a.end, b.end)
+	})
+
+	out := make([]byte, 0, len(p))
+	cursor := 0
+	for i := 0; i < len(matches); {
+		start, end := matches[i].start, matches[i].end
+		i++
+		for i < len(matches) && matches[i].start <= end {
+			end = max(end, matches[i].end)
+			i++
+		}
+		out = append(out, p[cursor:start]...)
+		out = append(out, secretsMask...)
+		cursor = end
+	}
+	out = append(out, p[cursor:]...)
+	return w.writeOutput(out)
+}
+
+func (w *secretsReplaceWriter) writeOutput(p []byte) error {
+	if len(p) == 0 {
+		return nil
+	}
+	if len(p) <= pipeline.MaxLogLineLength {
+		_, err := w.dst.Write(p)
 		return err
 	}
-	for len(out) > w.maxWriteSize {
-		if _, err := w.dst.Write(out[:w.maxWriteSize]); err != nil {
+	for len(p) > pipeline.MaxLogLineLength {
+		if _, err := w.dst.Write(p[:pipeline.MaxLogLineLength]); err != nil {
 			return err
 		}
-		out = out[w.maxWriteSize:]
+		p = p[pipeline.MaxLogLineLength:]
 	}
-	if len(out) > 0 {
-		_, err := w.dst.Write(out)
+	if len(p) > 0 {
+		_, err := w.dst.Write(p)
 		return err
 	}
 	return nil
 }
 
 func (w *secretsReplaceWriter) Close() error {
+	if w.maskUntilNewline {
+		w.maskUntilNewline = false
+		return w.writeOutput(secretsMask)
+	}
 	if len(w.pending) == 0 {
 		return nil
 	}
