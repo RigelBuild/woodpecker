@@ -50,7 +50,7 @@ func TestGatedPipeline(t *testing.T) {
 	require.Equal(t, model.StatusBlocked, created.Status, "untrusted author pipeline must be blocked")
 
 	// Approve as the repo owner, releasing the gate.
-	approved, err := pipeline.Approve(t.Context(), env.Store, created, env.Fixtures.Owner, env.Fixtures.Repo)
+	approved, err := pipeline.Approve(t.Context(), env.Store, created, env.Fixtures.Owner, env.Fixtures.Repo, &pipeline.Approval{Login: env.Fixtures.Owner.Login, Session: true})
 	require.NoError(t, err, "approve gated pipeline")
 	require.NotNil(t, approved)
 	assert.Equal(t, env.Fixtures.Owner.Login, approved.Reviewer, "reviewer should be the approver")

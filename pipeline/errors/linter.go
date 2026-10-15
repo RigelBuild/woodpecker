@@ -37,6 +37,10 @@ type BadHabitErrorData struct {
 	Docs  string `json:"docs"`
 }
 
+type ApprovalErrorData struct {
+	Name string `json:"name"`
+}
+
 func GetLinterData(e *PipelineError) *LinterErrorData {
 	if e.Type != PipelineErrorTypeLinter {
 		return nil

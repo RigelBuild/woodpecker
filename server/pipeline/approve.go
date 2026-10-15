@@ -21,6 +21,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/compiler"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -28,7 +30,7 @@ import (
 )
 
 // Approve update the status to pending for a blocked pipeline so it can be executed.
-func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo) (*model.Pipeline, error) {
+func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, approval *Approval) (*model.Pipeline, error) {
 	if currentPipeline.Status != model.StatusBlocked {
 		return nil, ErrBadRequest{Msg: fmt.Sprintf("cannot approve a pipeline with status %s", currentPipeline.Status)}
 	}
@@ -56,8 +58,18 @@ func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipe
 	// derives workflow and step state from the pipeline status, so the status
 	// must already be pending when the new workflows are persisted.
 	currentPipeline.Status = model.StatusPending
+	// Drop the approval errors from the blocked parse; this parse records its own.
+	currentPipeline.Errors = nil
 
-	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, currentPipeline, user, repo, yamls, nil, true)
+	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, currentPipeline, user, repo, yamls, nil, true, approval)
+	// An approval that cannot release a gated secret leaves the pipeline blocked.
+	if compiler.OnlyApprovalErrors(parseErr) {
+		currentPipeline.Errors = pipeline_errors.GetPipelineErrors(parseErr)
+		if err := blockForApproval(ctx, forge, store, currentPipeline, repo, user); err != nil {
+			return nil, fmt.Errorf("error re-blocking pipeline. %w", err)
+		}
+		return currentPipeline, nil
+	}
 	if handleParseErrors(currentPipeline, parseErr) {
 		if err := updatePipelineWithErr(ctx, forge, store, currentPipeline, repo, user, parseErr); err != nil {
 			log.Error().Err(err).Msgf("error setting error status of pipeline for %s#%d after approval", repo.FullName, currentPipeline.Number)

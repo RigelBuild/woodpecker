@@ -21,6 +21,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/compiler"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -102,7 +104,15 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		return nil, errors.New(msg)
 	}
 
-	newPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, newPipeline, user, repo, pipelineFiles, envs, false)
+	newPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, newPipeline, user, repo, pipelineFiles, envs, false, nil)
+	// A restart never releases a gated secret; it blocks until a fresh approval.
+	if compiler.OnlyApprovalErrors(parseErr) {
+		newPipeline.Errors = pipeline_errors.GetPipelineErrors(parseErr)
+		if err := blockForApproval(ctx, forge, store, newPipeline, repo, user); err != nil {
+			return nil, fmt.Errorf("failure to block restarted pipeline for approval: %w", err)
+		}
+		return newPipeline, nil
+	}
 	if handleParseErrors(newPipeline, parseErr) {
 		if newPipeline, uErr := UpdateToStatusError(store, *newPipeline, parseErr); uErr != nil {
 			log.Error().Err(uErr).Msgf("error setting error status of pipeline for %s#%d", repo.FullName, newPipeline.Number)
@@ -153,5 +163,8 @@ func createNewOutOfOld(old *model.Pipeline) *model.Pipeline {
 	newPipeline.Started = 0
 	newPipeline.Finished = 0
 	newPipeline.Errors = nil
+	// The old approval must not carry over: a restart has to be approved again.
+	newPipeline.Reviewer = ""
+	newPipeline.Reviewed = 0
 	return &newPipeline
 }

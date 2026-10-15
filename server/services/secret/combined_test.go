@@ -81,6 +81,18 @@ func TestCombinedSecretListPipeline(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:     "Extension cannot shadow a gated secret",
+			repoName: "override-test",
+			dbSecrets: []*model.Secret{
+				{ID: 1, RepoID: 1, Name: "shared", Value: "db-value", RequireApproval: true},
+			},
+			expected: []*model.Secret{
+				{Name: "shared", Value: "external-value", RequireApproval: true},
+				{Name: "ext-only", Value: "only-in-ext"},
+			},
+			wantErr: false,
+		},
 	}
 
 	pubEd25519Key, privEd25519Key, err := ed25519.GenerateKey(rand.Reader)

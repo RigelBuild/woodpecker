@@ -1,0 +1,71 @@
+// Copyright 2026 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package pipeline
+
+import (
+	"context"
+	"slices"
+	"strings"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+)
+
+const trunkMergeBranchPrefix = "trunk-merge/"
+
+// Approval is an explicit approval of a blocked pipeline. Only Approve builds one;
+// Create and Restart pass nil, so their runs never receive a gated secret.
+type Approval struct {
+	Login string
+	// Session is true only for a CSRF-checked browser session, never an API token.
+	Session bool
+}
+
+// secretReleased reports whether an approval releases gated secrets. An empty
+// approver list, a nil approval or a non-session approval releases nothing.
+func secretReleased(a *Approval, approvers []string) bool {
+	if a == nil || !a.Session || a.Login == "" {
+		return false
+	}
+	return slices.Contains(approvers, a.Login)
+}
+
+// isTrunkMergeRun reports whether the pipeline runs on a merge-queue branch, where
+// PR-controlled config runs and gated secrets must never be released.
+func isTrunkMergeRun(p *model.Pipeline) bool {
+	return strings.HasPrefix(p.Branch, trunkMergeBranchPrefix) ||
+		strings.HasPrefix(strings.TrimPrefix(p.Ref, "refs/heads/"), trunkMergeBranchPrefix)
+}
+
+// secretBranchAllowed applies a secret's branch filter. Pull request runs are left
+// to the event filter, as the branch there is the PR target, not the code's source.
+func secretBranchAllowed(sec *model.Secret, p *model.Pipeline) bool {
+	if len(sec.Branches) == 0 || p.IsPullRequest() {
+		return true
+	}
+	return slices.Contains(sec.Branches, p.Branch)
+}
+
+// blockForApproval parks a pipeline whose only blocking errors are withheld
+// secrets, so an approver can release it through Approve.
+func blockForApproval(ctx context.Context, forge forge.Forge, store store.Store, pipeline *model.Pipeline, repo *model.Repo, user *model.User) error {
+	pipeline.Status = model.StatusBlocked
+	if err := store.UpdatePipeline(pipeline); err != nil {
+		return err
+	}
+	publishPipeline(ctx, forge, store, pipeline, repo, user)
+	return nil
+}

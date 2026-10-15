@@ -67,6 +67,16 @@ func WithSecret(secrets ...Secret) Option {
 	}
 }
 
+// WithWithheldSecrets names gated secrets the server held back. A step that
+// requests one gets ErrSecretWithheld, which blocks the pipeline for approval.
+func WithWithheldSecrets(names ...string) Option {
+	return func(compiler *Compiler) {
+		for _, name := range names {
+			compiler.withheldSecrets[strings.ToLower(name)] = name
+		}
+	}
+}
+
 // WithMetadata configures the compiler with the repository, pipeline
 // and system metadata. The metadata is used to remove steps from
 // the compiled pipeline configuration that should be skipped. The

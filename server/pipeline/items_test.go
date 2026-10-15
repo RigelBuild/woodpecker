@@ -221,7 +221,7 @@ func TestParsePipelineGlobalExtensionNetrc(t *testing.T) {
 	manager.On("RegistryServiceFromRepo", repo).Return(registryService)
 	manager.On("EnvironmentService").Return(nil)
 	yaml := &forge_types.FileMeta{Name: "woodpecker.yml", Data: []byte("when:\n  - event: push\nsteps:\n  build:\n    image: alpine\n")}
-	_, err := parsePipeline(t.Context(), forgeClient, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil)
+	_, err := parsePipeline(t.Context(), forgeClient, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil, nil)
 	require.NoError(t, err)
 }
 
@@ -274,7 +274,7 @@ func TestParsePipelineExtensionNetrcMintTimeout(t *testing.T) {
 	manager.On("EnvironmentService").Return(nil)
 
 	yaml := &forge_types.FileMeta{Name: "woodpecker.yml", Data: []byte("when:\n  - event: push\nsteps:\n  build:\n    image: alpine\n")}
-	_, err := parsePipeline(t.Context(), forgeClient, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil)
+	_, err := parsePipeline(t.Context(), forgeClient, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil, nil)
 	require.NoError(t, err)
 	require.ErrorIs(t, <-mintDone, context.DeadlineExceeded)
 }
@@ -326,7 +326,7 @@ steps:
     settings:
       token: plugin-token
 `)}
-	items, err := parsePipeline(t.Context(), forge, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil)
+	items, err := parsePipeline(t.Context(), forge, store, pipeline, user, repo, []*forge_types.FileMeta{yaml}, nil, nil)
 	require.NoError(t, err)
 	var sawClone, sawPlugin bool
 	for _, stage := range items[0].Config.Stages {
@@ -420,7 +420,7 @@ steps:
 
 	mockManager.On("EnvironmentService").Return(nil, nil)
 
-	pipelineItems, err := parsePipeline(t.Context(), forge, store, pipeline, user, repo, yamls, envs)
+	pipelineItems, err := parsePipeline(t.Context(), forge, store, pipeline, user, repo, yamls, envs, nil)
 	assert.NoError(t, err)
 
 	assert.Len(t, pipelineItems, 1)

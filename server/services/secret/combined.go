@@ -53,14 +53,26 @@ func (c *combined) SecretListPipeline(ctx context.Context, repo *model.Repo, pip
 		return baseSecrets, nil
 	}
 
-	// Merge secrets, with extension secrets taking priority (no duplicates by name)
-	exists := make(map[string]struct{}, len(extensionSecrets))
-	for _, s := range extensionSecrets {
-		exists[s.Name] = struct{}{}
+	// Merge secrets, with extension secrets taking priority (no duplicates by name).
+	// An extension can replace a gated row's value but never its gate.
+	gated := make(map[string]struct{}, len(baseSecrets))
+	for _, s := range baseSecrets {
+		if s.RequireApproval {
+			gated[s.Name] = struct{}{}
+		}
 	}
 
+	exists := make(map[string]struct{}, len(extensionSecrets))
 	merged := make([]*model.Secret, 0, len(baseSecrets)+len(extensionSecrets))
-	merged = append(merged, extensionSecrets...)
+	for _, s := range extensionSecrets {
+		exists[s.Name] = struct{}{}
+		if _, ok := gated[s.Name]; ok && !s.RequireApproval {
+			shadow := *s
+			shadow.RequireApproval = true
+			s = &shadow
+		}
+		merged = append(merged, s)
+	}
 
 	for _, s := range baseSecrets {
 		if _, ok := exists[s.Name]; ok {
