@@ -19,9 +19,17 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
+
+// versionedSecret maps only the columns this test needs: old fixture rows hold
+// legacy encodings in other columns that the current model cannot decode.
+type versionedSecret struct {
+	ID      int64  `xorm:"pk autoincr 'id'"`
+	Name    string `xorm:"name"`
+	Version int64  `xorm:"version 'version'"`
+}
+
+func (versionedSecret) TableName() string { return "secrets" }
 
 // TestMigrateGivesOldSecretsAUsableVersion migrates a database whose secret rows
 // predate the version column. Every old row must get a non-zero version, so the
@@ -32,7 +40,7 @@ func TestMigrateGivesOldSecretsAUsableVersion(t *testing.T) {
 
 	require.NoError(t, Migrate(t.Context(), engine, true))
 
-	var secrets []*model.Secret
+	var secrets []*versionedSecret
 	require.NoError(t, engine.Find(&secrets))
 	require.NotEmpty(t, secrets, "the fixture must carry secret rows from before the column existed")
 	for _, s := range secrets {
@@ -41,13 +49,13 @@ func TestMigrateGivesOldSecretsAUsableVersion(t *testing.T) {
 
 	first := secrets[0]
 	stale := *first
-	first.Note = "fresh write"
-	affected, err := engine.ID(first.ID).AllCols().Update(first)
+	first.Name += "-fresh"
+	affected, err := engine.ID(first.ID).Cols("name").Update(first)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, affected, "a write from the current row must land")
 
-	stale.Note = "stale write"
-	affected, err = engine.ID(stale.ID).AllCols().Update(&stale)
+	stale.Name += "-stale"
+	affected, err = engine.ID(stale.ID).Cols("name").Update(&stale)
 	require.NoError(t, err)
 	assert.Zero(t, affected, "a write from a stale read must affect no row")
 }
