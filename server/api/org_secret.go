@@ -158,7 +158,7 @@ func PatchOrgSecret(c *gin.Context) {
 	}
 
 	if err := secretService.OrgSecretUpdate(org.ID, secret); err != nil {
-		c.String(http.StatusInternalServerError, "Error updating org %q secret %q. %s", org.ID, in.Name, err)
+		writeSecretUpdateErr(c, secret.Name, err)
 		return
 	}
 	c.JSON(http.StatusOK, secret.Copy())

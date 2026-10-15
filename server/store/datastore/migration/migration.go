@@ -61,6 +61,7 @@ var migrationTasks = []*xormigrate.Migration{
 	&deduplicateLogEntries,
 	&addWorkflowOnMetadataEdit,
 	&addSecretApprovalAndBranches,
+	&addSecretVersion,
 }
 
 var allBeans = []any{

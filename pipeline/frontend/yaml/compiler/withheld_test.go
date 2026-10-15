@@ -67,17 +67,24 @@ func TestCompilerWithheldSecretBlocksForApproval(t *testing.T) {
 func TestCompilerWithheldSecretNeverReachesConfigSecrets(t *testing.T) {
 	t.Parallel()
 
+	// The same secret goes through both options so only the mask loop's exclusion
+	// keeps its value out of config.Secrets.
 	compiler := New(
 		WithMetadata(metadata.Metadata{Curr: metadata.Pipeline{Event: metadata.EventPush}}),
-		WithSecret(Secret{Name: "OTHER", Value: "other-value"}),
+		WithSecret(
+			Secret{Name: "OTHER", Value: "other-value"},
+			Secret{Name: "PULUMI_GATED_ACCESS_TOKEN", Value: "gated-value"},
+		),
 		WithWithheldSecrets("PULUMI_GATED_ACCESS_TOKEN"),
 		WithPrefix("test"),
 	)
 
 	conf, err := compiler.Compile(withheldWorkflow("OTHER"))
 	require.NoError(t, err)
+	require.NotEmpty(t, conf.Secrets)
 	for _, sec := range conf.Secrets {
 		assert.NotEqual(t, "PULUMI_GATED_ACCESS_TOKEN", sec.Name)
+		assert.NotEqual(t, "gated-value", sec.Value)
 	}
 }
 

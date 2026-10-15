@@ -15,8 +15,13 @@
 package pipeline
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -31,7 +36,9 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	manager_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/mocks"
 	registry_service_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/registry/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/server/services/secret"
 	secret_service_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/secret/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/server/services/utils"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
 
@@ -67,6 +74,13 @@ func TestSecretReleased(t *testing.T) {
 
 func parseWithSecrets(t *testing.T, pipeline *model.Pipeline, secs []*model.Secret, secErr error, approval *Approval, yaml string) ([]*builder.Item, error) {
 	t.Helper()
+	secretService := secret_service_mocks.NewMockService(t)
+	secretService.On("SecretListPipeline", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(secs, secErr)
+	return parseWithService(t, pipeline, secretService, approval, yaml)
+}
+
+func parseWithService(t *testing.T, pipeline *model.Pipeline, secretService secret.Service, approval *Approval, yaml string) ([]*builder.Item, error) {
+	t.Helper()
 
 	user := &model.User{ID: 1, Login: "test-owner"}
 	repo := &model.Repo{ID: 1, Visibility: model.VisibilityPrivate}
@@ -84,16 +98,23 @@ func parseWithSecrets(t *testing.T, pipeline *model.Pipeline, secs []*model.Secr
 	server.Config.Services.Manager = manager
 	t.Cleanup(func() { server.Config.Services.Manager = previousManager })
 
-	secretService := secret_service_mocks.NewMockService(t)
-	secretService.On("SecretListPipeline", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(secs, secErr)
 	manager.On("SecretServiceFromRepo", mock.Anything).Return(secretService)
 	registryService := registry_service_mocks.NewMockService(t)
 	registryService.On("RegistryListPipeline", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]*model.Registry{}, nil).Maybe()
 	manager.On("RegistryServiceFromRepo", mock.Anything).Return(registryService).Maybe()
 	manager.On("EnvironmentService").Return(nil).Maybe()
 
-	return parsePipeline(t.Context(), forge, store, pipeline, user, repo,
-		[]*forge_types.FileMeta{{Name: "woodpecker.yml", Data: []byte(yaml)}}, nil, approval)
+	return parsePipeline(
+		t.Context(),
+		forge,
+		store,
+		pipeline,
+		user,
+		repo,
+		[]*forge_types.FileMeta{{Name: "woodpecker.yml", Data: []byte(yaml)}},
+		nil,
+		approval,
+	)
 }
 
 func useApprovers(t *testing.T, approvers ...string) {
@@ -209,18 +230,82 @@ func TestParsePipelineWithheldValueNeverReachesConfigSecrets(t *testing.T) {
 	assert.NotContains(t, names, gatedSecretName)
 }
 
-func TestParsePipelineTrunkMergeRefWithholdsEvenWhenApproved(t *testing.T) {
+// A merge-queue run can never release a gated secret, so it fails like a filter
+// mismatch rather than blocking forever on an approval that cannot help.
+func TestParsePipelineTrunkMergeRunDropsGatedSecret(t *testing.T) {
 	useApprovers(t, "test-owner")
 
 	for _, p := range []*model.Pipeline{
 		{ID: 1, Event: model.EventPush, Branch: "trunk-merge/main/1", Ref: "refs/heads/trunk-merge/main/1"},
 		{ID: 1, Event: model.EventPush, Branch: "main", Ref: "refs/heads/trunk-merge/main/1"},
+		// GitHub sets Branch to the base and Ref to the PR ref; only Refspec names the head.
+		{ID: 1, Event: model.EventPull, Branch: "main", Ref: "refs/pull/5/head", Refspec: "trunk-merge/main/5:main"},
 	} {
-		t.Run(p.Branch+" "+p.Ref, func(t *testing.T) {
-			items, err := parseWithSecrets(t, p, []*model.Secret{gatedSecret()}, nil,
-				&Approval{Login: "test-owner", Session: true}, requestingYAML(gatedSecretName))
-			assertApprovalError(t, err)
-			assertNoSecretValue(t, items, gatedSecretValue)
+		for _, approval := range []*Approval{nil, {Login: "test-owner", Session: true}} {
+			t.Run(p.Branch+" "+p.Ref+" "+p.Refspec, func(t *testing.T) {
+				items, err := parseWithSecrets(
+					t,
+					p,
+					[]*model.Secret{gatedSecret()},
+					nil,
+					approval,
+					requestingYAML(gatedSecretName),
+				)
+				require.Error(t, err)
+				assert.False(t, compiler.OnlyApprovalErrors(err), "a merge-queue run must not block for approval")
+				assertNoSecretValue(t, items, gatedSecretValue)
+			})
+		}
+	}
+}
+
+// A gated secret the run's event may not use is dropped, not reported as withheld.
+func TestParsePipelineGatedSecretEventMismatchDoesNotBlock(t *testing.T) {
+	useApprovers(t, "test-owner")
+	pushOnly := gatedSecret()
+	pushOnly.Events = []model.WebhookEvent{model.EventPush}
+	pull := &model.Pipeline{ID: 1, Event: model.EventPull, Branch: "main", Ref: "refs/pull/5/head", Refspec: "feature:main"}
+
+	items, err := parseWithSecrets(
+		t,
+		pull,
+		[]*model.Secret{pushOnly},
+		nil,
+		nil,
+		requestingYAML(gatedSecretName),
+	)
+	require.Error(t, err)
+	assert.False(t, compiler.OnlyApprovalErrors(err), "an event-ineligible secret must not block for approval")
+	assertNoSecretValue(t, items, gatedSecretValue)
+}
+
+// Caller-supplied variables can run code in every step, so they never share a
+// run with a gated or branch-filtered secret.
+func TestParsePipelineCallerVariablesWithholdRestrictedSecrets(t *testing.T) {
+	useApprovers(t, "test-owner")
+	branchFiltered := &model.Secret{
+		ID: 3, RepoID: 1, Name: "PULUMI_ACCESS_TOKEN", Value: "branch-filtered-value",
+		Events:   []model.WebhookEvent{model.EventPush, model.EventCron, model.EventManual},
+		Branches: []string{"main"},
+	}
+	manual := &model.Pipeline{
+		ID: 1, Event: model.EventPush, Branch: "main", Ref: "refs/heads/main",
+		AdditionalVariables: map[string]string{"BASH_ENV": "/tmp/payload"},
+	}
+
+	for _, sec := range []*model.Secret{branchFiltered, gatedSecret()} {
+		t.Run(sec.Name, func(t *testing.T) {
+			items, err := parseWithSecrets(
+				t,
+				manual,
+				[]*model.Secret{sec},
+				nil,
+				&Approval{Login: "test-owner", Session: true},
+				requestingYAML(sec.Name),
+			)
+			require.Error(t, err)
+			assert.False(t, compiler.OnlyApprovalErrors(err))
+			assertNoSecretValue(t, items, sec.Value)
 		})
 	}
 }
@@ -257,6 +342,30 @@ func TestParsePipelineBranchFilter(t *testing.T) {
 		step := items[0].Config.Stages[len(items[0].Config.Stages)-1].Steps[0]
 		assert.Equal(t, "branch-filtered-value", step.SecretMapping["TOKEN"])
 	})
+}
+
+// An extension outage gates every stored secret, so the run blocks rather than
+// silently running with stored values the extension was meant to override.
+func TestParsePipelineExtensionErrorBlocksUngatedSecret(t *testing.T) {
+	useApprovers(t, "test-owner")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(ts.Close)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	client, err := utils.NewHTTPClient(key, "loopback", 10*time.Second)
+	require.NoError(t, err)
+
+	ungated := otherSecret()
+	dbStore := store_mocks.NewMockStore(t)
+	dbStore.On("SecretList", mock.Anything, true, mock.Anything).Return([]*model.Secret{ungated}, nil)
+	service := secret.NewCombined(secret.NewDB(dbStore), secret.NewHTTP(ts.URL, client, false))
+
+	items, err := parseWithService(t, pushPipeline("main"), service, nil, requestingYAML(ungated.Name))
+	require.Error(t, err)
+	assert.True(t, compiler.OnlyApprovalErrors(err), "an extension outage must block, got %v", err)
+	assertNoSecretValue(t, items, ungated.Value)
 }
 
 func TestCreateNewOutOfOldResetsReview(t *testing.T) {

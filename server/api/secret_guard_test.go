@@ -25,6 +25,7 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 const approverLogin = "mattwilkinsonn"
@@ -328,4 +329,56 @@ func TestSecretApprovalSessionFlag(t *testing.T) {
 
 	c.Set("browser-session", true)
 	assert.True(t, secretApproval(c).Session)
+}
+
+func TestRepoSecretImageFilterWideningRequiresAdmin(t *testing.T) {
+	useSecretApprovers(t, approverLogin)
+	pluginOnly := func() *model.Secret {
+		s := pulumiAccessToken()
+		s.Images = []string{"plugins/deploy"}
+		return s
+	}
+
+	for name, images := range map[string][]string{
+		"clearing the image filter": {},
+		"adding an image pattern":   {"plugins/deploy", "alpine"},
+	} {
+		t.Run(name+" gets 403", func(t *testing.T) {
+			c, rec, svc := newSecretCtxWithService(t, http.MethodPatch, &model.SecretPatch{Images: images})
+			c.Params = gin.Params{{Key: "secret", Value: "PULUMI_ACCESS_TOKEN"}}
+			asCaller(c, "push-only", false, true)
+			svc.On("SecretFind", secretTestRepo, "PULUMI_ACCESS_TOKEN").Return(pluginOnly(), nil)
+
+			PatchSecret(c)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+		})
+	}
+
+	t.Run("an admin may clear the image filter", func(t *testing.T) {
+		c, rec, svc := newSecretCtxWithService(t, http.MethodPatch, &model.SecretPatch{Images: []string{}})
+		c.Params = gin.Params{{Key: "secret", Value: "PULUMI_ACCESS_TOKEN"}}
+		asCaller(c, "admin", true, false)
+		svc.On("SecretFind", secretTestRepo, "PULUMI_ACCESS_TOKEN").Return(pluginOnly(), nil)
+		svc.On("SecretUpdate", secretTestRepo, mock.Anything).Return(nil)
+
+		PatchSecret(c)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+}
+
+// A PATCH checked against a row that changed before the write must not land.
+func TestRepoSecretStalePatchConflicts(t *testing.T) {
+	useSecretApprovers(t, approverLogin)
+	v := "new"
+	c, rec, svc := newSecretCtxWithService(t, http.MethodPatch, &model.SecretPatch{Value: &v})
+	c.Params = gin.Params{{Key: "secret", Value: "PULUMI_ACCESS_TOKEN"}}
+	asCaller(c, "push-only", false, true)
+	svc.On("SecretFind", secretTestRepo, "PULUMI_ACCESS_TOKEN").Return(pulumiAccessToken(), nil)
+	svc.On("SecretUpdate", secretTestRepo, mock.Anything).Return(types.ErrUpdateConflict)
+
+	PatchSecret(c)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
 }

@@ -92,19 +92,29 @@ For example, an image without a tag will allow all tags, even if it contains ano
 ### Branch filter
 
 A secret can be limited to a list of branches.
-Push, cron and manual pipelines on other branches do not get the secret, so a step that asks for it fails with "secret not found".
+Push, cron and manual pipelines on other branches do not get the secret, so the pipeline fails to compile with "secret not found".
 An empty list allows all branches.
 Pull requests are not filtered by branch; use the events filter to keep a secret away from them.
 
-Only an admin can widen a secret's events or loosen or clear its branch filter.
+A manual pipeline, cron or restart that sets custom variables never gets a branch-filtered secret, because a variable such as `BASH_ENV` can run code in every step.
+
+Only an admin can widen a secret's events or loosen or clear its branch or plugins filter.
 Other users with access to the secret can only narrow these filters.
+A change based on an outdated copy of the secret is rejected, so reload the secret and retry.
 
 ### Require approval
 
 A secret with **Require approval** set is withheld until a secret approver approves the pipeline.
 A pipeline that needs a withheld secret is blocked instead of run, and its errors list the withheld secret.
 An approval releases the secret only when it comes from a browser session of a login listed in [`WOODPECKER_SECRET_APPROVERS`](../30-administration/10-configuration/10-server.md#secret_approvers).
+Approvers are matched by login, so renaming a forge account to a listed login grants approval.
 An approval through an API token, a decline, or a restart never releases it; a restarted pipeline must be approved again.
+
+The events and branch filters apply first: a pipeline the secret is not available to fails to compile with "secret not found" instead of blocking.
+Merge-queue (`trunk-merge/`) pipelines and pipelines with custom variables never get the secret.
+
+When several secrets share a name, the repository secret supplies the value, but the strictest approval setting and filters of all of them apply.
+If a secret extension fails, every stored secret requires approval until the extension recovers.
 
 Only a secret approver's browser session can create, change or delete a secret that requires approval.
 

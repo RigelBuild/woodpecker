@@ -57,6 +57,9 @@ type Secret struct {
 	// When set, non-pull_request runs get the secret only on these branches.
 	Branches []string `json:"branches" xorm:"json 'branches'"`
 	Note     string   `json:"note" xorm:"note"`
+	// Version makes an update based on a stale read fail instead of reverting a
+	// concurrent change, such as an approver adding a gate.
+	Version int64 `json:"-" xorm:"version 'version'"`
 } //	@name	Secret
 
 // TableName return database table name for xorm.

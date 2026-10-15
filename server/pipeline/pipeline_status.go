@@ -49,11 +49,13 @@ func UpdateToStatusPending(store store.Store, pipeline model.Pipeline, reviewer 
 	return &pipeline, store.UpdatePipeline(&pipeline)
 }
 
+// UpdateToStatusDeclined declines a pipeline only while it is still blocked, so a
+// concurrent approval and decline cannot both take effect.
 func UpdateToStatusDeclined(store store.Store, pipeline model.Pipeline, reviewer string) (*model.Pipeline, error) {
 	pipeline.Reviewer = reviewer
 	pipeline.Status = model.StatusDeclined
 	pipeline.Reviewed = time.Now().Unix()
-	return &pipeline, store.UpdatePipeline(&pipeline)
+	return &pipeline, store.UpdatePipelineIfStatus(&pipeline, model.StatusBlocked)
 }
 
 func UpdateStatusToDone(store store.Store, pipeline model.Pipeline, status model.StatusValue, stopped int64) (*model.Pipeline, error) {

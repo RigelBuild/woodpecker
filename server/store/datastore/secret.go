@@ -18,6 +18,7 @@ import (
 	"xorm.io/builder"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 const orderSecretsBy = "name"
@@ -49,9 +50,17 @@ func (s storage) SecretCreate(secret *model.Secret) error {
 	return wrapInsert(s.engine.Insert(secret))
 }
 
+// SecretUpdate writes the row only if its version still matches the one read, so
+// a guard checked against a stale read cannot overwrite a newer row.
 func (s storage) SecretUpdate(secret *model.Secret) error {
-	_, err := s.engine.ID(secret.ID).AllCols().Update(secret)
-	return err
+	affected, err := s.engine.ID(secret.ID).AllCols().Update(secret)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return types.ErrUpdateConflict
+	}
+	return nil
 }
 
 func (s storage) SecretDelete(secret *model.Secret) error {

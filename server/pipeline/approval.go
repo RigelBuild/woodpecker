@@ -44,10 +44,13 @@ func secretReleased(a *Approval, approvers []string) bool {
 }
 
 // isTrunkMergeRun reports whether the pipeline runs on a merge-queue branch, where
-// PR-controlled config runs and gated secrets must never be released.
+// PR-controlled config runs and gated secrets must never be released. A
+// pull_request run names its head branch only in the Refspec.
 func isTrunkMergeRun(p *model.Pipeline) bool {
+	head, _, _ := strings.Cut(p.Refspec, ":")
 	return strings.HasPrefix(p.Branch, trunkMergeBranchPrefix) ||
-		strings.HasPrefix(strings.TrimPrefix(p.Ref, "refs/heads/"), trunkMergeBranchPrefix)
+		strings.HasPrefix(strings.TrimPrefix(p.Ref, "refs/heads/"), trunkMergeBranchPrefix) ||
+		strings.HasPrefix(head, trunkMergeBranchPrefix)
 }
 
 // secretBranchAllowed applies a secret's branch filter. Pull request runs are left
@@ -57,6 +60,25 @@ func secretBranchAllowed(sec *model.Secret, p *model.Pipeline) bool {
 		return true
 	}
 	return slices.Contains(sec.Branches, p.Branch)
+}
+
+// secretEventAllowed mirrors the compiler's event filter, so a secret the run's
+// event can never use is not reported as waiting for approval.
+func secretEventAllowed(sec *model.Secret, p *model.Pipeline) bool {
+	if len(sec.Events) == 0 {
+		return true
+	}
+	event := p.Event
+	if p.IsPullRequest() {
+		event = model.EventPull
+	}
+	return slices.Contains(sec.Events, event)
+}
+
+// hasCallerVariables reports whether the run injects caller-chosen variables into
+// every step, where one such as BASH_ENV runs the caller's code next to the secrets.
+func hasCallerVariables(p *model.Pipeline, envs map[string]string) bool {
+	return len(p.AdditionalVariables) > 0 || len(envs) > 0
 }
 
 // blockForApproval parks a pipeline whose only blocking errors are withheld

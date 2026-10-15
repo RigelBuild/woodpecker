@@ -90,6 +90,8 @@ type Store interface {
 	CreatePipeline(*model.Pipeline, ...*model.Step) error
 	// UpdatePipeline updates a pipeline.
 	UpdatePipeline(*model.Pipeline) error
+	// UpdatePipelineIfStatus updates a pipeline whose stored status is still the given one.
+	UpdatePipelineIfStatus(*model.Pipeline, model.StatusValue) error
 	// DeletePipeline deletes a pipeline.
 	DeletePipeline(*model.Pipeline) error
 

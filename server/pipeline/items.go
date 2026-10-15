@@ -36,7 +36,17 @@ import (
 
 var readOnlyNetrcMintTimeout = forge.ReadOnlyNetrcMintTimeout
 
-func parsePipeline(ctx context.Context, forgeClient forge.Forge, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, forgeYamls []*forge_types.FileMeta, envs map[string]string, approval *Approval) ([]*builder.Item, error) {
+func parsePipeline(
+	ctx context.Context,
+	forgeClient forge.Forge,
+	store store.Store,
+	currentPipeline *model.Pipeline,
+	user *model.User,
+	repo *model.Repo,
+	forgeYamls []*forge_types.FileMeta,
+	envs map[string]string,
+	approval *Approval,
+) ([]*builder.Item, error) {
 	netrc, err := forgeClient.Netrc(user, repo)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate netrc file")
@@ -70,12 +80,23 @@ func parsePipeline(ctx context.Context, forgeClient forge.Forge, store store.Sto
 	}
 
 	// Decide on the merged list, so a gated name an extension shadows stays gated.
-	// A merge-queue run never gets a gated secret, whatever its config requests.
-	released := secretReleased(approval, server.Config.Pipeline.SecretApprovers) && !isTrunkMergeRun(currentPipeline)
+	// Event and branch filters apply first: a secret the run can never use is
+	// dropped, so the run fails instead of blocking on an approval that cannot help.
+	// A merge-queue run or a run with caller variables never gets a gated or
+	// branch-filtered secret, whatever its config requests.
+	trunkMerge := isTrunkMergeRun(currentPipeline)
+	callerVariables := hasCallerVariables(currentPipeline, envs)
+	released := secretReleased(approval, server.Config.Pipeline.SecretApprovers)
 	var secrets []compiler.Secret
 	var withheld []string
 	for _, sec := range secs {
-		if !secretBranchAllowed(sec, currentPipeline) {
+		if !secretBranchAllowed(sec, currentPipeline) || !secretEventAllowed(sec, currentPipeline) {
+			continue
+		}
+		if callerVariables && (sec.RequireApproval || len(sec.Branches) > 0) {
+			continue
+		}
+		if sec.RequireApproval && trunkMerge {
 			continue
 		}
 		if sec.RequireApproval && !released {
@@ -206,7 +227,17 @@ func createPipelineItems(ctx context.Context, forgeClient forge.Forge, store sto
 	currentPipeline *model.Pipeline, user *model.User, repo *model.Repo,
 	yamls []*forge_types.FileMeta, envs map[string]string, replaceExisting bool, approval *Approval,
 ) (pipeline *model.Pipeline, items []*builder.Item, parseErr, err error) {
-	pipelineItems, parseErr := parsePipeline(ctx, forgeClient, store, currentPipeline, user, repo, yamls, envs, approval)
+	pipelineItems, parseErr := parsePipeline(
+		ctx,
+		forgeClient,
+		store,
+		currentPipeline,
+		user,
+		repo,
+		yamls,
+		envs,
+		approval,
+	)
 	if pipeline_errors.HasBlockingErrors(parseErr) {
 		return currentPipeline, nil, parseErr, nil
 	}

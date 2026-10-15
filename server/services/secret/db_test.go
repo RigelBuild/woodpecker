@@ -87,3 +87,33 @@ func TestSecretListPipeline(t *testing.T) {
 	assert.Len(t, s, 1)
 	assert.Equal(t, "value-global", s[0].Value)
 }
+
+// A same-name secret at a nearer scope supplies the value, but never loosens the
+// policy a farther scope set on that name.
+func TestSecretListPipelineKeepsStrictestPolicy(t *testing.T) {
+	gatedOrg := &model.Secret{
+		ID: 2, OrgID: 1, Name: "secret", Value: "value-org",
+		Events:          []model.WebhookEvent{model.EventPush},
+		Branches:        []string{"main"},
+		Images:          []string{"plugins/deploy"},
+		RequireApproval: true,
+	}
+	ungatedRepo := &model.Secret{
+		ID: 3, RepoID: 1, Name: "secret", Value: "value-repo",
+		Events: []model.WebhookEvent{model.EventPush, model.EventPull},
+	}
+
+	mockStore := store_mocks.NewMockStore(t)
+	mockStore.On("SecretList", mock.Anything, mock.Anything, mock.Anything).Once().Return([]*model.Secret{gatedOrg, ungatedRepo}, nil)
+
+	s, err := secret.NewDB(mockStore).SecretListPipeline(t.Context(), &model.Repo{}, &model.Pipeline{}, nil)
+	assert.NoError(t, err)
+	if assert.Len(t, s, 1) {
+		assert.Equal(t, "value-repo", s[0].Value)
+		assert.True(t, s[0].RequireApproval, "an ungated repo secret must not hide a gated org secret")
+		assert.Equal(t, []model.WebhookEvent{model.EventPush}, s[0].Events)
+		assert.Equal(t, []string{"main"}, s[0].Branches)
+		assert.Equal(t, []string{"plugins/deploy"}, s[0].Images)
+	}
+	assert.False(t, ungatedRepo.RequireApproval, "the stored row must not be mutated")
+}

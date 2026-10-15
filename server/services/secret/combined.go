@@ -44,9 +44,16 @@ func (c *combined) SecretListPipeline(ctx context.Context, repo *model.Repo, pip
 	// Get secrets from HTTP extension
 	extensionSecrets, err := c.extension.SecretListPipeline(ctx, repo, pipeline, netrc)
 	if err != nil {
-		// Log the error but don't fail - use base secrets only
-		log.Warn().Err(err).Msg("failed to fetch secrets from extension")
-		return baseSecrets, nil
+		// Stored values may be stale overrides the extension meant to replace, so
+		// they wait for an approver instead of running unreviewed.
+		log.Warn().Err(err).Msg("failed to fetch secrets from extension, gating every stored secret")
+		gated := make([]*model.Secret, 0, len(baseSecrets))
+		for _, s := range baseSecrets {
+			g := *s
+			g.RequireApproval = true
+			gated = append(gated, &g)
+		}
+		return gated, nil
 	}
 
 	if len(extensionSecrets) == 0 {
@@ -54,22 +61,25 @@ func (c *combined) SecretListPipeline(ctx context.Context, repo *model.Repo, pip
 	}
 
 	// Merge secrets, with extension secrets taking priority (no duplicates by name).
-	// An extension can replace a gated row's value but never its gate.
-	gated := make(map[string]struct{}, len(baseSecrets))
+	// An extension can replace a stored row's value but never loosen its policy.
+	stored := make(map[string]*model.Secret, len(baseSecrets))
 	for _, s := range baseSecrets {
-		if s.RequireApproval {
-			gated[s.Name] = struct{}{}
-		}
+		stored[s.Name] = s
 	}
 
 	exists := make(map[string]struct{}, len(extensionSecrets))
 	merged := make([]*model.Secret, 0, len(baseSecrets)+len(extensionSecrets))
 	for _, s := range extensionSecrets {
+		if _, ok := exists[s.Name]; ok {
+			continue
+		}
 		exists[s.Name] = struct{}{}
-		if _, ok := gated[s.Name]; ok && !s.RequireApproval {
-			shadow := *s
-			shadow.RequireApproval = true
-			s = &shadow
+		if base, ok := stored[s.Name]; ok {
+			narrowed, usable := withStrictestPolicy(s, base)
+			if !usable {
+				continue
+			}
+			s = narrowed
 		}
 		merged = append(merged, s)
 	}

@@ -15,6 +15,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"slices"
 
@@ -24,6 +25,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/server/router/middleware/session"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 // secretApproval builds the approval for the caller. Session is true only for a
@@ -55,13 +57,15 @@ func denyGatedSecretChange(c *gin.Context, before, after *model.Secret) bool {
 }
 
 // denySecretFilterWidening writes 403 when a non-admin widens a secret's events or
-// loosens or clears its branch filter, which would expose it to more runs.
+// loosens or clears its branch or image filter, which would expose it to more runs.
 func denySecretFilterWidening(c *gin.Context, admin bool, before, after *model.Secret) bool {
 	if admin {
 		return false
 	}
-	if eventsWidened(before.Events, after.Events) || branchesLoosened(before.Branches, after.Branches) {
-		c.String(http.StatusForbidden, "Only an admin can widen a secret's events or loosen its branch filter")
+	if eventsWidened(before.Events, after.Events) ||
+		filterLoosened(before.Branches, after.Branches) ||
+		filterLoosened(before.Images, after.Images) {
+		c.String(http.StatusForbidden, "Only an admin can widen a secret's events or loosen its branch or image filter")
 		return true
 	}
 	return false
@@ -76,20 +80,30 @@ func eventsWidened(before, after []model.WebhookEvent) bool {
 	return false
 }
 
-// branchesLoosened treats an empty list as "every branch", so clearing a filter loosens it.
-func branchesLoosened(before, after []string) bool {
+// filterLoosened treats an empty list as "everything", so clearing a filter loosens it.
+func filterLoosened(before, after []string) bool {
 	if len(before) == 0 {
 		return false
 	}
 	if len(after) == 0 {
 		return true
 	}
-	for _, branch := range after {
-		if !slices.Contains(before, branch) {
+	for _, item := range after {
+		if !slices.Contains(before, item) {
 			return true
 		}
 	}
 	return false
+}
+
+// writeSecretUpdateErr reports a failed update; a stale read gets 409 so the
+// caller re-reads instead of overwriting a newer row.
+func writeSecretUpdateErr(c *gin.Context, name string, err error) {
+	if errors.Is(err, types.ErrUpdateConflict) {
+		c.String(http.StatusConflict, "Secret %q changed since it was read, retry the update", name)
+		return
+	}
+	c.String(http.StatusInternalServerError, "Error updating secret %q. %s", name, err)
 }
 
 // applySecretPatch copies the patch onto a stored secret. Branches replace the

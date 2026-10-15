@@ -24,6 +24,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 // Decline updates the status to declined for blocked pipelines.
@@ -40,6 +41,9 @@ func Decline(ctx context.Context, store store.Store, pipeline *model.Pipeline, u
 	}
 
 	pipeline, err = UpdateToStatusDeclined(store, *pipeline, user.Login)
+	if errors.Is(err, types.ErrUpdateConflict) {
+		return nil, ErrBadRequest{Msg: "cannot decline a pipeline that is no longer blocked"}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("error updating pipeline. %w", err)
 	}

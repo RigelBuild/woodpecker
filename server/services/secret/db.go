@@ -16,6 +16,7 @@ package secret
 
 import (
 	"context"
+	"slices"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -45,9 +46,11 @@ func (d *db) SecretListPipeline(_ context.Context, repo *model.Repo, _ *model.Pi
 	}
 
 	// Return only secrets with unique name
-	// Priority order in case of duplicate names are repository, user/organization, global
+	// Priority order in case of duplicate names are repository, user/organization, global.
+	// The winner supplies the value; a shadowed same-name secret still narrows its policy.
 	secrets := make([]*model.Secret, 0, len(s))
-	uniq := make(map[string]struct{})
+	index := make(map[string]int)
+	unusable := make(map[string]struct{})
 	for _, condition := range []struct {
 		IsRepository   bool
 		IsOrganization bool
@@ -61,14 +64,26 @@ func (d *db) SecretListPipeline(_ context.Context, repo *model.Repo, _ *model.Pi
 			if secret.IsRepository() != condition.IsRepository || secret.IsOrganization() != condition.IsOrganization || secret.IsGlobal() != condition.IsGlobal {
 				continue
 			}
-			if _, ok := uniq[secret.Name]; ok {
+			i, ok := index[secret.Name]
+			if !ok {
+				index[secret.Name] = len(secrets)
+				secrets = append(secrets, secret)
 				continue
 			}
-			uniq[secret.Name] = struct{}{}
-			secrets = append(secrets, secret)
+			narrowed, usable := withStrictestPolicy(secrets[i], secret)
+			if !usable {
+				unusable[secret.Name] = struct{}{}
+				continue
+			}
+			secrets[i] = narrowed
 		}
 	}
-	return secrets, nil
+	// Filters that share nothing fit no run, so the name is dropped and a step
+	// asking for it fails instead of getting either value.
+	return slices.DeleteFunc(secrets, func(secret *model.Secret) bool {
+		_, drop := unusable[secret.Name]
+		return drop
+	}), nil
 }
 
 func (d *db) SecretCreate(_ *model.Repo, in *model.Secret) error {

@@ -132,7 +132,7 @@ func PatchSecret(c *gin.Context) {
 		return
 	}
 	if err := secretService.SecretUpdate(repo, secret); err != nil {
-		c.String(http.StatusInternalServerError, "Error updating secret %q. %s", in.Name, err)
+		writeSecretUpdateErr(c, secret.Name, err)
 		return
 	}
 	c.JSON(http.StatusOK, secret.Copy())

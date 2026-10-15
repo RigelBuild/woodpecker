@@ -27,10 +27,18 @@ import (
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 // Approve update the status to pending for a blocked pipeline so it can be executed.
-func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, approval *Approval) (*model.Pipeline, error) {
+func Approve(
+	ctx context.Context,
+	store store.Store,
+	currentPipeline *model.Pipeline,
+	user *model.User,
+	repo *model.Repo,
+	approval *Approval,
+) (*model.Pipeline, error) {
 	if currentPipeline.Status != model.StatusBlocked {
 		return nil, ErrBadRequest{Msg: fmt.Sprintf("cannot approve a pipeline with status %s", currentPipeline.Status)}
 	}
@@ -60,8 +68,28 @@ func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipe
 	currentPipeline.Status = model.StatusPending
 	// Drop the approval errors from the blocked parse; this parse records its own.
 	currentPipeline.Errors = nil
+	// Claim the pipeline only while it is still blocked, so an approval racing a
+	// decline (or another approval) cannot queue it.
+	if err := store.UpdatePipelineIfStatus(currentPipeline, model.StatusBlocked); err != nil {
+		if errors.Is(err, types.ErrUpdateConflict) {
+			return nil, ErrBadRequest{Msg: "cannot approve a pipeline that is no longer blocked"}
+		}
+		return nil, fmt.Errorf("error claiming blocked pipeline. %w", err)
+	}
+	claimed := currentPipeline
 
-	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, currentPipeline, user, repo, yamls, nil, true, approval)
+	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(
+		ctx,
+		forge,
+		store,
+		currentPipeline,
+		user,
+		repo,
+		yamls,
+		nil,
+		true,
+		approval,
+	)
 	// An approval that cannot release a gated secret leaves the pipeline blocked.
 	if compiler.OnlyApprovalErrors(parseErr) {
 		currentPipeline.Errors = pipeline_errors.GetPipelineErrors(parseErr)
@@ -79,7 +107,12 @@ func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipe
 		return nil, errors.New(msg)
 	}
 	if err != nil {
-		log.Error().Err(err).Str("repo", repo.FullName).Msgf("error persisting new steps for %s#%d after approval", repo.FullName, currentPipeline.Number)
+		log.Error().Err(err).Str("repo", repo.FullName).Msgf("error persisting new steps for %s#%d after approval", repo.FullName, claimed.Number)
+		// Undo the claim so the pipeline can be approved again.
+		claimed.Status = model.StatusBlocked
+		if uErr := store.UpdatePipeline(claimed); uErr != nil {
+			log.Error().Err(uErr).Msgf("error re-blocking %s#%d after a failed approval", repo.FullName, claimed.Number)
+		}
 		return nil, err
 	}
 

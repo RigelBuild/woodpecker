@@ -195,19 +195,105 @@ func TestGatedSecretRestartReblocks(t *testing.T) {
 }
 
 // TestGatedSecretTrunkMergeRefWithheld: hostile merge-queue config that requests a
-// gated secret gets none, even with an approver's session.
+// gated secret gets none, and fails instead of waiting for an approval that could
+// never release it.
 func TestGatedSecretTrunkMergeRefWithheld(t *testing.T) {
 	env := startGatedSecretEnv(t)
-	p := env.DummyPipeline(model.EventPush)
-	p.Branch = "trunk-merge/main/1"
-	p.Ref = "refs/heads/trunk-merge/main/1"
+	for name, p := range map[string]*model.Pipeline{
+		"push": env.DummyPipeline(model.EventPush),
+		"pull": env.DummyPipeline(model.EventPull),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if p.Event == model.EventPull {
+				// GitHub names the merge-queue head only in the Refspec.
+				p.Ref = "refs/pull/5/head"
+				p.Refspec = "trunk-merge/main/5:main"
+			} else {
+				p.Branch = "trunk-merge/main/1"
+				p.Ref = "refs/heads/trunk-merge/main/1"
+			}
 
-	created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, p)
+			created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, p)
+			require.NoError(t, err)
+			stored, err := env.Store.GetPipeline(created.ID)
+			require.NoError(t, err)
+			assert.Equal(t, model.StatusError, stored.Status, "a trunk-merge run must never wait for or get a gated secret")
+			assert.Empty(t, approvalErrorNames(t, stored))
+		})
+	}
+}
+
+// TestGatedSecretApproveAfterDeclineRejected: once declined, a run can never be
+// approved into the queue.
+func TestGatedSecretApproveAfterDeclineRejected(t *testing.T) {
+	env := startGatedSecretEnv(t)
+	blocked := blockedGatedPipeline(t, env)
+	// Both reviewers read the blocked row before either acts.
+	staleCopy := *blocked
+
+	_, err := pipeline.Decline(t.Context(), env.Store, blocked, env.Fixtures.Owner, env.Fixtures.Repo)
 	require.NoError(t, err)
-	require.Equal(t, model.StatusBlocked, created.Status)
 
-	result, err := pipeline.Approve(t.Context(), env.Store, created, env.Fixtures.Owner, env.Fixtures.Repo,
+	_, err = pipeline.Approve(t.Context(), env.Store, &staleCopy, env.Fixtures.Owner, env.Fixtures.Repo,
 		&pipeline.Approval{Login: env.Fixtures.Owner.Login, Session: true})
+	require.Error(t, err, "an approve racing a decline must be rejected")
+
+	stored, err := env.Store.GetPipeline(blocked.ID)
 	require.NoError(t, err)
-	assert.Equal(t, model.StatusBlocked, result.Status, "a trunk-merge ref must never release a gated secret")
+	assert.Equal(t, model.StatusDeclined, stored.Status)
+	info := env.Queue.Info(t.Context())
+	assert.Empty(t, info.Pending, "nothing may be queued after a decline")
+	assert.Empty(t, info.Running)
+	assert.Empty(t, info.WaitingOnDeps)
+}
+
+const branchSecretName = "PULUMI_ACCESS_TOKEN"
+
+var branchSecretYAML = []byte(`
+steps:
+  - name: deploy
+    image: dummy
+    environment:
+      TOKEN:
+        from_secret: ` + branchSecretName + `
+    commands:
+      - echo deploy
+`)
+
+// TestBranchSecretWithheldFromCallerVariables: a manual run or restart with
+// caller-supplied variables never gets a main-only secret, since a variable like
+// BASH_ENV runs the caller's code in every step.
+func TestBranchSecretWithheldFromCallerVariables(t *testing.T) {
+	env := setup.StartServer(t.Context(), t, []*forge_types.FileMeta{
+		{Name: ".woodpecker.yaml", Data: branchSecretYAML},
+	})
+	agent := setup.StartAgent(t, env.GRPCAddr)
+	setup.WaitForAgentRegistered(t, env.Store, agent)
+	require.NoError(t, env.Store.SecretCreate(&model.Secret{
+		RepoID:   env.Fixtures.Repo.ID,
+		Name:     branchSecretName,
+		Value:    "branch-filtered-value",
+		Events:   []model.WebhookEvent{model.EventPush, model.EventManual},
+		Branches: []string{"main"},
+	}))
+
+	manual := env.DummyPipeline(model.EventManual)
+	manual.AdditionalVariables = map[string]string{"BASH_ENV": "/tmp/payload"}
+	created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, manual)
+	require.NoError(t, err)
+	stored, err := env.Store.GetPipeline(created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusError, stored.Status, "a manual run with variables must not get the secret")
+
+	plain, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, env.DummyPipeline(model.EventManual))
+	require.NoError(t, err)
+	finished := setup.WaitForPipeline(t, env.Store, plain.ID)
+	require.Equal(t, model.StatusSuccess, finished.Status, "a manual run without variables gets the secret")
+
+	_, err = pipeline.Restart(t.Context(), env.Store, finished, env.Fixtures.Owner, env.Fixtures.Repo,
+		map[string]string{"BASH_ENV": "/tmp/payload"})
+	require.Error(t, err, "a restart with variables must not get the secret")
+	restarted, err := env.Store.GetPipelineNumber(env.Fixtures.Repo, finished.Number+1)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusError, restarted.Status)
 }

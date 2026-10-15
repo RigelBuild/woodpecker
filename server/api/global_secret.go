@@ -147,7 +147,7 @@ func PatchGlobalSecret(c *gin.Context) {
 	}
 
 	if err := secretService.GlobalSecretUpdate(secret); err != nil {
-		c.String(http.StatusInternalServerError, "Error updating global secret %q. %s", in.Name, err)
+		writeSecretUpdateErr(c, secret.Name, err)
 		return
 	}
 	c.JSON(http.StatusOK, secret.Copy())

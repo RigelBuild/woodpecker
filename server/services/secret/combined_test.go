@@ -71,13 +71,13 @@ func TestCombinedSecretListPipeline(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:     "Extension error falls back to base secrets",
+			name:     "Extension error gates every base secret",
 			repoName: "server-error",
 			dbSecrets: []*model.Secret{
 				{ID: 1, RepoID: 1, Name: "db-secret", Value: "db-value"},
 			},
 			expected: []*model.Secret{
-				{ID: 1, RepoID: 1, Name: "db-secret", Value: "db-value"},
+				{ID: 1, RepoID: 1, Name: "db-secret", Value: "db-value", RequireApproval: true},
 			},
 			wantErr: false,
 		},
@@ -92,6 +92,42 @@ func TestCombinedSecretListPipeline(t *testing.T) {
 				{Name: "ext-only", Value: "only-in-ext"},
 			},
 			wantErr: false,
+		},
+		{
+			name:     "Extension shadow keeps the stored events and branches",
+			repoName: "override-test",
+			dbSecrets: []*model.Secret{{
+				ID: 1, RepoID: 1, Name: "shared", Value: "db-value",
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+				Images:   []string{"plugins/deploy"},
+			}},
+			expected: []*model.Secret{
+				{
+					Name: "shared", Value: "external-value",
+					Events:   []model.WebhookEvent{model.EventPush},
+					Branches: []string{"main"},
+					Images:   []string{"plugins/deploy"},
+				},
+				{Name: "ext-only", Value: "only-in-ext"},
+			},
+		},
+		{
+			name:     "Gated extension shadow keeps the stored events and branches",
+			repoName: "override-test",
+			dbSecrets: []*model.Secret{{
+				ID: 1, RepoID: 1, Name: "shared", Value: "db-value", RequireApproval: true,
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+			}},
+			expected: []*model.Secret{
+				{
+					Name: "shared", Value: "external-value", RequireApproval: true,
+					Events:   []model.WebhookEvent{model.EventPush},
+					Branches: []string{"main"},
+				},
+				{Name: "ext-only", Value: "only-in-ext"},
+			},
 		},
 	}
 
