@@ -19,7 +19,8 @@ option go_package = "go.woodpecker-ci.org/woodpecker/v3/rpc/proto";
 package proto;
 
 // !IMPORTANT!
-// Increased Version in version.go by 1 if you change something here!
+// Increase Version in version.go by 1 for any change an older peer would misread.
+// An added optional field that older peers ignore keeps the version unchanged.
 // !IMPORTANT!
 
 // Woodpecker Server Service
@@ -125,6 +126,7 @@ message AgentInfo {
   string backend  = 3;
   string version  = 4;
   map<string, string> customLabels = 5;
+  string hostname = 6;
 }
 
 message RegisterAgentRequest {

@@ -803,6 +803,7 @@ type AgentInfo struct {
 	Backend       string                 `protobuf:"bytes,3,opt,name=backend,proto3" json:"backend,omitempty"`
 	Version       string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
 	CustomLabels  map[string]string      `protobuf:"bytes,5,rep,name=customLabels,proto3" json:"customLabels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Hostname      string                 `protobuf:"bytes,6,opt,name=hostname,proto3" json:"hostname,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -870,6 +871,13 @@ func (x *AgentInfo) GetCustomLabels() map[string]string {
 		return x.CustomLabels
 	}
 	return nil
+}
+
+func (x *AgentInfo) GetHostname() string {
+	if x != nil {
+		return x.Hostname
+	}
+	return ""
 }
 
 type RegisterAgentRequest struct {
@@ -1268,13 +1276,14 @@ const file_woodpecker_proto_rawDesc = "" +
 	"logEntries\"\a\n" +
 	"\x05Empty\"-\n" +
 	"\x13ReportHealthRequest\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status\"\x80\x02\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\"\x9c\x02\n" +
 	"\tAgentInfo\x12\x1a\n" +
 	"\bplatform\x18\x01 \x01(\tR\bplatform\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12\x18\n" +
 	"\abackend\x18\x03 \x01(\tR\abackend\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\tR\aversion\x12F\n" +
-	"\fcustomLabels\x18\x05 \x03(\v2\".proto.AgentInfo.CustomLabelsEntryR\fcustomLabels\x1a?\n" +
+	"\fcustomLabels\x18\x05 \x03(\v2\".proto.AgentInfo.CustomLabelsEntryR\fcustomLabels\x12\x1a\n" +
+	"\bhostname\x18\x06 \x01(\tR\bhostname\x1a?\n" +
 	"\x11CustomLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"<\n" +

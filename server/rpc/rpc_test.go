@@ -453,6 +453,40 @@ func TestRegisterAgent(t *testing.T) {
 
 		assert.EqualValues(t, 1337, agentID)
 	})
+
+	t.Run("When the name is empty it uses the hostname from the request body over metadata", func(t *testing.T) {
+		store := store_mocks.NewMockStore(t)
+		store.On("AgentFind", int64(1337)).Once().Return(&model.Agent{ID: 1337}, nil)
+		store.On("AgentUpdate", mock.MatchedBy(func(a *model.Agent) bool { return a.Name == "body-host" })).Once().Return(nil)
+		grpc := RPC{store: store}
+		ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs("hostname", "metadata-host"))
+		ctx = context.WithValue(ctx, agentIDKey, int64(1337))
+
+		_, err := grpc.RegisterAgent(ctx, rpc.AgentInfo{Hostname: "body-host", Platform: "platform"})
+		require.NoError(t, err)
+	})
+
+	t.Run("When the name is empty and no hostname is sent anywhere the name stays empty", func(t *testing.T) {
+		store := store_mocks.NewMockStore(t)
+		store.On("AgentFind", int64(1337)).Once().Return(&model.Agent{ID: 1337}, nil)
+		store.On("AgentUpdate", mock.MatchedBy(func(a *model.Agent) bool { return a.Name == "" })).Once().Return(nil)
+		grpc := RPC{store: store}
+		ctx := context.WithValue(t.Context(), agentIDKey, int64(1337))
+
+		_, err := grpc.RegisterAgent(ctx, rpc.AgentInfo{Platform: "platform"})
+		require.NoError(t, err)
+	})
+
+	t.Run("When the agent already has a name a different hostname does not rename it", func(t *testing.T) {
+		store := store_mocks.NewMockStore(t)
+		store.On("AgentFind", int64(1337)).Once().Return(&model.Agent{ID: 1337, Name: "mattlinuxpro-cd"}, nil)
+		store.On("AgentUpdate", mock.MatchedBy(func(a *model.Agent) bool { return a.Name == "mattlinuxpro-cd" })).Once().Return(nil)
+		grpc := RPC{store: store}
+		ctx := context.WithValue(t.Context(), agentIDKey, int64(1337))
+
+		_, err := grpc.RegisterAgent(ctx, rpc.AgentInfo{Hostname: "mattlinuxpro"})
+		require.NoError(t, err)
+	})
 }
 
 func TestCompleteChildrenIfParentCompleted(t *testing.T) {
