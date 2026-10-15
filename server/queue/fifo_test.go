@@ -879,6 +879,11 @@ func TestFifoConcurrency(t *testing.T) {
 			&model.Task{ID: "1", Created: 200},
 			&model.Task{ID: "999", Created: 100},
 		))
+		// Created outranks blocked count.
+		assert.True(t, taskOrderLess(
+			&model.Task{ID: "1", Created: 100, BlockedCount: 0},
+			&model.Task{ID: "2", Created: 200, BlockedCount: 9},
+		))
 
 		// Higher blocked count wins even when its name sorts later and its ID is higher.
 		moreBlocked := &model.Task{ID: "2", Created: 100, Name: "zzz", BlockedCount: 5}
@@ -1793,7 +1798,7 @@ func TestFifoFilterWaitingDrainOrder(t *testing.T) {
 
 	// A drained task whose Created ties a pending task lands AFTER the equal-key
 	// pending task, matching the append-then-stable-sort semantics the merge
-	// replaces (taskOrderLess is a strict less-than on Created, then Name).
+	// replaces (taskOrderLess is a strict less-than on Created, blocked count, then Name).
 	q3 := &fifo{pending: list.New(), waitingOnDeps: list.New(), running: map[string]*entry{}}
 	q3.pending.PushBack(&model.Task{ID: "pending-200", Created: 200, Name: "a"})
 	q3.waitingOnDeps.PushBack(&model.Task{ID: "drained-200", Created: 200, Name: "z"})

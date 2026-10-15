@@ -27,10 +27,11 @@ func TestTaskList(t *testing.T) {
 	defer closer()
 
 	assert.NoError(t, store.TaskInsert(&model.Task{
-		ID:        "some_random_id",
-		Data:      []byte("foo"),
-		Labels:    map[string]string{"foo": "bar"},
-		DepStatus: map[string]model.StatusValue{"test": "dep"},
+		ID:           "some_random_id",
+		Data:         []byte("foo"),
+		Labels:       map[string]string{"foo": "bar"},
+		DepStatus:    map[string]model.StatusValue{"test": "dep"},
+		BlockedCount: 4,
 	}))
 
 	list, err := store.TaskList()
@@ -39,6 +40,7 @@ func TestTaskList(t *testing.T) {
 	assert.Equal(t, "some_random_id", list[0].ID)
 	assert.Equal(t, "foo", string(list[0].Data))
 	assert.EqualValues(t, map[string]model.StatusValue{"test": "dep"}, list[0].DepStatus)
+	assert.Equal(t, 4, list[0].BlockedCount)
 
 	assert.NoError(t, store.TaskDelete("some_random_id"))
 
