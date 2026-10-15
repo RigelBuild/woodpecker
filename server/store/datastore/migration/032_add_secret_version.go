@@ -32,6 +32,11 @@ var addSecretVersion = xormigrate.Migration{
 		if err := sess.Sync(new(secrets)); err != nil {
 			return fmt.Errorf("sync models failed: %w", err)
 		}
+		// Adding the column does not fill it on every database; a zero version
+		// would never match the optimistic-lock condition on an old row.
+		if _, err := sess.Exec("UPDATE secrets SET version = 1 WHERE version IS NULL OR version = 0"); err != nil {
+			return fmt.Errorf("backfill secret versions failed: %w", err)
+		}
 		return nil
 	},
 }

@@ -16,7 +16,9 @@ package secret
 
 import (
 	"slices"
+	"strings"
 
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/utils"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
@@ -34,7 +36,7 @@ func withStrictestPolicy(value, other *model.Secret) (*model.Secret, bool) {
 	if merged.Branches, ok = narrowest(value.Branches, other.Branches); !ok {
 		return nil, false
 	}
-	if merged.Images, ok = narrowest(value.Images, other.Images); !ok {
+	if merged.Images, ok = narrowestImages(value.Images, other.Images); !ok {
 		return nil, false
 	}
 	return &merged, true
@@ -56,4 +58,48 @@ func narrowest[T comparable](a, b []T) ([]T, bool) {
 		}
 	}
 	return both, len(both) > 0
+}
+
+// narrowestImages intersects two image filters with the matching the compiler
+// applies at run time, where an untagged pattern allows every tag of its image.
+// It keeps the narrower of each overlapping pair and drops patterns another kept
+// pattern already covers. An empty list means any image.
+func narrowestImages(a, b []string) ([]string, bool) {
+	switch {
+	case len(b) == 0:
+		return a, true
+	case len(a) == 0:
+		return b, true
+	}
+	var both []string
+	for _, p := range a {
+		for _, q := range b {
+			switch {
+			case imageCovers(p, q):
+				both = append(both, q)
+			case imageCovers(q, p):
+				both = append(both, p)
+			}
+		}
+	}
+	kept := make([]string, 0, len(both))
+	for i, p := range both {
+		redundant := slices.ContainsFunc(kept, func(k string) bool { return imageCovers(k, p) }) ||
+			slices.ContainsFunc(both[i+1:], func(q string) bool { return imageCovers(q, p) && !imageCovers(p, q) })
+		if !redundant {
+			kept = append(kept, p)
+		}
+	}
+	return kept, len(kept) > 0
+}
+
+// imageCovers reports whether pattern p allows every image pattern q allows. A
+// tagged pattern cannot cover an untagged one, which allows every tag.
+func imageCovers(p, q string) bool {
+	return utils.MatchImageDynamic(q, p) && (imageHasTag(q) || !imageHasTag(p))
+}
+
+// imageHasTag mirrors the compiler's tag check, so policy and run time agree.
+func imageHasTag(name string) bool {
+	return strings.Contains(name, ":")
 }

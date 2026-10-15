@@ -21,10 +21,12 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/woodpecker/v3/e2e/setup"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
+	"go.woodpecker-ci.org/woodpecker/v3/server/cron"
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
@@ -296,4 +298,42 @@ func TestBranchSecretWithheldFromCallerVariables(t *testing.T) {
 	restarted, err := env.Store.GetPipelineNumber(env.Fixtures.Repo, finished.Number+1)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusError, restarted.Status)
+}
+
+// TestBranchSecretWithheldFromCronVariables: a cron whose variables include
+// BASH_ENV never gets a main-only secret; the same cron without variables does.
+func TestBranchSecretWithheldFromCronVariables(t *testing.T) {
+	env := setup.StartServer(t.Context(), t, []*forge_types.FileMeta{
+		{Name: ".woodpecker.yaml", Data: branchSecretYAML},
+	})
+	agent := setup.StartAgent(t, env.GRPCAddr)
+	setup.WaitForAgentRegistered(t, env.Store, agent)
+	require.NoError(t, env.Store.SecretCreate(&model.Secret{
+		RepoID:   env.Fixtures.Repo.ID,
+		Name:     branchSecretName,
+		Value:    "branch-filtered-value",
+		Events:   []model.WebhookEvent{model.EventCron},
+		Branches: []string{"main"},
+	}))
+	env.Forge.On("BranchHead", mock.Anything, mock.Anything, mock.Anything, "main").
+		Return(&model.Commit{SHA: "deadbeef"}, nil).Maybe()
+
+	run := func(t *testing.T, name string, variables map[string]string) *model.Pipeline {
+		t.Helper()
+		c := &model.Cron{Name: name, RepoID: env.Fixtures.Repo.ID, Branch: "main", Schedule: "@daily", Variables: variables}
+		repo, p, err := cron.CreatePipeline(t.Context(), env.Store, c)
+		require.NoError(t, err)
+		created, err := pipeline.Create(t.Context(), env.Store, repo, p)
+		require.NoError(t, err)
+		return created
+	}
+
+	withVariables := run(t, "with-variables", map[string]string{"BASH_ENV": "/tmp/payload"})
+	stored, err := env.Store.GetPipeline(withVariables.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusError, stored.Status, "a cron with variables must not get the secret")
+
+	control := run(t, "no-variables", nil)
+	finished := setup.WaitForPipeline(t, env.Store, control.ID)
+	assert.Equal(t, model.StatusSuccess, finished.Status, "a cron without variables gets the secret")
 }
