@@ -125,7 +125,7 @@
         },
         "netrc_only_trusted": {
           "netrc_only_trusted": "Custom trusted clone plugins",
-          "desc": "Plugins that get access to netrc credentials that can be used to clone repositories from the forge or push them into the forge.",
+          "desc": "Unlisted custom clone images trigger a warning. Eligible dispatches can receive a repository-scoped read-only GitHub App token; it cannot push changes.",
           "placeholder": "Plugin image"
         },
         "trusted": {

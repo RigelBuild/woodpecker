@@ -78,6 +78,8 @@ var Config = struct {
 	}
 	Pipeline struct {
 		AuthenticatePublicRepos             bool
+		SecretExtensionNetrc                bool
+		RegistryExtensionNetrc              bool
 		DefaultAllowPullRequests            bool
 		DefaultCancelPreviousPipelineEvents []model.WebhookEvent
 		DefaultApprovalMode                 model.ApprovalMode

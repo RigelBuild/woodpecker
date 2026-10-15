@@ -17,11 +17,14 @@ package github
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-github/v92/github"
@@ -95,6 +98,91 @@ func TestGithub(t *testing.T) {
 		_, err := c.Repo(ctx, fakeUser, "0", fakeRepoNotFound.Owner, fakeRepoNotFound.Name)
 		assert.Error(t, err)
 	})
+}
+
+func TestReadOnlyNetrc(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	var gotBody struct {
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}
+	mints := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/octocat/Hello-World/installation":
+			_, err := w.Write([]byte(`{"id":99}`))
+			require.NoError(t, err)
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens":
+			mints++
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+			w.WriteHeader(http.StatusCreated)
+			_, err := w.Write([]byte(`{"token":"read-token","expires_at":"2099-01-01T00:00:00Z"}`))
+			require.NoError(t, err)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	c := &client{API: server.URL + "/", url: server.URL, appID: 123, appKey: key}
+	repo := &model.Repo{ID: 7, ForgeRemoteID: "42", Owner: "octocat", Name: "Hello-World", Clone: "https://github.com/octocat/Hello-World.git"}
+	first, err := c.ReadOnlyNetrc(t.Context(), repo)
+	require.NoError(t, err)
+	second, err := c.ReadOnlyNetrc(t.Context(), repo)
+	require.NoError(t, err)
+	assert.Equal(t, "github.com", first.Machine)
+	assert.Equal(t, "x-access-token", first.Login)
+	assert.Equal(t, "read-token", first.Password)
+	assert.Equal(t, time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC), first.ExpiresAt)
+	assert.Equal(t, first, second)
+	assert.Equal(t, 2, mints)
+	assert.Equal(t, []int64{42}, gotBody.RepositoryIDs)
+	assert.Equal(t, map[string]string{"contents": "read", "metadata": "read"}, gotBody.Permissions)
+}
+
+func TestReadOnlyNetrcRequiresConfiguredApp(t *testing.T) {
+	c := &client{}
+	_, err := c.ReadOnlyNetrc(t.Context(), fakeRepo)
+	assert.ErrorContains(t, err, "github app")
+}
+
+func TestReadOnlyNetrcRequiresValidRepository(t *testing.T) {
+	tests := []struct {
+		name string
+		repo *model.Repo
+		want string
+	}{
+		{
+			name: "nil repository",
+			want: "repository is required",
+		},
+		{
+			name: "zero repository id",
+			repo: &model.Repo{ForgeRemoteID: "0", Owner: "octocat", Name: "Hello-World", Clone: "https://github.com/octocat/Hello-World.git"},
+			want: "repository id must be positive",
+		},
+		{
+			name: "invalid repository id",
+			repo: &model.Repo{ForgeRemoteID: "not-a-number", Owner: "octocat", Name: "Hello-World", Clone: "https://github.com/octocat/Hello-World.git"},
+			want: "invalid github repository id",
+		},
+		{
+			name: "invalid clone URL",
+			repo: &model.Repo{ForgeRemoteID: "42", Owner: "octocat", Name: "Hello-World", Clone: "https://github.com:bad/octocat/Hello-World.git"},
+			want: "unable to parse clone URL",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			require.NoError(t, err)
+			c := &client{appID: 123, appKey: key}
+			_, err = c.ReadOnlyNetrc(t.Context(), tt.repo)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
 }
 
 func TestStatusDeployment(t *testing.T) {

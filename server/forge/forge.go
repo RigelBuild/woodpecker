@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -177,6 +178,15 @@ type Forge interface {
 	// Org fetches organization details.
 	// If identifier is a user, return org with IsUser: true.
 	Org(ctx context.Context, u *model.User, org string) (*model.Org, error)
+}
+
+// ReadOnlyNetrcMintTimeout bounds how long a caller may wait for a read-only credential mint.
+const ReadOnlyNetrcMintTimeout = 20 * time.Second
+
+// ReadOnlyNetrcer is an optional forge capability for minting a per-dispatch,
+// repository-scoped credential that is safe to expose to pipeline steps.
+type ReadOnlyNetrcer interface {
+	ReadOnlyNetrc(ctx context.Context, r *model.Repo) (*model.Netrc, error)
 }
 
 // AggregateStatusReporter is an optional Forge capability: report a single

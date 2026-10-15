@@ -808,9 +808,11 @@ Example: `platform=linux/amd64,backend=docker`
 ### DEFAULT_PIPELINE_TIMEOUT
 
 - Name: `WOODPECKER_DEFAULT_PIPELINE_TIMEOUT`
-- Default: 60
+- Default: 55
 
-The default time for a repo in minutes before a pipeline gets killed
+The default time for a repo in minutes before a pipeline gets killed.
+
+GitHub App installation tokens last about 60 minutes from mint. Their remaining lifetime at dispatch must be at least the workflow timeout plus two minutes, so the default is 55 minutes. A repo with a longer timeout gets no clone credential, and the server logs a warning.
 
 ### MAX_PIPELINE_TIMEOUT
 
@@ -845,8 +847,7 @@ You should specify the tag of your images too, as this enforces exact matches.
 - Name: `WOODPECKER_PLUGINS_TRUSTED_CLONE`
 - Default: `docker.io/woodpeckerci/plugin-git,docker.io/woodpeckerci/plugin-git,quay.io/woodpeckerci/plugin-git`
 
-Plugins which are trusted to handle the Git credential info in clone steps.
-If a clone step use an image not in this list, Git credentials will not be injected and users have to use other methods (e.g. secrets) to clone non-public repos.
+This list is a lint allowlist. The linter warns when a custom clone image is not listed; the list does not restrict dispatch credential injection.
 
 You should specify the tag of your images too, as this enforces exact matches.
 
@@ -1068,11 +1069,7 @@ If you enable this, all repos will exclusively use the global config service end
 - Name: `WOODPECKER_CONFIG_EXTENSION_NETRC`
 - Default: false
 
-Send `netrc` to the config extension endpoint.
-
-:::warning
-The `netrc` data is pretty powerful as it contains credentials to access the repository. You can use this to clone the repository or even use the forge API to get more information about the repository.
-:::
+When enabled, the config extension receives a short-lived, repository-scoped, read-only GitHub App token. This requires GitHub with `WOODPECKER_GITHUB_APP_ID` and `WOODPECKER_GITHUB_APP_PRIVATE_KEY` configured. Other forges and GitHub installations without an App receive no alternate credential; configuration fetch does not fall back to the triggering user's OAuth token.
 
 ---
 
@@ -1090,11 +1087,7 @@ Specify a secret extension endpoint, see [Secret Extension](../../20-usage/72-ex
 - Name: `WOODPECKER_SECRET_EXTENSION_NETRC`
 - Default: false
 
-Send `netrc` to the secret extension endpoint.
-
-:::warning
-The `netrc` data is pretty powerful as it contains credentials to access the repository. You can use this to clone the repository or even use the forge API to get more information about the repository.
-:::
+When enabled globally or for a repository, the secret extension receives a short-lived, repository-scoped, read-only GitHub App token instead of the triggering user's OAuth netrc. Without a configured GitHub App, the extension receives no netrc; Woodpecker never forwards the triggering user's OAuth token.
 
 ---
 
@@ -1112,11 +1105,7 @@ Specify a registry extension endpoint, see [Registry Extension](../../20-usage/7
 - Name: `WOODPECKER_REGISTRY_EXTENSION_NETRC`
 - Default: false
 
-Send `netrc` to the registry extension endpoint.
-
-:::warning
-The `netrc` data is pretty powerful as it contains credentials to access the repository. You can use this to clone the repository or even use the forge API to get more information about the repository.
-:::
+When enabled globally or for a repository, the registry extension receives a short-lived, repository-scoped, read-only GitHub App token instead of the triggering user's OAuth netrc. Without a configured GitHub App, the extension receives no netrc; Woodpecker never forwards the triggering user's OAuth token.
 
 ---
 

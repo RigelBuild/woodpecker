@@ -211,7 +211,7 @@ func TestLintErrors(t *testing.T) {
 		},
 		{
 			from: "{steps: { build: { image: golang, settings: { test: 'true' } } }, when: { branch: main, event: push }, clone: { git: { image: some-other/plugin-git:v1.1.0 } } }",
-			want: "Specified clone image does not match allow list, netrc is not injected",
+			want: "Specified clone image is not in the clone-image lint allowlist and may receive dispatch-time read-only netrc credentials",
 		},
 		{
 			from: "steps: { build: { image: golang }, publish: { image: golang, depends_on: [ binary ] } }",
@@ -326,4 +326,60 @@ func TestBadHabits(t *testing.T) {
 		}
 		assert.True(t, found, "Expected error %q, got %q", tt.want, lerrors)
 	}
+}
+
+func TestLintUntrustedCloneWarnsThatItMayReceiveReadOnlyNetrc(t *testing.T) {
+	config, err := yaml.ParseString(`clone:
+  git:
+    image: custom/clone:latest
+`)
+	require.NoError(t, err)
+
+	err = linter.New(linter.WithTrustedClonePlugins([]string{"woodpeckerci/plugin-git"})).Lint([]*linter.WorkflowConfig{{
+		File:     "woodpecker.yml",
+		Workflow: config,
+	}})
+	require.Error(t, err)
+	var found bool
+	for _, issue := range errors.GetPipelineErrors(err) {
+		if strings.Contains(issue.Message, "may receive dispatch-time read-only netrc credentials") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected an explicit warning about clone credential exposure")
+}
+
+func TestLintRejectsReservedNetrcEnvironment(t *testing.T) {
+	rawConfig := `when: [{event: push}]
+clone: {git: {image: alpine, environment: {CI_NETRC_MACHINE: github.com}}}
+steps: {build: {image: alpine, environment: {CI_NETRC_USERNAME: user, CI_NETRC_PASSWORD: {from_secret: x}, CI_NETRC_MACHINE: github.com}}}
+services: {db: {image: postgres, environment: {CI_NETRC_USERNAME: user}}}`
+	config, err := yaml.ParseString(rawConfig)
+	require.NoError(t, err)
+	err = linter.New().Lint([]*linter.WorkflowConfig{{File: "woodpecker.yml", RawConfig: rawConfig, Workflow: config}})
+	require.Error(t, err)
+	found := map[string]bool{}
+	for _, issue := range errors.GetPipelineErrors(err) {
+		for _, name := range []string{"CI_NETRC_MACHINE", "CI_NETRC_PASSWORD", "CI_NETRC_USERNAME"} {
+			if strings.Contains(issue.Message, name) {
+				found[name] = true
+				assert.False(t, issue.IsWarning)
+			}
+		}
+	}
+	assert.Len(t, found, 3, "expected linter errors for reserved names in clone, steps, and services")
+	var reservedMessages []string
+	for _, issue := range errors.GetPipelineErrors(err) {
+		if strings.Contains(issue.Message, "is reserved for server-managed clone credentials") {
+			reservedMessages = append(reservedMessages, issue.Message)
+		}
+	}
+	assert.Equal(t, []string{
+		"`CI_NETRC_MACHINE` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_MACHINE` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_PASSWORD` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_USERNAME` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+		"`CI_NETRC_USERNAME` is reserved for server-managed clone credentials and cannot be set in a pipeline",
+	}, reservedMessages)
 }

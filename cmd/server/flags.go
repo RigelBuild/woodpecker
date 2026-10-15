@@ -230,7 +230,8 @@ var flags = append([]cli.Flag{
 		Sources: cli.EnvVars("WOODPECKER_DEFAULT_PIPELINE_TIMEOUT"),
 		Name:    "default-pipeline-timeout",
 		Usage:   "The default time in minutes for a repo in minutes before a pipeline gets killed",
-		Value:   60,
+		// The dispatch netrc needs timeout+2m of a ~60-minute GitHub App token.
+		Value: 55,
 	},
 	&cli.Int64Flag{
 		Sources: cli.EnvVars("WOODPECKER_MAX_PIPELINE_TIMEOUT"),
@@ -263,7 +264,7 @@ var flags = append([]cli.Flag{
 	&cli.StringSliceFlag{
 		Sources: cli.EnvVars("WOODPECKER_PLUGINS_TRUSTED_CLONE"),
 		Name:    "plugins-trusted-clone",
-		Usage:   "Plugins which are trusted to handle Git credentials in clone steps",
+		Usage:   "Lint allowlist for clone images; unlisted images trigger a warning but do not block credential injection",
 		Value:   constant.TrustedClonePlugins,
 		Config: cli.StringConfig{
 			TrimSpace: true,

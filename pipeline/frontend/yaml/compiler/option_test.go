@@ -20,7 +20,6 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata"
-	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
 )
 
 func TestWithWorkspace(t *testing.T) {
@@ -97,16 +96,10 @@ func TestWithLocal(t *testing.T) {
 }
 
 func TestWithNetrc(t *testing.T) {
-	compiler := New(
-		WithNetrc(
-			"octocat",
-			"password",
-			"github.com",
-		),
-	)
-	assert.Equal(t, "octocat", compiler.cloneEnv["CI_NETRC_USERNAME"])
-	assert.Equal(t, "password", compiler.cloneEnv["CI_NETRC_PASSWORD"])
+	compiler := New(WithNetrc("x-access-token", "github.com"))
+	assert.Equal(t, "x-access-token", compiler.cloneEnv["CI_NETRC_USERNAME"])
 	assert.Equal(t, "github.com", compiler.cloneEnv["CI_NETRC_MACHINE"])
+	assert.NotContains(t, compiler.cloneEnv, "CI_NETRC_PASSWORD")
 }
 
 func TestWithProxy(t *testing.T) {
@@ -153,12 +146,4 @@ func TestDefaultClonePlugin(t *testing.T) {
 		WithDefaultClonePlugin("not-an-image"),
 	)
 	assert.Equal(t, "not-an-image", compiler.defaultClonePlugin)
-}
-
-func TestWithTrustedClonePlugins(t *testing.T) {
-	compiler := New(WithTrustedClonePlugins([]string{"not-an-image"}))
-	assert.ElementsMatch(t, []string{"not-an-image"}, compiler.trustedClonePlugins)
-
-	compiler = New()
-	assert.ElementsMatch(t, constant.TrustedClonePlugins, compiler.trustedClonePlugins)
 }

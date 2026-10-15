@@ -85,12 +85,19 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 		volumes = append(volumes, volume.String())
 	}
 
-	// append default environment variables
-	environment := map[string]string{}
-	maps.Copy(environment, c.env)
-
+	environment := make(map[string]string, len(c.env)+len(c.nonPluginEnv)+1)
+	// Pipeline-provided netrc values are not trusted compile-time metadata.
+	for name := range c.env {
+		if !strings.HasPrefix(name, "CI_NETRC_") {
+			environment[name] = c.env[name]
+		}
+	}
 	if !container.IsPlugin() {
-		maps.Copy(environment, c.nonPluginEnv)
+		for name, value := range c.nonPluginEnv {
+			if !strings.HasPrefix(name, "CI_NETRC_") {
+				environment[name] = value
+			}
+		}
 	}
 
 	environment["CI_WORKSPACE"] = path.Join(workspaceBase, c.workspacePath)
@@ -122,9 +129,15 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 	if err := settings.ParamsToEnv(container.Settings, environment, "PLUGIN_", true, getSecretValue, secretMapping); err != nil {
 		return nil, err
 	}
-
 	if err := settings.ParamsToEnv(container.Environment, environment, "", false, getSecretValue, secretMapping); err != nil {
 		return nil, err
+	}
+
+	for name := range environment {
+		if strings.HasPrefix(name, "CI_NETRC_") {
+			delete(environment, name)
+			delete(secretMapping, name)
+		}
 	}
 
 	if utils.MatchImageDynamic(container.Image, c.escalated...) && container.IsPlugin() {

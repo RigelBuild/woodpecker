@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +43,8 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
+const maxWorkflowTimeoutMinutes = (math.MaxInt64 - int64(2*time.Minute)) / int64(time.Minute)
+
 type ctxKey struct{}
 
 // agentIDKey is a non imitable context key.
@@ -55,6 +59,8 @@ type RPC struct {
 	store         store.Store
 	pipelineTime  *prometheus.GaugeVec
 	pipelineCount *prometheus.CounterVec
+	// now is injectable so netrc lifetime decisions are deterministic in tests.
+	now func() time.Time
 	// reportWG, when non-nil, tracks in-flight background forge reports so tests
 	// can await them deterministically. Nil in production (fire-and-forget).
 	reportWG *sync.WaitGroup
@@ -102,8 +108,114 @@ func (s *RPC) Next(c context.Context, agentFilter rpc.Filter) (*rpc.Workflow, er
 	if err := s.lockAgentToWorkflow(c, agent, rpcWorkflow.ID); err != nil {
 		return nil, err
 	}
+	if err := s.injectNetrcForWorkflow(c, rpcWorkflow); err != nil {
+		log.Warn().Err(err).Str("workflow", rpcWorkflow.ID).Msg("could not inject read-only netrc")
+	}
 
 	return rpcWorkflow, nil
+}
+
+func (s *RPC) injectNetrcForWorkflow(ctx context.Context, w *rpc.Workflow) error {
+	workflowID, err := strconv.ParseInt(w.ID, 10, 64)
+	if err != nil {
+		stripNetrc(w)
+		return fmt.Errorf("invalid workflow ID %q: %w", w.ID, err)
+	}
+	workflow, err := s.store.WorkflowLoad(workflowID)
+	if err != nil {
+		stripNetrc(w)
+		return fmt.Errorf("could not load workflow %s: %w", w.ID, err)
+	}
+	pipeline, err := s.store.GetPipeline(workflow.PipelineID)
+	if err != nil {
+		stripNetrc(w)
+		return fmt.Errorf("could not load pipeline %d: %w", workflow.PipelineID, err)
+	}
+	repo, err := s.store.GetRepo(pipeline.RepoID)
+	if err != nil {
+		stripNetrc(w)
+		return fmt.Errorf("could not load repo %d: %w", pipeline.RepoID, err)
+	}
+	return s.injectNetrc(ctx, w, repo)
+}
+
+func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo) error {
+	stripNetrc(w)
+	if !repo.IsSCMPrivate && !server.Config.Pipeline.AuthenticatePublicRepos {
+		return nil
+	}
+	if w.Timeout <= 0 || w.Timeout > maxWorkflowTimeoutMinutes {
+		log.Warn().Int64("timeout", w.Timeout).Msg("skipping read-only netrc injection for invalid workflow timeout")
+		return nil
+	}
+
+	forgeClient, err := server.Config.Services.Manager.ForgeFromRepo(repo)
+	if err != nil {
+		return fmt.Errorf("could not load forge for repo %s: %w", repo.FullName, err)
+	}
+	readOnlyNetrcer, ok := forgeClient.(forge.ReadOnlyNetrcer)
+	if !ok {
+		return fmt.Errorf("forge %q does not support read-only netrc", forgeClient.Name())
+	}
+	mintCtx, cancel := context.WithTimeout(ctx, forge.ReadOnlyNetrcMintTimeout)
+	defer cancel()
+	netrc, err := readOnlyNetrcer.ReadOnlyNetrc(mintCtx, repo)
+	if err != nil {
+		return fmt.Errorf("could not mint read-only netrc for repo %s: %w", repo.FullName, err)
+	}
+	if netrc == nil {
+		return errors.New("forge returned an empty read-only netrc")
+	}
+	if netrc.Machine == "" || netrc.Login == "" || netrc.Password == "" {
+		return errors.New("forge returned an incomplete read-only netrc")
+	}
+	now := time.Now()
+	if s.now != nil {
+		now = s.now()
+	}
+	timeout := time.Duration(w.Timeout) * time.Minute
+	if !usableFor(netrc.ExpiresAt, now, timeout) {
+		log.Warn().
+			Int64("timeout_minutes", w.Timeout).
+			Dur("remaining_lifetime", netrc.ExpiresAt.Sub(now)).
+			Msg("skipping read-only netrc injection because token expires before workflow timeout")
+		return nil
+	}
+	if w.Config == nil {
+		return errors.New("workflow has no config for read-only netrc injection")
+	}
+
+	for _, stage := range w.Config.Stages {
+		for _, step := range stage.Steps {
+			if step.Environment == nil {
+				step.Environment = make(map[string]string, 3)
+			}
+			step.Environment["CI_NETRC_MACHINE"] = netrc.Machine
+			step.Environment["CI_NETRC_USERNAME"] = netrc.Login
+			step.Environment["CI_NETRC_PASSWORD"] = netrc.Password
+		}
+	}
+	pipeline.AddNetrcMask(w, netrc.Password)
+	return nil
+}
+
+func usableFor(expiresAt, now time.Time, timeout time.Duration) bool {
+	return expiresAt.Sub(now) >= timeout+2*time.Minute
+}
+
+func stripNetrc(w *rpc.Workflow) {
+	if w == nil || w.Config == nil {
+		return
+	}
+	for _, stage := range w.Config.Stages {
+		for _, step := range stage.Steps {
+			for name := range step.Environment {
+				if strings.HasPrefix(name, "CI_NETRC_") {
+					delete(step.Environment, name)
+				}
+			}
+		}
+	}
 }
 
 // Wait blocks until the workflow with the given ID is completed or got canceled.

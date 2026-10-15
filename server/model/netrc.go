@@ -14,9 +14,12 @@
 
 package model
 
+import "time"
+
 type Netrc struct {
-	Machine  string    `json:"machine"`
-	Login    string    `json:"login"`
-	Password string    `json:"password"`
-	Type     ForgeType `json:"type"`
+	Machine   string    `json:"machine"`
+	Login     string    `json:"login"`
+	Password  string    `json:"password"`
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
+	Type      ForgeType `json:"type"`
 }

@@ -34,11 +34,27 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
-func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, forgeYamls []*forge_types.FileMeta, envs map[string]string) ([]*builder.Item, error) {
-	netrc, err := forge.Netrc(user, repo)
+var readOnlyNetrcMintTimeout = forge.ReadOnlyNetrcMintTimeout
+
+func parsePipeline(ctx context.Context, forgeClient forge.Forge, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, forgeYamls []*forge_types.FileMeta, envs map[string]string) ([]*builder.Item, error) {
+	netrc, err := forgeClient.Netrc(user, repo)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate netrc file")
 		netrc = &model.Netrc{}
+	}
+	compileNetrc := &model.Netrc{Login: "x-access-token", Machine: netrc.Machine, Type: netrc.Type}
+	if netrc.Type != model.ForgeTypeGithub {
+		compileNetrc.Login = netrc.Login
+	}
+	var extensionNetrc *model.Netrc
+	if readOnlyNetrcer, ok := forgeClient.(forge.ReadOnlyNetrcer); ok && (repo.SecretExtensionNetrc || repo.RegistryExtensionNetrc || server.Config.Pipeline.SecretExtensionNetrc || server.Config.Pipeline.RegistryExtensionNetrc) {
+		mintCtx, cancel := context.WithTimeout(ctx, readOnlyNetrcMintTimeout)
+		extensionNetrc, err = readOnlyNetrcer.ReadOnlyNetrc(mintCtx, repo)
+		cancel()
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to generate read-only netrc for pipeline extensions")
+			extensionNetrc = nil
+		}
 	}
 
 	// get the previous pipeline so that we can send status change notifications
@@ -48,7 +64,7 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 	}
 
 	secretService := server.Config.Services.Manager.SecretServiceFromRepo(repo)
-	secs, err := secretService.SecretListPipeline(ctx, repo, currentPipeline, netrc)
+	secs, err := secretService.SecretListPipeline(ctx, repo, currentPipeline, extensionNetrc)
 	if err != nil {
 		return nil, fmt.Errorf("error getting secrets for %s#%d: %w", repo.FullName, currentPipeline.Number, err)
 	}
@@ -69,7 +85,7 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 	}
 
 	registryService := server.Config.Services.Manager.RegistryServiceFromRepo(repo)
-	regs, err := registryService.RegistryListPipeline(ctx, repo, currentPipeline, netrc)
+	regs, err := registryService.RegistryListPipeline(ctx, repo, currentPipeline, extensionNetrc)
 	if err != nil {
 		return nil, fmt.Errorf("error getting registry credentials for %s#%d: %w", repo.FullName, currentPipeline.Number, err)
 	}
@@ -98,7 +114,7 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 		}
 	}
 
-	serverMetadata := metadata.NewServerMetadata(forge, repo, currentPipeline, prev, server.Config.Server.Host)
+	serverMetadata := metadata.NewServerMetadata(forgeClient, repo, currentPipeline, prev, server.Config.Server.Host)
 
 	yamls := make([]*builder.YamlFile, 0, len(forgeYamls))
 	for _, forgeYaml := range forgeYamls {
@@ -133,13 +149,9 @@ func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, cu
 			}),
 			compiler.WithVolumes(server.Config.Pipeline.Volumes...),
 			compiler.WithNetworks(server.Config.Pipeline.Networks...),
-			compiler.WithOption(
-				compiler.WithNetrc(
-					netrc.Login,
-					netrc.Password,
-					netrc.Machine,
-				),
-				repo.IsSCMPrivate || server.Config.Pipeline.AuthenticatePublicRepos,
+			compiler.WithNetrc(
+				compileNetrc.Login,
+				compileNetrc.Machine,
 			),
 			compiler.WithDefaultClonePlugin(server.Config.Pipeline.DefaultClonePlugin),
 			compiler.WithWorkspaceFromURL(compiler.DefaultWorkspaceBase, repo.ForgeURL),
@@ -177,11 +189,11 @@ func handleParseErrors(pipeline *model.Pipeline, parseErr error) (blocking bool)
 // workflows) that always aborts the run. When the pipeline already has
 // persisted workflows (a gated pipeline being approved), setting replaceExisting
 // swaps them out for the freshly built ones.
-func createPipelineItems(ctx context.Context, forge forge.Forge, store store.Store,
+func createPipelineItems(ctx context.Context, forgeClient forge.Forge, store store.Store,
 	currentPipeline *model.Pipeline, user *model.User, repo *model.Repo,
 	yamls []*forge_types.FileMeta, envs map[string]string, replaceExisting bool,
 ) (pipeline *model.Pipeline, items []*builder.Item, parseErr, err error) {
-	pipelineItems, parseErr := parsePipeline(ctx, forge, store, currentPipeline, user, repo, yamls, envs)
+	pipelineItems, parseErr := parsePipeline(ctx, forgeClient, store, currentPipeline, user, repo, yamls, envs)
 	if pipeline_errors.HasBlockingErrors(parseErr) {
 		return currentPipeline, nil, parseErr, nil
 	}

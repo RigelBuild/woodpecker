@@ -418,6 +418,60 @@ func (c *client) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {
 	}, nil
 }
 
+// ReadOnlyNetrc mints a repository-scoped GitHub App token for one dispatch.
+func (c *client) ReadOnlyNetrc(ctx context.Context, repo *model.Repo) (*model.Netrc, error) {
+	if !c.appConfigured() {
+		return nil, errors.New("github app credentials are required for read-only netrc")
+	}
+	if repo == nil {
+		return nil, errors.New("repository is required for read-only netrc")
+	}
+	if repo.Owner == "" || repo.Name == "" {
+		return nil, errors.New("repository owner and name are required for read-only netrc")
+	}
+	repoID, err := strconv.ParseInt(string(repo.ForgeRemoteID), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid github repository id %q: %w", repo.ForgeRemoteID, err)
+	}
+	if repoID <= 0 {
+		return nil, errors.New("repository id must be positive")
+	}
+	host, err := common.ExtractHostFromCloneURL(repo.Clone)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse clone URL: %w", err)
+	}
+	appJWT, err := c.appJWT()
+	if err != nil {
+		return nil, fmt.Errorf("could not create github app JWT: %w", err)
+	}
+	appClient, err := c.newClientTokenKind(ctx, appJWT, tokenKindApp)
+	if err != nil {
+		return nil, err
+	}
+	installation, _, err := appClient.Apps.GetRepositoryInstallation(ctx, repo.Owner, repo.Name)
+	if err != nil {
+		return nil, fmt.Errorf("could not find github app installation for %s/%s: %w", repo.Owner, repo.Name, err)
+	}
+	token, _, err := appClient.Apps.CreateInstallationToken(ctx, installation.GetID(), &github.InstallationTokenOptions{
+		RepositoryIDs: []int64{repoID},
+		Permissions: &github.InstallationPermissions{
+			Contents: new("read"),
+			Metadata: new("read"),
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not create read-only github installation token for %s/%s: %w", repo.Owner, repo.Name, err)
+	}
+
+	return &model.Netrc{
+		Machine:   host,
+		Login:     "x-access-token",
+		Password:  token.GetToken(),
+		ExpiresAt: token.GetExpiresAt().Time,
+		Type:      model.ForgeTypeGithub,
+	}, nil
+}
+
 // Deactivate deactivates the repository be removing registered push hooks from
 // the GitHub repository.
 func (c *client) Deactivate(ctx context.Context, u *model.User, r *model.Repo, link string) error {

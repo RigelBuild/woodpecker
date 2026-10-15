@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 
 	"go.uber.org/multierr"
 
@@ -85,6 +86,9 @@ func (l *Linter) lintFile(config *WorkflowConfig) error {
 	if len(config.Workflow.Steps.ContainerList) == 0 {
 		linterErr = multierr.Append(linterErr, newLinterError("Invalid or missing `steps` section", config.File, "steps", false))
 	}
+	if err := l.lintReservedNetrcEnvironment(config); err != nil {
+		linterErr = multierr.Append(linterErr, err)
+	}
 
 	if err := l.lintCloneSteps(config); err != nil {
 		linterErr = multierr.Append(linterErr, err)
@@ -116,6 +120,37 @@ func (l *Linter) lintFile(config *WorkflowConfig) error {
 	return linterErr
 }
 
+func (l *Linter) lintReservedNetrcEnvironment(config *WorkflowConfig) error {
+	containers := []struct {
+		area  string
+		items []*types.Container
+	}{
+		{area: "clone", items: config.Workflow.Clone.ContainerList},
+		{area: "steps", items: config.Workflow.Steps.ContainerList},
+		{area: "services", items: config.Workflow.Services.ContainerList},
+	}
+	var linterErr error
+	for _, group := range containers {
+		for _, container := range group.items {
+			names := make([]string, 0, len(container.Environment))
+			for name := range container.Environment {
+				names = append(names, name)
+			}
+			slices.Sort(names)
+			for _, name := range names {
+				if strings.HasPrefix(name, "CI_NETRC_") {
+					field := fmt.Sprintf("%s.%s.environment.%s", group.area, container.Name, name)
+					linterErr = multierr.Append(linterErr, newLinterError(
+						fmt.Sprintf("`%s` is reserved for server-managed clone credentials and cannot be set in a pipeline", name),
+						config.File, field, false,
+					))
+				}
+			}
+		}
+	}
+	return linterErr
+}
+
 func (l *Linter) lintCloneSteps(config *WorkflowConfig) error {
 	if len(config.Workflow.Clone.ContainerList) == 0 {
 		return nil
@@ -132,7 +167,7 @@ func (l *Linter) lintCloneSteps(config *WorkflowConfig) error {
 			linterErr = multierr.Append(
 				linterErr,
 				newLinterError(
-					"Specified clone image does not match allow list, netrc is not injected",
+					"Specified clone image is not in the clone-image lint allowlist and may receive dispatch-time read-only netrc credentials",
 					config.File, fmt.Sprintf("clone.%s", container.Name), true,
 				),
 			)

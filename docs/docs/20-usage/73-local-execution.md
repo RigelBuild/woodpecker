@@ -86,6 +86,12 @@ woodpecker-cli exec \
   .woodpecker/deploy.yaml
 ```
 
+## Private repository cloning
+
+Local execution does not mint a server-side GitHub App credential. The `--netrc-machine`, `--netrc-password`, and `--netrc-username` options and the `CI_NETRC_MACHINE`, `CI_NETRC_PASSWORD`, and `CI_NETRC_USERNAME` environment inputs are no longer supported by `woodpecker-cli exec`.
+
+All `CI_NETRC_*` names are reserved for server-managed clone credentials and are rejected when declared in a pipeline. For private clones, use a clone plugin with a local secret; do not pass a user OAuth token through pipeline environment variables.
+
 ## More options
 
 See the generated [CLI reference](../40-cli.md#exec) for the full list of `exec` flags.

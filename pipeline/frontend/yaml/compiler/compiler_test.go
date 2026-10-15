@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata"
@@ -552,22 +553,59 @@ func TestCompilerCompileDefaultCloneStep(t *testing.T) {
 				CloneURL: "https://github.com/octocat/hello-world.git",
 			},
 		}),
-		// we use "/test" as custom workspace base to ensure the enforcement of the pluginWorkspaceBase is applied
 		WithWorkspaceFromURL("/test", repoURL),
-		WithNetrc("user", "pass", "example.com"),
+		WithNetrc("x-access-token", "github.com"),
 	)
 
-	// empty workflow, but with default clone step
 	backConf, err := compiler.Compile(&yaml_types.Workflow{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Len(t, backConf.Stages, 1)
-	assert.Len(t, backConf.Stages[0].Steps, 1)
-	// make sure we have the clone environment
-	assert.Contains(t, backConf.Stages[0].Steps[0].Environment, "CI_NETRC_USERNAME")
-	assert.Contains(t, backConf.Stages[0].Steps[0].Environment, "CI_NETRC_PASSWORD")
-	assert.Contains(t, backConf.Stages[0].Steps[0].Environment, "CI_NETRC_MACHINE")
-	assert.Equal(t, "user", backConf.Stages[0].Steps[0].Environment["CI_NETRC_USERNAME"])
-	assert.Equal(t, "pass", backConf.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
-	assert.Equal(t, "example.com", backConf.Stages[0].Steps[0].Environment["CI_NETRC_MACHINE"])
+	require.Len(t, backConf.Stages, 1)
+	require.Len(t, backConf.Stages[0].Steps, 1)
+	environment := backConf.Stages[0].Steps[0].Environment
+	assert.Equal(t, "x-access-token", environment["CI_NETRC_USERNAME"])
+	assert.Equal(t, "github.com", environment["CI_NETRC_MACHINE"])
+	assert.NotContains(t, environment, "CI_NETRC_PASSWORD")
+}
+
+func TestCompilerCompileOmitsPipelineNetrcCredentials(t *testing.T) {
+	compiler := New(
+		WithNetrc("x-access-token", "github.com"),
+		WithEnviron(map[string]string{
+			"CI_NETRC_USERNAME": "approver-user-token",
+			"CI_NETRC_PASSWORD": "approver-password",
+			"CI_NETRC_EXTRA":    "unexpected",
+		}),
+	)
+	workflow := &yaml_types.Workflow{
+		Clone: yaml_types.ContainerList{ContainerList: []*yaml_types.Container{{
+			Name:  "custom clone",
+			Image: "alpine",
+			Environment: map[string]any{
+				"CI_NETRC_PASSWORD": "approver-password",
+			},
+		}}},
+		Services: yaml_types.ContainerList{ContainerList: []*yaml_types.Container{{
+			Name:  "service",
+			Image: "alpine",
+		}}},
+		Steps: yaml_types.ContainerList{ContainerList: []*yaml_types.Container{{
+			Name:     "step",
+			Image:    "alpine",
+			Commands: []string{"run"},
+		}}},
+	}
+
+	config, err := compiler.Compile(workflow)
+	require.NoError(t, err)
+	for _, stage := range config.Stages {
+		for _, step := range stage.Steps {
+			assert.Equal(t, "x-access-token", step.Environment["CI_NETRC_USERNAME"], step.Name)
+			assert.Equal(t, "github.com", step.Environment["CI_NETRC_MACHINE"], step.Name)
+			assert.NotContains(t, step.Environment, "CI_NETRC_PASSWORD", step.Name)
+			assert.NotContains(t, step.Environment, "CI_NETRC_EXTRA", step.Name)
+			assert.NotContains(t, step.Environment, "approver-user-token", step.Name)
+			assert.NotContains(t, step.Environment, "approver-password", step.Name)
+		}
+	}
 }
