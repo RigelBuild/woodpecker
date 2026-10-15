@@ -82,7 +82,9 @@ func (b *branchProof) secretBranchAllowed(sec *model.Secret) (bool, error) {
 	if b.p.EventOverridden {
 		return false, nil
 	}
-	if b.p.Event != model.EventDeploy {
+	// Forges take a deploy, tag or release branch from the event payload, so only
+	// an allowed branch's current head proves where the commit came from.
+	if !slices.Contains([]model.WebhookEvent{model.EventDeploy, model.EventTag, model.EventRelease}, b.p.Event) {
 		return slices.Contains(sec.Branches, b.p.Branch), nil
 	}
 	for _, branch := range sec.Branches {

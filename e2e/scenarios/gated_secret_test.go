@@ -345,7 +345,8 @@ func TestBranchSecretWithheldFromCronVariables(t *testing.T) {
 }
 
 // startBranchSecretEnv starts a server whose workflow asks for a main-only secret
-// that deployments may use, with the forge reporting mainHead as main's head.
+// that deployments, tags and releases may use, with the forge reporting mainHead
+// as main's head.
 func startBranchSecretEnv(t *testing.T, mainHead string) *setup.ServerEnv {
 	t.Helper()
 	env := setup.StartServer(t.Context(), t, []*forge_types.FileMeta{
@@ -357,7 +358,7 @@ func startBranchSecretEnv(t *testing.T, mainHead string) *setup.ServerEnv {
 		RepoID:   env.Fixtures.Repo.ID,
 		Name:     branchSecretName,
 		Value:    "branch-filtered-value",
-		Events:   []model.WebhookEvent{model.EventPush, model.EventDeploy},
+		Events:   []model.WebhookEvent{model.EventPush, model.EventDeploy, model.EventTag, model.EventRelease},
 		Branches: []string{"main"},
 	}))
 	env.Forge.On("BranchHead", mock.Anything, mock.Anything, mock.Anything, "main").
@@ -386,6 +387,36 @@ func TestBranchSecretDeploymentNeedsBranchHead(t *testing.T) {
 		deploy := env.DummyPipeline(model.EventDeploy)
 		deploy.Commit = mainHead
 		created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, deploy)
+		require.NoError(t, err)
+		finished := setup.WaitForPipeline(t, env.Store, created.ID)
+		assert.Equal(t, model.StatusSuccess, finished.Status)
+	})
+}
+
+// TestBranchSecretTagAndReleaseNeedBranchHead: forges derive a tag or release
+// branch from the event payload, so only main's head commit proves main.
+func TestBranchSecretTagAndReleaseNeedBranchHead(t *testing.T) {
+	const mainHead = "a1b2c3d4"
+	env := startBranchSecretEnv(t, mainHead)
+
+	for _, event := range []model.WebhookEvent{model.EventTag, model.EventRelease} {
+		t.Run(string(event)+" on a feature commit with branch main gets no secret", func(t *testing.T) {
+			p := env.DummyPipeline(event)
+			p.Commit = "feedface"
+			p.Ref = "refs/tags/v1.0.0"
+			created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, p)
+			require.NoError(t, err)
+			stored, err := env.Store.GetPipeline(created.ID)
+			require.NoError(t, err)
+			assert.Equal(t, model.StatusError, stored.Status, "a %s off main's head must not get a main-only secret", event)
+		})
+	}
+
+	t.Run("tag on main's head gets the secret", func(t *testing.T) {
+		tag := env.DummyPipeline(model.EventTag)
+		tag.Commit = mainHead
+		tag.Ref = "refs/tags/v1.0.1"
+		created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, tag)
 		require.NoError(t, err)
 		finished := setup.WaitForPipeline(t, env.Store, created.ID)
 		assert.Equal(t, model.StatusSuccess, finished.Status)

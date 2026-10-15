@@ -98,8 +98,8 @@ Pull requests are not filtered by branch; use the events filter to keep a secret
 
 A manual pipeline, cron or restart that sets custom variables never gets a branch-filtered secret, because a variable such as `BASH_ENV` can run code in every step.
 
-A deployment gets a branch-filtered secret only when its commit is the current head of an allowed branch, because a deployment can name any branch for any commit.
-So a deployment that rolls back to an older commit of `main` does not get a `main`-only secret.
+A deployment, tag or release pipeline gets a branch-filtered secret only when its commit is the current head of an allowed branch, because the forge takes the branch of these events from data the sender chooses.
+So a deployment that rolls back to an older commit of `main`, or a tag or release on an older `main` commit, does not get a `main`-only secret.
 A restart that changes the event, such as a pull request restarted as a deployment, never gets a branch-filtered secret.
 
 Only an admin can widen a secret's events or loosen or clear its branch or plugins filter.
