@@ -343,3 +343,76 @@ func TestBranchSecretWithheldFromCronVariables(t *testing.T) {
 	finished := setup.WaitForPipeline(t, env.Store, control.ID)
 	assert.Equal(t, model.StatusSuccess, finished.Status, "a cron without variables gets the secret")
 }
+
+// startBranchSecretEnv starts a server whose workflow asks for a main-only secret
+// that deployments may use, with the forge reporting mainHead as main's head.
+func startBranchSecretEnv(t *testing.T, mainHead string) *setup.ServerEnv {
+	t.Helper()
+	env := setup.StartServer(t.Context(), t, []*forge_types.FileMeta{
+		{Name: ".woodpecker.yaml", Data: branchSecretYAML},
+	})
+	agent := setup.StartAgent(t, env.GRPCAddr)
+	setup.WaitForAgentRegistered(t, env.Store, agent)
+	require.NoError(t, env.Store.SecretCreate(&model.Secret{
+		RepoID:   env.Fixtures.Repo.ID,
+		Name:     branchSecretName,
+		Value:    "branch-filtered-value",
+		Events:   []model.WebhookEvent{model.EventPush, model.EventDeploy},
+		Branches: []string{"main"},
+	}))
+	env.Forge.On("BranchHead", mock.Anything, mock.Anything, mock.Anything, "main").
+		Return(&model.Commit{SHA: mainHead}, nil).Maybe()
+	return env
+}
+
+// TestBranchSecretDeploymentNeedsBranchHead: a deployment names its branch, but
+// only a commit at an allowed branch's head proves the code came from it.
+func TestBranchSecretDeploymentNeedsBranchHead(t *testing.T) {
+	const mainHead = "a1b2c3d4"
+	env := startBranchSecretEnv(t, mainHead)
+
+	t.Run("a feature commit deployed as main gets no secret", func(t *testing.T) {
+		deploy := env.DummyPipeline(model.EventDeploy)
+		deploy.Commit = "feedface"
+		deploy.Ref = "feedface"
+		created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, deploy)
+		require.NoError(t, err)
+		stored, err := env.Store.GetPipeline(created.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusError, stored.Status, "a deployment off main's head must not get a main-only secret")
+	})
+
+	t.Run("main's head deployed gets the secret", func(t *testing.T) {
+		deploy := env.DummyPipeline(model.EventDeploy)
+		deploy.Commit = mainHead
+		created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, deploy)
+		require.NoError(t, err)
+		finished := setup.WaitForPipeline(t, env.Store, created.ID)
+		assert.Equal(t, model.StatusSuccess, finished.Status)
+	})
+}
+
+// TestBranchSecretPullRestartedAsDeploymentWithheld: restarting a pull request run
+// as a deployment keeps Branch at the PR base, so it must not get a main-only
+// secret, even when the forge would report the PR head as main's head.
+func TestBranchSecretPullRestartedAsDeploymentWithheld(t *testing.T) {
+	const prHead = "c0ffee00"
+	env := startBranchSecretEnv(t, prHead)
+
+	pull := env.DummyPipeline(model.EventPull)
+	pull.Commit = prHead
+	pull.Ref = "refs/pull/5/head"
+	pull.Refspec = "feature:main"
+	created, err := pipeline.Create(t.Context(), env.Store, env.Fixtures.Repo, pull)
+	require.NoError(t, err)
+	finished := setup.WaitForPipeline(t, env.Store, created.ID)
+
+	// What the restart API does for ?event=deployment: it edits the copy in place.
+	finished.Event = model.EventDeploy
+	_, err = pipeline.Restart(t.Context(), env.Store, finished, env.Fixtures.Owner, env.Fixtures.Repo, nil)
+	require.Error(t, err, "a PR run restarted as a deployment must not get a main-only secret")
+	restarted, err := env.Store.GetPipelineNumber(env.Fixtures.Repo, finished.Number+1)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusError, restarted.Status)
+	assert.True(t, restarted.EventOverridden, "the marker must persist for later re-parses")
+}

@@ -16,6 +16,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -24,7 +25,8 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
-const trunkMergeBranchPrefix = "trunk-merge/"
+// Trunk merge-queue branches: the queue's merge branches and its trial branches.
+var trunkMergeBranchPrefixes = []string{"trunk-merge/", "trunk-temp/"}
 
 // Approval is an explicit approval of a blocked pipeline. Only Approve builds one;
 // Create and Restart pass nil, so their runs never receive a gated secret.
@@ -48,18 +50,68 @@ func secretReleased(a *Approval, approvers []string) bool {
 // pull_request run names its head branch only in the Refspec.
 func isTrunkMergeRun(p *model.Pipeline) bool {
 	head, _, _ := strings.Cut(p.Refspec, ":")
-	return strings.HasPrefix(p.Branch, trunkMergeBranchPrefix) ||
-		strings.HasPrefix(strings.TrimPrefix(p.Ref, "refs/heads/"), trunkMergeBranchPrefix) ||
-		strings.HasPrefix(head, trunkMergeBranchPrefix)
+	for _, branch := range []string{p.Branch, strings.TrimPrefix(p.Ref, "refs/heads/"), head} {
+		for _, prefix := range trunkMergeBranchPrefixes {
+			if strings.HasPrefix(branch, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// branchProof decides whether a run's Branch can be trusted for branch-filtered
+// secrets. A deployment may name any branch for any commit, so only a commit at
+// an allowed branch's current head counts; a restart that changed the event
+// cannot prove anything.
+type branchProof struct {
+	ctx   context.Context
+	forge forge.Forge
+	user  *model.User
+	repo  *model.Repo
+	p     *model.Pipeline
+	heads map[string]string
 }
 
 // secretBranchAllowed applies a secret's branch filter. Pull request runs are left
 // to the event filter, as the branch there is the PR target, not the code's source.
-func secretBranchAllowed(sec *model.Secret, p *model.Pipeline) bool {
-	if len(sec.Branches) == 0 || p.IsPullRequest() {
-		return true
+func (b *branchProof) secretBranchAllowed(sec *model.Secret) (bool, error) {
+	if len(sec.Branches) == 0 || b.p.IsPullRequest() {
+		return true, nil
 	}
-	return slices.Contains(sec.Branches, p.Branch)
+	if b.p.EventOverridden {
+		return false, nil
+	}
+	if b.p.Event != model.EventDeploy {
+		return slices.Contains(sec.Branches, b.p.Branch), nil
+	}
+	for _, branch := range sec.Branches {
+		head, err := b.branchHead(branch)
+		if err != nil {
+			return false, err
+		}
+		if head != "" && head == b.p.Commit {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// branchHead looks up a branch's head once per parse. A failed lookup fails the
+// parse, so an unreachable forge never releases a branch-filtered secret.
+func (b *branchProof) branchHead(branch string) (string, error) {
+	if head, ok := b.heads[branch]; ok {
+		return head, nil
+	}
+	commit, err := b.forge.BranchHead(b.ctx, b.user, b.repo, branch)
+	if err != nil {
+		return "", fmt.Errorf("failed to read the head of branch %q: %w", branch, err)
+	}
+	if b.heads == nil {
+		b.heads = map[string]string{}
+	}
+	b.heads[branch] = commit.SHA
+	return commit.SHA, nil
 }
 
 // secretEventAllowed mirrors the compiler's event filter, so a secret the run's

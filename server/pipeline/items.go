@@ -79,18 +79,23 @@ func parsePipeline(
 		return nil, fmt.Errorf("error getting secrets for %s#%d: %w", repo.FullName, currentPipeline.Number, err)
 	}
 
-	// Decide on the merged list, so a gated name an extension shadows stays gated.
-	// Event and branch filters apply first: a secret the run can never use is
-	// dropped, so the run fails instead of blocking on an approval that cannot help.
-	// A merge-queue run or a run with caller variables never gets a gated or
-	// branch-filtered secret, whatever its config requests.
+	// Filters run first so an unusable secret fails the run rather than blocking it;
+	// merge-queue and caller-variable runs never get a gated or branch-filtered secret.
 	trunkMerge := isTrunkMergeRun(currentPipeline)
 	callerVariables := hasCallerVariables(currentPipeline, envs)
 	released := secretReleased(approval, server.Config.Pipeline.SecretApprovers)
+	branches := &branchProof{ctx: ctx, forge: forgeClient, user: user, repo: repo, p: currentPipeline}
 	var secrets []compiler.Secret
 	var withheld []string
 	for _, sec := range secs {
-		if !secretBranchAllowed(sec, currentPipeline) || !secretEventAllowed(sec, currentPipeline) {
+		if !secretEventAllowed(sec, currentPipeline) {
+			continue
+		}
+		branchAllowed, err := branches.secretBranchAllowed(sec)
+		if err != nil {
+			return nil, fmt.Errorf("error checking the branch filter of secret %q for %s#%d: %w", sec.Name, repo.FullName, currentPipeline.Number, err)
+		}
+		if !branchAllowed {
 			continue
 		}
 		if callerVariables && (sec.RequireApproval || len(sec.Branches) > 0) {

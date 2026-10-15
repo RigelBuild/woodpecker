@@ -62,6 +62,7 @@ var migrationTasks = []*xormigrate.Migration{
 	&addWorkflowOnMetadataEdit,
 	&addSecretApprovalAndBranches,
 	&addSecretVersion,
+	&addPipelineEventOverridden,
 }
 
 var allBeans = []any{

@@ -240,6 +240,9 @@ func TestParsePipelineTrunkMergeRunDropsGatedSecret(t *testing.T) {
 		{ID: 1, Event: model.EventPush, Branch: "main", Ref: "refs/heads/trunk-merge/main/1"},
 		// GitHub sets Branch to the base and Ref to the PR ref; only Refspec names the head.
 		{ID: 1, Event: model.EventPull, Branch: "main", Ref: "refs/pull/5/head", Refspec: "trunk-merge/main/5:main"},
+		// Trunk's trial branches are merge-queue runs too.
+		{ID: 1, Event: model.EventPush, Branch: "trunk-temp/pr-2266/89b21c36", Ref: "refs/heads/trunk-temp/pr-2266/89b21c36"},
+		{ID: 1, Event: model.EventPull, Branch: "main", Ref: "refs/pull/5/head", Refspec: "trunk-temp/pr-5/abc:main"},
 	} {
 		for _, approval := range []*Approval{nil, {Login: "test-owner", Session: true}} {
 			t.Run(p.Branch+" "+p.Ref+" "+p.Refspec, func(t *testing.T) {

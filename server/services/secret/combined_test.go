@@ -129,6 +129,34 @@ func TestCombinedSecretListPipeline(t *testing.T) {
 				{Name: "ext-only", Value: "only-in-ext"},
 			},
 		},
+		{
+			// The compiler lowercases names, so a lowercase extension token must not
+			// slip past the stored TOKEN's branch, event and image limits.
+			name:     "Case-variant extension shadow keeps the stored limits",
+			repoName: "case-variant",
+			dbSecrets: []*model.Secret{{
+				ID: 1, RepoID: 1, Name: "TOKEN", Value: "db-value",
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+				Images:   []string{"plugins/deploy"},
+			}},
+			expected: []*model.Secret{{
+				Name: "token", Value: "external-value",
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+				Images:   []string{"plugins/deploy"},
+			}},
+		},
+		{
+			name:     "Case-variant extension shadow keeps the stored gate",
+			repoName: "case-variant",
+			dbSecrets: []*model.Secret{
+				{ID: 1, RepoID: 1, Name: "TOKEN", Value: "db-value", RequireApproval: true},
+			},
+			expected: []*model.Secret{
+				{Name: "token", Value: "external-value", RequireApproval: true},
+			},
+		},
 	}
 
 	pubEd25519Key, privEd25519Key, err := ed25519.GenerateKey(rand.Reader)
@@ -176,6 +204,13 @@ func TestCombinedSecretListPipeline(t *testing.T) {
 			return
 		case "server-error":
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		case "case-variant":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"secrets": []*model.Secret{{Name: "token", Value: "external-value"}},
+			}))
 			return
 		}
 

@@ -99,16 +99,16 @@ func (_c *MockService_GlobalSecretCreate_Call) RunAndReturn(run func(secret *mod
 }
 
 // GlobalSecretDelete provides a mock function for the type MockService
-func (_mock *MockService) GlobalSecretDelete(s string) error {
-	ret := _mock.Called(s)
+func (_mock *MockService) GlobalSecretDelete(secret *model.Secret) error {
+	ret := _mock.Called(secret)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GlobalSecretDelete")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(string) error); ok {
-		r0 = returnFunc(s)
+	if returnFunc, ok := ret.Get(0).(func(*model.Secret) error); ok {
+		r0 = returnFunc(secret)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -121,16 +121,16 @@ type MockService_GlobalSecretDelete_Call struct {
 }
 
 // GlobalSecretDelete is a helper method to define mock.On call
-//   - s string
-func (_e *MockService_Expecter) GlobalSecretDelete(s any) *MockService_GlobalSecretDelete_Call {
-	return &MockService_GlobalSecretDelete_Call{Call: _e.mock.On("GlobalSecretDelete", s)}
+//   - secret *model.Secret
+func (_e *MockService_Expecter) GlobalSecretDelete(secret any) *MockService_GlobalSecretDelete_Call {
+	return &MockService_GlobalSecretDelete_Call{Call: _e.mock.On("GlobalSecretDelete", secret)}
 }
 
-func (_c *MockService_GlobalSecretDelete_Call) Run(run func(s string)) *MockService_GlobalSecretDelete_Call {
+func (_c *MockService_GlobalSecretDelete_Call) Run(run func(secret *model.Secret)) *MockService_GlobalSecretDelete_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 string
+		var arg0 *model.Secret
 		if args[0] != nil {
-			arg0 = args[0].(string)
+			arg0 = args[0].(*model.Secret)
 		}
 		run(
 			arg0,
@@ -144,7 +144,7 @@ func (_c *MockService_GlobalSecretDelete_Call) Return(err error) *MockService_Gl
 	return _c
 }
 
-func (_c *MockService_GlobalSecretDelete_Call) RunAndReturn(run func(s string) error) *MockService_GlobalSecretDelete_Call {
+func (_c *MockService_GlobalSecretDelete_Call) RunAndReturn(run func(secret *model.Secret) error) *MockService_GlobalSecretDelete_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -382,16 +382,16 @@ func (_c *MockService_OrgSecretCreate_Call) RunAndReturn(run func(n int64, secre
 }
 
 // OrgSecretDelete provides a mock function for the type MockService
-func (_mock *MockService) OrgSecretDelete(n int64, s string) error {
-	ret := _mock.Called(n, s)
+func (_mock *MockService) OrgSecretDelete(n int64, secret *model.Secret) error {
+	ret := _mock.Called(n, secret)
 
 	if len(ret) == 0 {
 		panic("no return value specified for OrgSecretDelete")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(int64, string) error); ok {
-		r0 = returnFunc(n, s)
+	if returnFunc, ok := ret.Get(0).(func(int64, *model.Secret) error); ok {
+		r0 = returnFunc(n, secret)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -405,20 +405,20 @@ type MockService_OrgSecretDelete_Call struct {
 
 // OrgSecretDelete is a helper method to define mock.On call
 //   - n int64
-//   - s string
-func (_e *MockService_Expecter) OrgSecretDelete(n any, s any) *MockService_OrgSecretDelete_Call {
-	return &MockService_OrgSecretDelete_Call{Call: _e.mock.On("OrgSecretDelete", n, s)}
+//   - secret *model.Secret
+func (_e *MockService_Expecter) OrgSecretDelete(n any, secret any) *MockService_OrgSecretDelete_Call {
+	return &MockService_OrgSecretDelete_Call{Call: _e.mock.On("OrgSecretDelete", n, secret)}
 }
 
-func (_c *MockService_OrgSecretDelete_Call) Run(run func(n int64, s string)) *MockService_OrgSecretDelete_Call {
+func (_c *MockService_OrgSecretDelete_Call) Run(run func(n int64, secret *model.Secret)) *MockService_OrgSecretDelete_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 int64
 		if args[0] != nil {
 			arg0 = args[0].(int64)
 		}
-		var arg1 string
+		var arg1 *model.Secret
 		if args[1] != nil {
-			arg1 = args[1].(string)
+			arg1 = args[1].(*model.Secret)
 		}
 		run(
 			arg0,
@@ -433,7 +433,7 @@ func (_c *MockService_OrgSecretDelete_Call) Return(err error) *MockService_OrgSe
 	return _c
 }
 
-func (_c *MockService_OrgSecretDelete_Call) RunAndReturn(run func(n int64, s string) error) *MockService_OrgSecretDelete_Call {
+func (_c *MockService_OrgSecretDelete_Call) RunAndReturn(run func(n int64, secret *model.Secret) error) *MockService_OrgSecretDelete_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -689,16 +689,16 @@ func (_c *MockService_SecretCreate_Call) RunAndReturn(run func(repo *model.Repo,
 }
 
 // SecretDelete provides a mock function for the type MockService
-func (_mock *MockService) SecretDelete(repo *model.Repo, s string) error {
-	ret := _mock.Called(repo, s)
+func (_mock *MockService) SecretDelete(repo *model.Repo, secret *model.Secret) error {
+	ret := _mock.Called(repo, secret)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SecretDelete")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(*model.Repo, string) error); ok {
-		r0 = returnFunc(repo, s)
+	if returnFunc, ok := ret.Get(0).(func(*model.Repo, *model.Secret) error); ok {
+		r0 = returnFunc(repo, secret)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -712,20 +712,20 @@ type MockService_SecretDelete_Call struct {
 
 // SecretDelete is a helper method to define mock.On call
 //   - repo *model.Repo
-//   - s string
-func (_e *MockService_Expecter) SecretDelete(repo any, s any) *MockService_SecretDelete_Call {
-	return &MockService_SecretDelete_Call{Call: _e.mock.On("SecretDelete", repo, s)}
+//   - secret *model.Secret
+func (_e *MockService_Expecter) SecretDelete(repo any, secret any) *MockService_SecretDelete_Call {
+	return &MockService_SecretDelete_Call{Call: _e.mock.On("SecretDelete", repo, secret)}
 }
 
-func (_c *MockService_SecretDelete_Call) Run(run func(repo *model.Repo, s string)) *MockService_SecretDelete_Call {
+func (_c *MockService_SecretDelete_Call) Run(run func(repo *model.Repo, secret *model.Secret)) *MockService_SecretDelete_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 *model.Repo
 		if args[0] != nil {
 			arg0 = args[0].(*model.Repo)
 		}
-		var arg1 string
+		var arg1 *model.Secret
 		if args[1] != nil {
-			arg1 = args[1].(string)
+			arg1 = args[1].(*model.Secret)
 		}
 		run(
 			arg0,
@@ -740,7 +740,7 @@ func (_c *MockService_SecretDelete_Call) Return(err error) *MockService_SecretDe
 	return _c
 }
 
-func (_c *MockService_SecretDelete_Call) RunAndReturn(run func(repo *model.Repo, s string) error) *MockService_SecretDelete_Call {
+func (_c *MockService_SecretDelete_Call) RunAndReturn(run func(repo *model.Repo, secret *model.Secret) error) *MockService_SecretDelete_Call {
 	_c.Call.Return(run)
 	return _c
 }

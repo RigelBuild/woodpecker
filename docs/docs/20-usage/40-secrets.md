@@ -98,6 +98,10 @@ Pull requests are not filtered by branch; use the events filter to keep a secret
 
 A manual pipeline, cron or restart that sets custom variables never gets a branch-filtered secret, because a variable such as `BASH_ENV` can run code in every step.
 
+A deployment gets a branch-filtered secret only when its commit is the current head of an allowed branch, because a deployment can name any branch for any commit.
+So a deployment that rolls back to an older commit of `main` does not get a `main`-only secret.
+A restart that changes the event, such as a pull request restarted as a deployment, never gets a branch-filtered secret.
+
 Only an admin can widen a secret's events or loosen or clear its branch or plugins filter.
 Other users with access to the secret can only narrow these filters.
 A change based on an outdated copy of the secret is rejected, so reload the secret and retry.
@@ -111,9 +115,10 @@ Approvers are matched by login, so renaming a forge account to a listed login gr
 An approval through an API token, a decline, or a restart never releases it; a restarted pipeline must be approved again.
 
 The events and branch filters apply first: a pipeline the secret is not available to fails to compile with "secret not found" instead of blocking.
-Merge-queue (`trunk-merge/`) pipelines and pipelines with custom variables never get the secret.
+Merge-queue (`trunk-merge/` and `trunk-temp/`) pipelines and pipelines with custom variables never get the secret.
 
 When several secrets share a name, the repository secret supplies the value, but the strictest approval setting and filters of all of them apply.
+Names are compared without case, so `DEPLOY_TOKEN` and `deploy_token` count as the same secret.
 If a secret extension fails, every stored secret requires approval until the extension recovers.
 
 Only a secret approver's browser session can create, change or delete a secret that requires approval.

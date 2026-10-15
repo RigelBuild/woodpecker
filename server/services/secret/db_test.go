@@ -117,3 +117,27 @@ func TestSecretListPipelineKeepsStrictestPolicy(t *testing.T) {
 	}
 	assert.False(t, ungatedRepo.RequireApproval, "the stored row must not be mutated")
 }
+
+// A repo DEPLOY_TOKEN limited to main and an unfiltered org deploy_token are one
+// name to the compiler, so the repo's limits bind the org value as well.
+func TestSecretListPipelineMergesCaseVariantsAcrossScopes(t *testing.T) {
+	repoMainOnly := &model.Secret{
+		ID: 3, RepoID: 1, Name: "DEPLOY_TOKEN", Value: "value-repo",
+		Events:   []model.WebhookEvent{model.EventPush},
+		Branches: []string{"main"},
+		Images:   []string{"plugins/deploy"},
+	}
+	orgOpen := &model.Secret{ID: 2, OrgID: 1, Name: "deploy_token", Value: "value-org"}
+
+	mockStore := store_mocks.NewMockStore(t)
+	mockStore.On("SecretList", mock.Anything, mock.Anything, mock.Anything).Once().Return([]*model.Secret{orgOpen, repoMainOnly}, nil)
+
+	s, err := secret.NewDB(mockStore).SecretListPipeline(t.Context(), &model.Repo{}, &model.Pipeline{}, nil)
+	assert.NoError(t, err)
+	if assert.Len(t, s, 1, "case variants of one name must merge into one secret") {
+		assert.Equal(t, "value-repo", s[0].Value, "the nearest scope still supplies the value")
+		assert.Equal(t, []string{"main"}, s[0].Branches)
+		assert.Equal(t, []model.WebhookEvent{model.EventPush}, s[0].Events)
+		assert.Equal(t, []string{"plugins/deploy"}, s[0].Images)
+	}
+}

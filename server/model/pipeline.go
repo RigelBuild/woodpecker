@@ -58,6 +58,9 @@ type Pipeline struct {
 	Cron                 string                  `json:"cron,omitempty"          xorm:"cron"` // name of the cron job
 	FromFork             bool                    `json:"from_fork,omitempty"     xorm:"from_fork"`
 	Version              string                  `json:"version"                 xorm:"'version'"`
+	// EventOverridden marks a restart whose event differs from the run it copies;
+	// its Branch then no longer proves where the commit came from.
+	EventOverridden bool `json:"event_overridden,omitempty" xorm:"event_overridden"`
 
 	// Ongoing Work: https://github.com/woodpecker-ci/woodpecker/pull/4626
 	// // New

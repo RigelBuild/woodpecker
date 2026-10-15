@@ -64,10 +64,17 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		}
 	}
 
+	// Callers override the event on their copy, so compare with the stored run.
+	stored, err := store.GetPipeline(lastPipeline.ID)
+	if err != nil {
+		return nil, &ErrNotFound{Msg: fmt.Sprintf("failure to get pipeline %d for %s. %s", lastPipeline.ID, repo.FullName, err)}
+	}
+
 	newPipeline := createNewOutOfOld(lastPipeline)
 	newPipeline.Parent = lastPipeline.Number
 	newPipeline.RerunCount++
 	newPipeline.Version = version.String()
+	newPipeline.EventOverridden = stored.EventOverridden || stored.Event != lastPipeline.Event
 
 	err = store.CreatePipeline(newPipeline)
 	if err != nil {

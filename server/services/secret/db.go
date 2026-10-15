@@ -45,7 +45,7 @@ func (d *db) SecretListPipeline(_ context.Context, repo *model.Repo, _ *model.Pi
 		return nil, err
 	}
 
-	// Return only secrets with unique name
+	// Return only secrets with unique name, matched case-insensitively like the compiler.
 	// Priority order in case of duplicate names are repository, user/organization, global.
 	// The winner supplies the value; a shadowed same-name secret still narrows its policy.
 	secrets := make([]*model.Secret, 0, len(s))
@@ -64,15 +64,16 @@ func (d *db) SecretListPipeline(_ context.Context, repo *model.Repo, _ *model.Pi
 			if secret.IsRepository() != condition.IsRepository || secret.IsOrganization() != condition.IsOrganization || secret.IsGlobal() != condition.IsGlobal {
 				continue
 			}
-			i, ok := index[secret.Name]
+			key := secretKey(secret.Name)
+			i, ok := index[key]
 			if !ok {
-				index[secret.Name] = len(secrets)
+				index[key] = len(secrets)
 				secrets = append(secrets, secret)
 				continue
 			}
 			narrowed, usable := withStrictestPolicy(secrets[i], secret)
 			if !usable {
-				unusable[secret.Name] = struct{}{}
+				unusable[key] = struct{}{}
 				continue
 			}
 			secrets[i] = narrowed
@@ -81,7 +82,7 @@ func (d *db) SecretListPipeline(_ context.Context, repo *model.Repo, _ *model.Pi
 	// Filters that share nothing fit no run, so the name is dropped and a step
 	// asking for it fails instead of getting either value.
 	return slices.DeleteFunc(secrets, func(secret *model.Secret) bool {
-		_, drop := unusable[secret.Name]
+		_, drop := unusable[secretKey(secret.Name)]
 		return drop
 	}), nil
 }
@@ -94,11 +95,7 @@ func (d *db) SecretUpdate(_ *model.Repo, in *model.Secret) error {
 	return d.store.SecretUpdate(in)
 }
 
-func (d *db) SecretDelete(repo *model.Repo, name string) error {
-	secret, err := d.store.SecretFind(repo, name)
-	if err != nil {
-		return err
-	}
+func (d *db) SecretDelete(_ *model.Repo, secret *model.Secret) error {
 	return d.store.SecretDelete(secret)
 }
 
@@ -118,11 +115,7 @@ func (d *db) OrgSecretUpdate(_ int64, in *model.Secret) error {
 	return d.store.SecretUpdate(in)
 }
 
-func (d *db) OrgSecretDelete(owner int64, name string) error {
-	secret, err := d.store.OrgSecretFind(owner, name)
-	if err != nil {
-		return err
-	}
+func (d *db) OrgSecretDelete(_ int64, secret *model.Secret) error {
 	return d.store.SecretDelete(secret)
 }
 
@@ -142,10 +135,6 @@ func (d *db) GlobalSecretUpdate(in *model.Secret) error {
 	return d.store.SecretUpdate(in)
 }
 
-func (d *db) GlobalSecretDelete(name string) error {
-	secret, err := d.store.GlobalSecretFind(name)
-	if err != nil {
-		return err
-	}
+func (d *db) GlobalSecretDelete(secret *model.Secret) error {
 	return d.store.SecretDelete(secret)
 }

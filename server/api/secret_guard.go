@@ -106,6 +106,29 @@ func writeSecretUpdateErr(c *gin.Context, name string, err error) {
 	c.String(http.StatusInternalServerError, "Error updating secret %q. %s", name, err)
 }
 
+// deleteGuardedSecret deletes the row the gate was checked against. If the row
+// changed first, the gate is checked again on the current row before reporting 409.
+func deleteGuardedSecret(c *gin.Context, checked *model.Secret, remove func(*model.Secret) error, reload func() (*model.Secret, error)) {
+	err := remove(checked)
+	if errors.Is(err, types.ErrUpdateConflict) {
+		current, findErr := reload()
+		if findErr != nil {
+			handleDBError(c, findErr)
+			return
+		}
+		if denyGatedSecretChange(c, current, nil) {
+			return
+		}
+		c.String(http.StatusConflict, "Secret %q changed since it was read, retry the delete", checked.Name)
+		return
+	}
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // applySecretPatch copies the patch onto a stored secret. Branches replace the
 // list when sent, so an empty list clears the filter.
 func applySecretPatch(secret *model.Secret, in *model.SecretPatch) {

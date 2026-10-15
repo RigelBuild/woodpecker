@@ -526,6 +526,8 @@ func TestPostPipeline(t *testing.T) {
 
 		mockStore.On("GetUser", int64(1)).Return(fakeUser, nil)
 		mockStore.On("ConfigsForPipeline", parent.ID).Return([]*model.Config{}, nil)
+		storedParent := *parent
+		mockStore.On("GetPipeline", parent.ID).Return(&storedParent, nil)
 		mockStore.On("CreatePipeline", mock.Anything).Return(nil)
 		mockStore.On("GetPipelineLastBefore", fakeRepo, "main", mock.Anything).Return(nil, types.ErrRecordNotExist).Maybe()
 		mockStore.On("GetActivePipelineList", fakeRepo).Return([]*model.Pipeline{}, nil).Maybe()

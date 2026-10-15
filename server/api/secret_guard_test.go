@@ -25,6 +25,9 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	manager_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/server/services/secret"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
@@ -309,7 +312,7 @@ func TestGlobalSecretGatedGuards(t *testing.T) {
 		c.Params = gin.Params{{Key: "secret", Value: "GATED"}}
 		asCaller(c, approverLogin, true, true)
 		svc.On("GlobalSecretFind", "GATED").Return(gated(), nil)
-		svc.On("GlobalSecretDelete", "GATED").Return(nil)
+		svc.On("GlobalSecretDelete", mock.MatchedBy(func(s *model.Secret) bool { return s.Name == "GATED" })).Return(nil)
 
 		DeleteGlobalSecret(c)
 
@@ -381,4 +384,107 @@ func TestRepoSecretStalePatchConflicts(t *testing.T) {
 	PatchSecret(c)
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// A gate an approver turns on after the handler's check must still stop a
+// non-approver's delete: the service re-checks against the row it deletes.
+func TestSecretDeleteRechecksGateAgainstDeletedRow(t *testing.T) {
+	useSecretApprovers(t, approverLogin)
+
+	for name, scope := range map[string]struct {
+		find   func(*testing.T, store.Store, *model.Secret) (*model.Secret, error)
+		delete func(*gin.Context)
+		ctx    func(*gin.Context)
+		seed   *model.Secret
+	}{
+		"repo": {
+			seed: &model.Secret{RepoID: secretTestRepo.ID, Name: "TOKEN", Value: "v", Events: []model.WebhookEvent{model.EventPush}},
+			ctx:  func(c *gin.Context) { c.Set("repo", secretTestRepo) },
+			find: func(t *testing.T, s store.Store, in *model.Secret) (*model.Secret, error) {
+				return s.SecretFind(secretTestRepo, in.Name)
+			},
+			delete: DeleteSecret,
+		},
+		"org": {
+			seed: &model.Secret{OrgID: orgSecretID, Name: "TOKEN", Value: "v", Events: []model.WebhookEvent{model.EventPush}},
+			ctx:  func(c *gin.Context) { c.Set("org", &model.Org{ID: orgSecretID, Name: "acme"}) },
+			find: func(t *testing.T, s store.Store, in *model.Secret) (*model.Secret, error) {
+				return s.OrgSecretFind(orgSecretID, in.Name)
+			},
+			delete: DeleteOrgSecret,
+		},
+		"global": {
+			seed: &model.Secret{Name: "TOKEN", Value: "v", Events: []model.WebhookEvent{model.EventPush}},
+			ctx:  func(*gin.Context) {},
+			find: func(t *testing.T, s store.Store, in *model.Secret) (*model.Secret, error) {
+				return s.GlobalSecretFind(in.Name)
+			},
+			delete: DeleteGlobalSecret,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			real := newTestStore(t)
+			require.NoError(t, real.SecretCreate(scope.seed))
+			// The approver gates the secret once the handler has read it ungated.
+			hooked := &gateAfterFindStore{Store: real, gate: func() {
+				row, err := scope.find(t, real, scope.seed)
+				require.NoError(t, err)
+				row.RequireApproval = true
+				require.NoError(t, real.SecretUpdate(row))
+			}}
+			useSecretService(t, secret.NewDB(hooked))
+
+			c, rec := newSecretCtx(t, http.MethodDelete, nil)
+			scope.ctx(c)
+			c.Params = gin.Params{{Key: "secret", Value: scope.seed.Name}}
+			asCaller(c, "push-only", false, true)
+
+			scope.delete(c)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			row, err := scope.find(t, real, scope.seed)
+			require.NoError(t, err, "the now-gated secret must survive")
+			assert.True(t, row.RequireApproval)
+		})
+	}
+}
+
+// gateAfterFindStore runs gate once, right after the first secret lookup, which
+// is the handler's guard read.
+type gateAfterFindStore struct {
+	store.Store
+	gate func()
+}
+
+func (s *gateAfterFindStore) fire() {
+	if s.gate != nil {
+		g := s.gate
+		s.gate = nil
+		g()
+	}
+}
+
+func (s *gateAfterFindStore) SecretFind(repo *model.Repo, name string) (*model.Secret, error) {
+	defer s.fire()
+	return s.Store.SecretFind(repo, name)
+}
+
+func (s *gateAfterFindStore) OrgSecretFind(orgID int64, name string) (*model.Secret, error) {
+	defer s.fire()
+	return s.Store.OrgSecretFind(orgID, name)
+}
+
+func (s *gateAfterFindStore) GlobalSecretFind(name string) (*model.Secret, error) {
+	defer s.fire()
+	return s.Store.GlobalSecretFind(name)
+}
+
+func useSecretService(t *testing.T, svc secret.Service) {
+	t.Helper()
+	mgr := manager_mocks.NewMockManager(t)
+	mgr.On("SecretServiceFromRepo", mock.Anything).Return(svc).Maybe()
+	mgr.On("SecretService").Return(svc).Maybe()
+	previous := server.Config.Services.Manager
+	server.Config.Services.Manager = mgr
+	t.Cleanup(func() { server.Config.Services.Manager = previous })
 }

@@ -226,7 +226,7 @@ func TestDeleteGlobalSecret(t *testing.T) {
 		c, _, svc := newGlobalSecretCtxWithService(t, http.MethodDelete, nil)
 		c.Params = gin.Params{{Key: "secret", Value: "api_token"}}
 		svc.On("GlobalSecretFind", "api_token").Return(storedGlobalSecret(), nil)
-		svc.On("GlobalSecretDelete", "api_token").Return(nil)
+		svc.On("GlobalSecretDelete", mock.MatchedBy(func(s *model.Secret) bool { return s.Name == "api_token" })).Return(nil)
 
 		DeleteGlobalSecret(c)
 

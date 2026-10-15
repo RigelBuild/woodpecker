@@ -236,7 +236,7 @@ func TestDeleteSecret(t *testing.T) {
 		c, _, svc := newSecretCtxWithService(t, http.MethodDelete, nil)
 		c.Params = gin.Params{{Key: "secret", Value: "api_token"}}
 		svc.On("SecretFind", secretTestRepo, "api_token").Return(storedSecret(), nil)
-		svc.On("SecretDelete", secretTestRepo, "api_token").Return(nil)
+		svc.On("SecretDelete", secretTestRepo, mock.MatchedBy(func(s *model.Secret) bool { return s.Name == "api_token" })).Return(nil)
 
 		DeleteSecret(c)
 

@@ -22,6 +22,12 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
+// secretKey is the identity the compiler resolves a secret by: it lowercases names,
+// so case variants are one secret and must share the strictest policy.
+func secretKey(name string) string {
+	return strings.ToLower(name)
+}
+
 // withStrictestPolicy returns a copy of value whose gate and filters are no looser
 // than other's, so a same-name secret from another source can never widen access.
 // It reports false when the filters share nothing, as the name then fits no run.

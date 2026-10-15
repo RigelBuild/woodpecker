@@ -187,9 +187,6 @@ func DeleteOrgSecret(c *gin.Context) {
 	if denyGatedSecretChange(c, secret, nil) {
 		return
 	}
-	if err := secretService.OrgSecretDelete(org.ID, name); err != nil {
-		handleDBError(c, err)
-		return
-	}
-	c.Status(http.StatusNoContent)
+	deleteGuardedSecret(c, secret, func(s *model.Secret) error { return secretService.OrgSecretDelete(org.ID, s) },
+		func() (*model.Secret, error) { return secretService.OrgSecretFind(org.ID, name) })
 }

@@ -173,9 +173,6 @@ func DeleteGlobalSecret(c *gin.Context) {
 	if denyGatedSecretChange(c, secret, nil) {
 		return
 	}
-	if err := secretService.GlobalSecretDelete(name); err != nil {
-		handleDBError(c, err)
-		return
-	}
-	c.Status(http.StatusNoContent)
+	deleteGuardedSecret(c, secret, secretService.GlobalSecretDelete,
+		func() (*model.Secret, error) { return secretService.GlobalSecretFind(name) })
 }

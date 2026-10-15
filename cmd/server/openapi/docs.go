@@ -5133,6 +5133,10 @@ const docTemplate = `{
                 "event": {
                     "$ref": "#/definitions/WebhookEvent"
                 },
+                "event_overridden": {
+                    "description": "EventOverridden marks a restart whose event differs from the run it copies;\nits Branch then no longer proves where the commit came from.",
+                    "type": "boolean"
+                },
                 "event_reason": {
                     "type": "array",
                     "items": {

@@ -28,17 +28,18 @@ type Service interface {
 	SecretList(*model.Repo, *model.ListOptionsWithAll) ([]*model.Secret, error)
 	SecretCreate(*model.Repo, *model.Secret) error
 	SecretUpdate(*model.Repo, *model.Secret) error
-	SecretDelete(*model.Repo, string) error
+	// SecretDelete deletes the row as read; a row changed since then is not deleted.
+	SecretDelete(*model.Repo, *model.Secret) error
 	// Organization secrets
 	OrgSecretFind(int64, string) (*model.Secret, error)
 	OrgSecretList(int64, *model.ListOptionsWithAll) ([]*model.Secret, error)
 	OrgSecretCreate(int64, *model.Secret) error
 	OrgSecretUpdate(int64, *model.Secret) error
-	OrgSecretDelete(int64, string) error
+	OrgSecretDelete(int64, *model.Secret) error
 	// Global secrets
 	GlobalSecretFind(string) (*model.Secret, error)
 	GlobalSecretList(*model.ListOptionsWithAll) ([]*model.Secret, error)
 	GlobalSecretCreate(*model.Secret) error
 	GlobalSecretUpdate(*model.Secret) error
-	GlobalSecretDelete(string) error
+	GlobalSecretDelete(*model.Secret) error
 }

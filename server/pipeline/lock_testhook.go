@@ -25,10 +25,3 @@ func SetLockWaitHook(hook func(pipelineID int64)) {
 	}
 	lockWaitHook.Store(&hook)
 }
-
-// PipelineLockEntries reports how many pipelines currently have a lock entry.
-func PipelineLockEntries() int {
-	pipelineLocks.mu.Lock()
-	defer pipelineLocks.mu.Unlock()
-	return len(pipelineLocks.entries)
-}
