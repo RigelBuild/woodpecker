@@ -36,6 +36,13 @@ type secretsReplaceWriter struct {
 	prefixTables     [][]int
 	pending          []byte
 	maskUntilNewline bool
+	boundarySteps    *int // Enables deterministic complexity checks in tests.
+}
+
+func (w *secretsReplaceWriter) recordBoundaryStep() {
+	if w.boundarySteps != nil {
+		(*w.boundarySteps)++
+	}
 }
 
 type secretMatch struct {
@@ -48,6 +55,10 @@ type secretMatch struct {
 // and matched within each line. Possible secret prefixes are held until the
 // next write or Close.
 func NewSecretsReplaceWriter(dst io.Writer, secrets []string) io.WriteCloser {
+	return newSecretsReplaceWriter(dst, secrets)
+}
+
+func newSecretsReplaceWriter(dst io.Writer, secrets []string) *secretsReplaceWriter {
 	w := &secretsReplaceWriter{dst: dst}
 	for _, secret := range secrets {
 		for part := range strings.SplitSeq(strings.TrimSpace(secret), "\n") {
@@ -78,29 +89,13 @@ func prefixTable(pattern []byte) []int {
 
 func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 	if len(w.secrets) == 0 {
-		if _, err := w.dst.Write(p); err != nil {
-			return 0, err
-		}
-		return len(p), nil
+		return w.writePassThrough(p)
 	}
 	if len(p) == 0 {
 		return 0, nil
 	}
 	if w.maskUntilNewline {
-		newline := bytes.IndexByte(p, '\n')
-		if newline < 0 {
-			return len(p), nil
-		}
-		if err := w.writeOutput(append(bytes.Clone(secretsMask), '\n')); err != nil {
-			return 0, err
-		}
-		w.maskUntilNewline = false
-		if newline+1 < len(p) {
-			if _, err := w.Write(p[newline+1:]); err != nil {
-				return 0, err
-			}
-		}
-		return len(p), nil
+		return w.writeMaskedUntilNewline(p)
 	}
 
 	data := p
@@ -124,48 +119,39 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 		data = data[lineEnd:]
 	}
 
-	// KMP finds the longest suffix that is a proper prefix of any secret.
-	holdStart := len(data)
-	for i, secret := range w.secrets {
-		matched := 0
-		for _, b := range data {
-			for matched > 0 && b != secret[matched] {
-				matched = w.prefixTables[i][matched-1]
-			}
-			if b == secret[matched] {
-				matched++
-			}
-			if matched == len(secret) {
-				matched = w.prefixTables[i][matched-1]
-			}
-		}
-		if matched > 0 {
-			holdStart = min(holdStart, len(data)-matched)
+	holdStart := w.findBoundary(data)
+	return w.holdPendingLine(p, data, holdStart)
+}
+
+func (w *secretsReplaceWriter) writePassThrough(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (w *secretsReplaceWriter) writeMaskedUntilNewline(p []byte) (int, error) {
+	newline := bytes.IndexByte(p, '\n')
+	if newline < 0 {
+		return len(p), nil
+	}
+	if err := w.writeOutput(append(bytes.Clone(secretsMask), '\n')); err != nil {
+		return 0, err
+	}
+	w.maskUntilNewline = false
+	if newline+1 < len(p) {
+		if _, err := w.Write(p[newline+1:]); err != nil {
+			return 0, err
 		}
 	}
+	return len(p), nil
+}
 
-	// Keep complete matches intact when a possible prefix overlaps them.
-	for {
-		previousHoldStart := holdStart
-		for _, secret := range w.secrets {
-			for offset := 0; offset <= len(data)-len(secret); {
-				match := bytes.Index(data[offset:], secret)
-				if match < 0 {
-					break
-				}
-				matchStart := offset + match
-				matchEnd := matchStart + len(secret)
-				if matchStart < holdStart && holdStart < matchEnd {
-					holdStart = matchStart
-				}
-				offset = matchStart + 1
-			}
-		}
-		if holdStart == previousHoldStart {
-			break
-		}
-	}
-
+func (w *secretsReplaceWriter) holdPendingLine(p, data []byte, holdStart int) (int, error) {
 	if holdStart == len(data) {
 		if err := w.writeMasked(data); err != nil {
 			return 0, err
@@ -176,6 +162,9 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 	if len(data) > pipeline.MaxLogLineLength {
 		if len(data)-holdStart > pipeline.MaxLogLineLength {
 			// A candidate larger than the bound cannot be retained safely.
+			if err := w.writeMasked(data[:holdStart]); err != nil {
+				return 0, err
+			}
 			w.maskUntilNewline = true
 			return len(p), nil
 		}
@@ -188,6 +177,54 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 	// Hold the entire unterminated part to preserve the downstream write frame.
 	w.pending = bytes.Clone(data)
 	return len(p), nil
+}
+
+func (w *secretsReplaceWriter) findBoundary(data []byte) int {
+	holdStart := len(data)
+	var matches []secretMatch
+	for i, secret := range w.secrets {
+		matched := 0
+		for offset, b := range data {
+			w.recordBoundaryStep()
+			for matched > 0 && b != secret[matched] {
+				matched = w.prefixTables[i][matched-1]
+			}
+			if b == secret[matched] {
+				matched++
+			}
+			if matched == len(secret) {
+				start := offset + 1 - len(secret)
+				matches = append(matches, secretMatch{start: start, end: offset + 1})
+				w.recordBoundaryStep()
+				matched = w.prefixTables[i][matched-1]
+			}
+		}
+		if matched > 0 {
+			holdStart = min(holdStart, len(data)-matched)
+		}
+	}
+
+	slices.SortFunc(matches, func(a, b secretMatch) int {
+		w.recordBoundaryStep()
+		if a.start != b.start {
+			return cmp.Compare(a.start, b.start)
+		}
+		return cmp.Compare(a.end, b.end)
+	})
+	for i := 0; i < len(matches); {
+		start, end := matches[i].start, matches[i].end
+		w.recordBoundaryStep()
+		i++
+		for i < len(matches) && matches[i].start < end {
+			w.recordBoundaryStep()
+			end = max(end, matches[i].end)
+			i++
+		}
+		if start < holdStart && holdStart < end {
+			holdStart = start
+		}
+	}
+	return holdStart
 }
 
 func (w *secretsReplaceWriter) writeMasked(p []byte) error {
@@ -235,20 +272,26 @@ func (w *secretsReplaceWriter) writeOutput(p []byte) error {
 		return nil
 	}
 	if len(p) <= pipeline.MaxLogLineLength {
-		_, err := w.dst.Write(p)
-		return err
+		return writeFull(w.dst, p)
 	}
 	for len(p) > pipeline.MaxLogLineLength {
-		if _, err := w.dst.Write(p[:pipeline.MaxLogLineLength]); err != nil {
+		if err := writeFull(w.dst, p[:pipeline.MaxLogLineLength]); err != nil {
 			return err
 		}
 		p = p[pipeline.MaxLogLineLength:]
 	}
 	if len(p) > 0 {
-		_, err := w.dst.Write(p)
-		return err
+		return writeFull(w.dst, p)
 	}
 	return nil
+}
+
+func writeFull(dst io.Writer, p []byte) error {
+	n, err := dst.Write(p)
+	if err == nil && n != len(p) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 func (w *secretsReplaceWriter) Close() error {

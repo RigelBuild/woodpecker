@@ -18,9 +18,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -292,15 +292,30 @@ func TestSecretsReplaceWriterExactOverlappingSplitAcrossWrites(t *testing.T) {
 	assert.Equal(t, []string{"********\n"}, dst.strings())
 }
 
+func TestSecretsReplaceWriterRepeatingSecretBoundaryWorkIsLinear(t *testing.T) {
+	input := []byte(strings.Repeat("0", 8*1024))
+	var dst writeRecorder
+	var steps int
+	writer := newSecretsReplaceWriter(&dst, []string{"0000"})
+	writer.boundarySteps = &steps
+
+	_, err := writer.Write(input)
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+	assert.LessOrEqual(t, steps, 6*len(input))
+	assert.Equal(t, []string{"********"}, dst.strings())
+}
+
 func TestSecretsReplaceWriterFindsLongCandidateSuffixQuickly(t *testing.T) {
 	secret := strings.Repeat("a", 64*1024-1) + "b"
 	var dst writeRecorder
-	w := NewSecretsReplaceWriter(&dst, []string{secret})
-	start := time.Now()
-	_, err := w.Write([]byte(strings.Repeat("a", 64*1024)))
+	var steps int
+	writer := newSecretsReplaceWriter(&dst, []string{secret})
+	writer.boundarySteps = &steps
+	_, err := writer.Write([]byte(strings.Repeat("a", 64*1024)))
 	assert.NoError(t, err)
-	assert.NoError(t, w.Close())
-	assert.Less(t, time.Since(start), time.Second)
+	assert.NoError(t, writer.Close())
+	assert.LessOrEqual(t, steps, 2*64*1024)
 	assert.Equal(t, []string{strings.Repeat("a", 64*1024)}, dst.strings())
 }
 
@@ -319,16 +334,15 @@ func TestSecretsReplaceWriterPendingLimitFailsClosed(t *testing.T) {
 	t.Run("newline then ordinary text", func(t *testing.T) {
 		var dst writeRecorder
 		w := NewSecretsReplaceWriter(&dst, []string{longSecret, "secret"})
-		_, err := w.Write([]byte(candidate))
+		_, err := w.Write([]byte("safe-prefix" + candidate))
 		assert.NoError(t, err)
-		_, err = w.Write([]byte("discarded-prefix\nplain secret tail\n"))
+		_, err = w.Write([]byte("\nplain secret tail\n"))
 		assert.NoError(t, err)
 		assert.NoError(t, w.Close())
 		for _, p := range dst.writes {
 			assert.NotContains(t, string(p), candidate)
-			assert.NotContains(t, string(p), "discarded-prefix")
 		}
-		assert.Equal(t, []string{"********\n", "plain ******** tail\n"}, dst.strings())
+		assert.Equal(t, []string{"safe-prefix", "********\n", "plain ******** tail\n"}, dst.strings())
 	})
 }
 
@@ -411,4 +425,24 @@ func TestSecretsReplaceWriterPropagatesError(t *testing.T) {
 	assert.ErrorIs(t, err, wantErr)
 	assert.Zero(t, n)
 	assert.NoError(t, w.Close())
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func TestSecretsReplaceWriterReturnsShortWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		secrets []string
+	}{
+		{name: "pass through"},
+		{name: "masked output", secrets: []string{"secret"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewSecretsReplaceWriter(shortWriter{}, tc.secrets)
+			_, err := w.Write([]byte("secret\n"))
+			assert.ErrorIs(t, err, io.ErrShortWrite)
+		})
+	}
 }

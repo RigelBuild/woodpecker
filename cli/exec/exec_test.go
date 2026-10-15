@@ -97,6 +97,29 @@ steps:
 	require.NoError(t, err)
 }
 
+func TestNewLoggerClosesMaskedOutputWithoutTrailingNewline(t *testing.T) {
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+	})
+
+	logger := newLogger(&backend_types.Config{
+		Secrets: []*backend_types.Secret{{Value: "supersecret"}, {Value: "supersecret-longer"}},
+	})
+	err = logger(&backend_types.Step{Name: "build", UUID: "step-uuid"}, io.NopCloser(strings.NewReader("prefix supersecret")))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	output, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	assert.Contains(t, string(output), "********")
+	assert.NotContains(t, string(output), "supersecret")
+}
+
 func clearEnv(t *testing.T) {
 	t.Helper()
 	osEnv := os.Environ()
