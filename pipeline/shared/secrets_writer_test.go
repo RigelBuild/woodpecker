@@ -18,9 +18,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 )
 
 func TestSecretsReplaceWriter(t *testing.T) {
@@ -103,6 +107,15 @@ func TestSecretsReplaceWriter(t *testing.T) {
 			assert.Equal(t, c.expect, buf.String())
 		})
 	}
+}
+
+func TestSecretsReplaceWriterLeavesMaskValueUnchanged(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewSecretsReplaceWriter(&buf, []string{"********"})
+	_, err := w.Write([]byte("********\n"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+	assert.Equal(t, "********\n", buf.String())
 }
 
 func TestSecretsReplaceWriterMasksOverlappingSecrets(t *testing.T) {
@@ -192,7 +205,7 @@ func TestSecretsReplaceWriterMasksSecretAtClose(t *testing.T) {
 
 	_, err := w.Write([]byte("token is supersecret"))
 	assert.NoError(t, err)
-	assert.Equal(t, "token is ", buf.String())
+	assert.Empty(t, buf.String())
 	assert.NoError(t, w.Close())
 	assert.Equal(t, "token is ********", buf.String())
 }
@@ -241,6 +254,82 @@ func TestSecretsReplaceWriterChunksExpandedOutput(t *testing.T) {
 	for _, p := range dst.writes {
 		assert.LessOrEqual(t, len(p), len("abcdabcdabcd"))
 	}
+}
+
+func TestSecretsReplaceWriterChunksExpandedOutputAtLogLimit(t *testing.T) {
+	const match = "abcdx"
+	count := pipeline.MaxLogLineLength/len(match) + 1
+	input := strings.Repeat(match, count)
+	want := strings.Repeat("********x", count)
+	var dst writeRecorder
+	w := NewSecretsReplaceWriter(&dst, []string{"abcd"})
+	_, err := w.Write([]byte(input))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+	for _, p := range dst.writes {
+		assert.LessOrEqual(t, len(p), pipeline.MaxLogLineLength)
+	}
+	assert.Equal(t, want, strings.Join(dst.strings(), ""))
+}
+
+func TestSecretsReplaceWriterHoldsWholeUnterminatedPartWithCandidate(t *testing.T) {
+	var dst writeRecorder
+	w := NewSecretsReplaceWriter(&dst, []string{"secret"})
+	_, err := w.Write([]byte("Finished s"))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+	assert.Equal(t, []string{"Finished s"}, dst.strings())
+}
+
+func TestSecretsReplaceWriterExactOverlappingSplitAcrossWrites(t *testing.T) {
+	var dst writeRecorder
+	w := NewSecretsReplaceWriter(&dst, []string{"XXab", "abcdefgh"})
+	for _, part := range []string{"XXab", "cdefgh\n"} {
+		_, err := w.Write([]byte(part))
+		assert.NoError(t, err)
+	}
+	assert.NoError(t, w.Close())
+	assert.Equal(t, []string{"********\n"}, dst.strings())
+}
+
+func TestSecretsReplaceWriterFindsLongCandidateSuffixQuickly(t *testing.T) {
+	secret := strings.Repeat("a", 64*1024-1) + "b"
+	var dst writeRecorder
+	w := NewSecretsReplaceWriter(&dst, []string{secret})
+	start := time.Now()
+	_, err := w.Write([]byte(strings.Repeat("a", 64*1024)))
+	assert.NoError(t, err)
+	assert.NoError(t, w.Close())
+	assert.Less(t, time.Since(start), time.Second)
+	assert.Equal(t, []string{strings.Repeat("a", 64*1024)}, dst.strings())
+}
+
+func TestSecretsReplaceWriterPendingLimitFailsClosed(t *testing.T) {
+	longSecret := strings.Repeat("a", pipeline.MaxLogLineLength+1) + "b"
+	candidate := longSecret[:pipeline.MaxLogLineLength+1]
+	t.Run("close before newline", func(t *testing.T) {
+		var dst writeRecorder
+		w := NewSecretsReplaceWriter(&dst, []string{longSecret})
+		_, err := w.Write([]byte(candidate))
+		assert.NoError(t, err)
+		assert.NoError(t, w.Close())
+		assert.Equal(t, []string{"********"}, dst.strings())
+	})
+
+	t.Run("newline then ordinary text", func(t *testing.T) {
+		var dst writeRecorder
+		w := NewSecretsReplaceWriter(&dst, []string{longSecret, "secret"})
+		_, err := w.Write([]byte(candidate))
+		assert.NoError(t, err)
+		_, err = w.Write([]byte("discarded-prefix\nplain secret tail\n"))
+		assert.NoError(t, err)
+		assert.NoError(t, w.Close())
+		for _, p := range dst.writes {
+			assert.NotContains(t, string(p), candidate)
+			assert.NotContains(t, string(p), "discarded-prefix")
+		}
+		assert.Equal(t, []string{"********\n", "plain ******** tail\n"}, dst.strings())
+	})
 }
 
 func TestSecretsReplaceWriterPreservesTailWriteBoundaries(t *testing.T) {

@@ -33,7 +33,7 @@ var secretsMask = []byte("********")
 type secretsReplaceWriter struct {
 	dst              io.Writer
 	secrets          [][]byte
-	maxSecretLen     int
+	prefixTables     [][]int
 	pending          []byte
 	maskUntilNewline bool
 }
@@ -56,13 +56,24 @@ func NewSecretsReplaceWriter(dst io.Writer, secrets []string) io.WriteCloser {
 			}
 			secretBytes := []byte(part)
 			w.secrets = append(w.secrets, secretBytes)
-			w.maxSecretLen = max(w.maxSecretLen, len(secretBytes))
+			w.prefixTables = append(w.prefixTables, prefixTable(secretBytes))
 		}
 	}
-	slices.SortStableFunc(w.secrets, func(a, b []byte) int {
-		return cmp.Compare(len(b), len(a))
-	})
 	return w
+}
+
+func prefixTable(pattern []byte) []int {
+	table := make([]int, len(pattern))
+	for i, matched := 1, 0; i < len(pattern); i++ {
+		for matched > 0 && pattern[i] != pattern[matched] {
+			matched = table[matched-1]
+		}
+		if pattern[i] == pattern[matched] {
+			matched++
+			table[i] = matched
+		}
+	}
+	return table
 }
 
 func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
@@ -100,7 +111,7 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 	}
 	w.pending = nil
 
-	// A secret part cannot cross a newline, so completed lines can be flushed.
+	// Secret parts cannot cross newlines, so flush complete lines immediately.
 	for {
 		newline := bytes.IndexByte(data, '\n')
 		if newline < 0 {
@@ -113,17 +124,27 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 		data = data[lineEnd:]
 	}
 
+	// KMP finds the longest suffix that is a proper prefix of any secret.
 	holdStart := len(data)
-	for i := max(0, len(data)-(w.maxSecretLen-1)); i < len(data); i++ {
-		suffix := data[i:]
-		for _, secret := range w.secrets {
-			if len(suffix) < len(secret) && bytes.HasPrefix(secret, suffix) {
-				holdStart = min(holdStart, i)
+	for i, secret := range w.secrets {
+		matched := 0
+		for _, b := range data {
+			for matched > 0 && b != secret[matched] {
+				matched = w.prefixTables[i][matched-1]
 			}
+			if b == secret[matched] {
+				matched++
+			}
+			if matched == len(secret) {
+				matched = w.prefixTables[i][matched-1]
+			}
+		}
+		if matched > 0 {
+			holdStart = min(holdStart, len(data)-matched)
 		}
 	}
 
-	// Keep a complete match intact when a possible secret prefix overlaps it.
+	// Keep complete matches intact when a possible prefix overlaps them.
 	for {
 		previousHoldStart := holdStart
 		for _, secret := range w.secrets {
@@ -152,23 +173,14 @@ func (w *secretsReplaceWriter) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 
-	maxPending := pipeline.MaxLogLineLength
-	if len(data)-holdStart > maxPending {
-		if holdStart > 0 {
-			if err := w.writeMasked(data[:holdStart]); err != nil {
-				return 0, err
-			}
-		}
+	if len(data) > pipeline.MaxLogLineLength {
+		// The incomplete line exceeds the bound; discard it until its newline.
 		w.maskUntilNewline = true
 		return len(p), nil
 	}
 
-	if holdStart > 0 {
-		if err := w.writeMasked(data[:holdStart]); err != nil {
-			return 0, err
-		}
-	}
-	w.pending = bytes.Clone(data[holdStart:])
+	// Hold the entire unterminated part to preserve the downstream write frame.
+	w.pending = bytes.Clone(data)
 	return len(p), nil
 }
 
