@@ -62,9 +62,12 @@ func testDB(t *testing.T, initNewDB bool) (engine *xorm.Engine, closeDB func()) 
 	case "sqlite3":
 		config := ":memory:"
 		if !initNewDB {
-			config = createSQLiteDB(t)
+			path := createSQLiteDB(t)
+			// The copy is thrown away after the test, so skip fsync: on a busy disk the
+			// migrations' fsyncs alone pushed this package past its 300s timeout.
+			config = "file:" + path + "?_sync=OFF&_journal=MEMORY"
 			closeDB = func() {
-				_ = os.Remove(config)
+				_ = os.Remove(path)
 			}
 		}
 		engine, err = xorm.NewEngine(driver, config)
