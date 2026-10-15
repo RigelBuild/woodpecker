@@ -846,6 +846,8 @@ The maximum time in minutes you can set in the repo settings before a pipeline g
 
 How often the server checks for orphaned workflows. Set to `0` to disable reaping. With multiple server replicas, enable the reaper on one replica only and set this value to `0` on the others.
 
+Approving and canceling the same pipeline is serialized only within one server replica, so with multiple replicas a cancel racing an approval can leave the approved run queued; run a single replica if you rely on approval-gated secrets.
+
 ### ORPHAN_REAP_GRACE
 
 - Name: `WOODPECKER_ORPHAN_REAP_GRACE`

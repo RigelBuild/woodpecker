@@ -19,8 +19,8 @@ import (
 	"sync/atomic"
 )
 
-// pipelineLocks serializes Approve, Cancel and Decline per pipeline. A
-// process-local lock is enough because the server runs as a single instance.
+// pipelineLocks serializes Approve, Cancel and Decline per pipeline.
+// Process-local: serializes within one replica; multi-replica deployments are documented as not covered.
 var pipelineLocks = keyedMutex{entries: map[int64]*keyedEntry{}}
 
 // lockWaitHook, when set, runs when a caller finds a pipeline lock held and is
