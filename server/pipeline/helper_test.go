@@ -506,6 +506,8 @@ func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
 		// Workflows deliberately nil: cancel.go loads the tree locally, so
 		// killedPipeline reaches updatePipelineStatus with nil Workflows.
 	}
+	// Cancel re-reads the stored row under the pipeline lock.
+	s.On("GetPipeline", pipeline.ID).Return(pipeline, nil)
 
 	err := Cancel(context.Background(), f, s, repo, user, pipeline, &model.CancelInfo{})
 	require.NoError(t, err)

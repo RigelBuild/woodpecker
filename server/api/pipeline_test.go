@@ -256,6 +256,7 @@ func TestCancelPipeline(t *testing.T) {
 
 		mockForge := forge_mocks.NewMockForge(t)
 		mockStore := store_mocks.NewMockStore(t)
+		mockStore.On("GetPipeline", runningPipeline.ID).Return(runningPipeline, nil)
 		mockStore.On("WorkflowGetTree", mock.Anything).Return([]*model.Workflow{}, nil)
 		mockStore.On("UpdatePipeline", mock.Anything).Return(nil)
 

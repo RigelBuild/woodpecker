@@ -49,8 +49,14 @@ steps:
 // with the repo owner as the sole approver.
 func startGatedSecretEnv(t *testing.T) *setup.ServerEnv {
 	t.Helper()
+	return startGatedSecretEnvWith(t, gatedSecretYAML)
+}
+
+// startGatedSecretEnvWith is startGatedSecretEnv with a caller-chosen workflow.
+func startGatedSecretEnvWith(t *testing.T, workflow []byte) *setup.ServerEnv {
+	t.Helper()
 	env := setup.StartServer(t.Context(), t, []*forge_types.FileMeta{
-		{Name: ".woodpecker.yaml", Data: gatedSecretYAML},
+		{Name: ".woodpecker.yaml", Data: workflow},
 	})
 	agent := setup.StartAgent(t, env.GRPCAddr)
 	setup.WaitForAgentRegistered(t, env.Store, agent)
