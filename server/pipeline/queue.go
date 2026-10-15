@@ -80,6 +80,31 @@ func pipelineTasks(repo *model.Repo, activePipeline *model.Pipeline, pipelineIte
 
 		tasks = append(tasks, task)
 	}
+
+	dependents := make(map[string][]string, len(tasks))
+	for _, task := range tasks {
+		for _, dependencyID := range task.Dependencies {
+			dependents[dependencyID] = append(dependents[dependencyID], task.ID)
+		}
+	}
+
+	for _, task := range tasks {
+		visited := map[string]struct{}{task.ID: {}}
+		frontier := append([]string(nil), dependents[task.ID]...)
+		for len(frontier) > 0 {
+			last := len(frontier) - 1
+			dependentID := frontier[last]
+			frontier = frontier[:last]
+			if _, ok := visited[dependentID]; ok {
+				continue
+			}
+
+			visited[dependentID] = struct{}{}
+			task.BlockedCount++
+			frontier = append(frontier, dependents[dependentID]...)
+		}
+	}
+
 	return tasks, nil
 }
 

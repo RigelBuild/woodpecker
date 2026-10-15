@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/builder"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/constraint"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
@@ -99,4 +100,25 @@ func TestQueuePipelineCreated(t *testing.T) {
 		task := runOnce(t, &model.Pipeline{ID: 42})
 		assert.GreaterOrEqual(t, task.Created, before)
 	})
+}
+
+func TestPipelineTasksBlockedCount(t *testing.T) {
+	items := []*builder.Item{
+		{Workflow: &builder.Workflow{ID: 1, Name: "A"}},
+		{Workflow: &builder.Workflow{ID: 2, Name: "B"}, DependsOn: constraint.DependsOn{{Name: "A"}}},
+		{Workflow: &builder.Workflow{ID: 3, Name: "C"}, DependsOn: constraint.DependsOn{{Name: "A"}}},
+		{Workflow: &builder.Workflow{ID: 4, Name: "D"}, DependsOn: constraint.DependsOn{{Name: "B"}, {Name: "C"}}},
+		{Workflow: &builder.Workflow{ID: 5, Name: "E"}},
+		{Workflow: &builder.Workflow{ID: 6, Name: "skipped"}, Skipped: true, DependsOn: constraint.DependsOn{{Name: "A"}}},
+	}
+
+	tasks, err := pipelineTasks(&model.Repo{ID: 7}, &model.Pipeline{ID: 42, Created: 1700000000}, items)
+	require.NoError(t, err)
+	require.Len(t, tasks, 5)
+
+	countsByName := make(map[string]int, len(tasks))
+	for _, task := range tasks {
+		countsByName[task.Name] = task.BlockedCount
+	}
+	assert.Equal(t, map[string]int{"A": 3, "B": 1, "C": 1, "D": 0, "E": 0}, countsByName)
 }
