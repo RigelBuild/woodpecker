@@ -70,7 +70,7 @@ func TestLineWriterWithSecretsReplaceWriter(t *testing.T) {
 
 	_, err := lw.Write([]byte("hello world\n"))
 	assert.NoError(t, err)
-
+	assert.NoError(t, lw.Close())
 	peer.AssertCalled(t, "EnqueueLog", &rpc.LogEntry{
 		StepUUID: "e9ea76a5-44a1-4059-9c4a-6956c478b26d",
 		Time:     0,

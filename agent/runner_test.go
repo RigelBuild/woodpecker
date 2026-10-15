@@ -19,8 +19,11 @@ package agent
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
@@ -29,6 +32,25 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	rpc_mocks "go.woodpecker-ci.org/woodpecker/v3/rpc/mocks"
 )
+
+func TestCreateLoggerClosesMaskedOutputWithoutTrailingNewline(t *testing.T) {
+	var entries []*rpc.LogEntry
+	peer := rpc_mocks.NewMockPeer(t)
+	peer.EXPECT().EnqueueLog(mock.Anything).Run(func(entry *rpc.LogEntry) {
+		entries = append(entries, entry)
+	}).Once()
+	runner := Runner{client: peer}
+	workflow := &rpc.Workflow{Config: &backend_types.Config{
+		Secrets: []*backend_types.Secret{{Value: "supersecret"}, {Value: "supersecret-longer"}},
+	}}
+	step := &backend_types.Step{Name: "build", UUID: "step-uuid"}
+
+	err := runner.createLogger(zerolog.Nop(), workflow)(step, io.NopCloser(strings.NewReader("prefix supersecret")))
+	assert.NoError(t, err)
+	if assert.Len(t, entries, 1) {
+		assert.Equal(t, "prefix ********", string(entries[0].Data))
+	}
+}
 
 func dummyWorkflow() *rpc.Workflow {
 	return &rpc.Workflow{
