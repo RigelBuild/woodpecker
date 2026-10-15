@@ -56,6 +56,9 @@
                   :url="error.data?.docs || ''"
                 />
               </span>
+              <span v-else-if="isApprovalError(error)" class="flex items-center gap-x-2 whitespace-nowrap">
+                <span class="font-bold">{{ error.data?.name }}</span>
+              </span>
               <span v-else />
             </div>
             <div class="col-start-2 grid grid-cols-[minmax(10rem,auto)_4fr]">
@@ -101,6 +104,10 @@ function isDeprecationError(
 
 function isBadHabitError(error: PipelineError): error is PipelineError<{ file?: string; field: string; docs: string }> {
   return error.type === 'bad_habit';
+}
+
+function isApprovalError(error: PipelineError): error is PipelineError<{ name: string }> {
+  return error.type === 'approval';
 }
 
 const { t } = useI18n();

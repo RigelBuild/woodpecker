@@ -5672,6 +5672,13 @@ const docTemplate = `{
         "Secret": {
             "type": "object",
             "properties": {
+                "branches": {
+                    "description": "When set, non-pull_request runs get the secret only on these branches.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "events": {
                     "type": "array",
                     "items": {
@@ -5699,6 +5706,10 @@ const docTemplate = `{
                 "repo_id": {
                     "type": "integer"
                 },
+                "require_approval": {
+                    "description": "A gated secret reaches a pipeline only after an approver's browser-session approval.",
+                    "type": "boolean"
+                },
                 "value": {
                     "type": "string"
                 }
@@ -5707,6 +5718,12 @@ const docTemplate = `{
         "SecretPatch": {
             "type": "object",
             "properties": {
+                "branches": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "events": {
                     "type": "array",
                     "items": {
@@ -5724,6 +5741,9 @@ const docTemplate = `{
                 },
                 "note": {
                     "type": "string"
+                },
+                "require_approval": {
+                    "type": "boolean"
                 },
                 "value": {
                     "type": "string"
@@ -5997,9 +6017,11 @@ const docTemplate = `{
                 "deprecation",
                 "compiler",
                 "generic",
-                "bad_habit"
+                "bad_habit",
+                "approval"
             ],
             "x-enum-comments": {
+                "PipelineErrorTypeApproval": "a secret is withheld until approval",
                 "PipelineErrorTypeBadHabit": "some bad-habit error",
                 "PipelineErrorTypeCompiler": "some error with the config semantics",
                 "PipelineErrorTypeDeprecation": "using some deprecated feature",
@@ -6011,14 +6033,16 @@ const docTemplate = `{
                 "using some deprecated feature",
                 "some error with the config semantics",
                 "some generic error",
-                "some bad-habit error"
+                "some bad-habit error",
+                "a secret is withheld until approval"
             ],
             "x-enum-varnames": [
                 "PipelineErrorTypeLinter",
                 "PipelineErrorTypeDeprecation",
                 "PipelineErrorTypeCompiler",
                 "PipelineErrorTypeGeneric",
-                "PipelineErrorTypeBadHabit"
+                "PipelineErrorTypeBadHabit",
+                "PipelineErrorTypeApproval"
             ]
         },
         "metadata.Author": {

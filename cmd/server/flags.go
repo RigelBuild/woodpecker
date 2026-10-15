@@ -262,6 +262,14 @@ var flags = append([]cli.Flag{
 		},
 	},
 	&cli.StringSliceFlag{
+		Sources: cli.EnvVars("WOODPECKER_SECRET_APPROVERS"),
+		Name:    "secret-approvers",
+		Usage:   "logins whose browser-session approval releases secrets that require approval; empty releases none",
+		Config: cli.StringConfig{
+			TrimSpace: true,
+		},
+	},
+	&cli.StringSliceFlag{
 		Sources: cli.EnvVars("WOODPECKER_PLUGINS_TRUSTED_CLONE"),
 		Name:    "plugins-trusted-clone",
 		Usage:   "Lint allowlist for clone images; unlisted images trigger a warning but do not block credential injection",

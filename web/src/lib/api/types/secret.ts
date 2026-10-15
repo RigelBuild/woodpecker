@@ -8,5 +8,7 @@ export interface Secret {
   value: string;
   events: WebhookEvents[];
   images: string[];
+  require_approval: boolean;
+  branches: string[];
   note: string;
 }

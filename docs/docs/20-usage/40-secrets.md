@@ -89,6 +89,25 @@ For example, an image without a tag will allow all tags, even if it contains ano
 
 ![plugins filter](./secrets-plugins-filter.png)
 
+### Branch filter
+
+A secret can be limited to a list of branches.
+Push, cron and manual pipelines on other branches do not get the secret, so a step that asks for it fails with "secret not found".
+An empty list allows all branches.
+Pull requests are not filtered by branch; use the events filter to keep a secret away from them.
+
+Only an admin can widen a secret's events or loosen or clear its branch filter.
+Other users with access to the secret can only narrow these filters.
+
+### Require approval
+
+A secret with **Require approval** set is withheld until a secret approver approves the pipeline.
+A pipeline that needs a withheld secret is blocked instead of run, and its errors list the withheld secret.
+An approval releases the secret only when it comes from a browser session of a login listed in [`WOODPECKER_SECRET_APPROVERS`](../30-administration/10-configuration/10-server.md#secret_approvers).
+An approval through an API token, a decline, or a restart never releases it; a restarted pipeline must be approved again.
+
+Only a secret approver's browser session can create, change or delete a secret that requires approval.
+
 ## CLI
 
 In addition to the UI, secrets can also be managed using the CLI.

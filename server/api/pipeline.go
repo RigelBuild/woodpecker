@@ -488,9 +488,7 @@ func PostApproval(c *gin.Context) {
 		pl     = session.Pipeline(c)
 	)
 
-	// Session stays false until the session middleware exposes the token type, so
-	// gated secrets stay withheld rather than release to an API token.
-	newPipeline, err := pipeline.Approve(c, _store, pl, user, repo, &pipeline.Approval{Login: user.Login})
+	newPipeline, err := pipeline.Approve(c, _store, pl, user, repo, secretApproval(c))
 	if err != nil {
 		handlePipelineErr(c, err)
 	} else {

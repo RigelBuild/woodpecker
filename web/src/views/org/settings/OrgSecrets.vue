@@ -46,6 +46,8 @@ const emptySecret: Partial<Secret> = {
   name: '',
   value: '',
   images: [],
+  branches: [],
+  require_approval: false,
   events: [WebhookEvents.Push],
 };
 

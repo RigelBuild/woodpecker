@@ -872,6 +872,16 @@ Docker images to run in privileged mode. Only change if you are sure what you do
 
 You should specify the tag of your images too, as this enforces exact matches.
 
+### SECRET_APPROVERS
+
+- Name: `WOODPECKER_SECRET_APPROVERS`
+- Default: none
+
+Comma-separated list of logins whose approval releases secrets that require approval.
+Only an approval made from the web UI (a browser session) counts; an API token approval does not.
+When empty, no approval releases such a secret.
+These logins are also the only users who can create, change or delete such a secret.
+
 ### PLUGINS_TRUSTED_CLONE
 
 - Name: `WOODPECKER_PLUGINS_TRUSTED_CLONE`

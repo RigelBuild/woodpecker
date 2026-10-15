@@ -525,6 +525,15 @@
       "events": "Available at the following events",
       "warning": "Exposing secrets to pull requests could allow bad actors to steal your secrets with a malicious pull request."
     },
+    "branches": {
+      "branches": "Available only on the following branches",
+      "desc": "List of branches whose push, cron and manual pipelines get this secret. Leave empty to allow all branches. Pull requests are not filtered by branch.",
+      "placeholder": "Branch name"
+    },
+    "require_approval": {
+      "require_approval": "Require approval",
+      "desc": "Withhold this secret until a secret approver approves the pipeline from a browser session."
+    },
     "edit": "Edit secret",
     "delete": "Delete secret"
   },

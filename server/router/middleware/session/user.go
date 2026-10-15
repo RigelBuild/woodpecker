@@ -39,6 +39,14 @@ func User(c *gin.Context) *model.User {
 	return u
 }
 
+const browserSessionKey = "browser-session"
+
+// BrowserSession reports whether the request came from a browser session whose
+// CSRF token was verified, as opposed to an API token or a read-only request.
+func BrowserSession(c *gin.Context) bool {
+	return c.GetBool(browserSessionKey)
+}
+
 func SetUser() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var user *model.User
@@ -67,6 +75,10 @@ func SetUser() gin.HandlerFunc {
 				if err != nil {
 					c.AbortWithStatus(http.StatusUnauthorized)
 					return
+				}
+				// CheckCsrf skips safe methods, so only a verified write counts as a session.
+				if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodOptions {
+					c.Set(browserSessionKey, true)
 				}
 			}
 		}

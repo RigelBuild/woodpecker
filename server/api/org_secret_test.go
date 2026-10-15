@@ -218,6 +218,7 @@ func TestDeleteOrgSecret(t *testing.T) {
 	t.Run("happy path returns no content", func(t *testing.T) {
 		c, _, svc := newOrgSecretCtxWithService(t, http.MethodDelete, nil)
 		c.Params = gin.Params{{Key: "secret", Value: "api_token"}}
+		svc.On("OrgSecretFind", orgSecretID, "api_token").Return(storedOrgSecret(), nil)
 		svc.On("OrgSecretDelete", orgSecretID, "api_token").Return(nil)
 
 		DeleteOrgSecret(c)
@@ -228,7 +229,7 @@ func TestDeleteOrgSecret(t *testing.T) {
 	t.Run("missing secret returns not found", func(t *testing.T) {
 		c, rec, svc := newOrgSecretCtxWithService(t, http.MethodDelete, nil)
 		c.Params = gin.Params{{Key: "secret", Value: "nope"}}
-		svc.On("OrgSecretDelete", orgSecretID, "nope").Return(types.ErrRecordNotExist)
+		svc.On("OrgSecretFind", orgSecretID, "nope").Return(nil, types.ErrRecordNotExist)
 
 		DeleteOrgSecret(c)
 

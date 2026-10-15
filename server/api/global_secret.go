@@ -85,14 +85,19 @@ func PostGlobalSecret(c *gin.Context) {
 		return
 	}
 	secret := &model.Secret{
-		Name:   in.Name,
-		Value:  in.Value,
-		Events: in.Events,
-		Images: in.Images,
-		Note:   in.Note,
+		Name:            in.Name,
+		Value:           in.Value,
+		Events:          in.Events,
+		Images:          in.Images,
+		RequireApproval: in.RequireApproval,
+		Branches:        in.Branches,
+		Note:            in.Note,
 	}
 	if err := secret.Validate(); err != nil {
 		c.String(http.StatusUnprocessableEntity, "Error inserting global secret. %s", err)
+		return
+	}
+	if denyGatedSecretChange(c, nil, secret) {
 		return
 	}
 
@@ -130,21 +135,14 @@ func PatchGlobalSecret(c *gin.Context) {
 		handleDBError(c, err)
 		return
 	}
-	if in.Value != nil && *in.Value != "" {
-		secret.Value = *in.Value
-	}
-	if in.Events != nil {
-		secret.Events = in.Events
-	}
-	if in.Images != nil {
-		secret.Images = in.Images
-	}
-	if in.Note != nil {
-		secret.Note = *in.Note
-	}
+	before := secret.Copy()
+	applySecretPatch(secret, in)
 
 	if err := secret.Validate(); err != nil {
 		c.String(http.StatusBadRequest, "Error updating global secret. %s", err)
+		return
+	}
+	if denyGatedSecretChange(c, before, secret) || denySecretFilterWidening(c, isServerAdmin(c), before, secret) {
 		return
 	}
 
@@ -167,6 +165,14 @@ func PatchGlobalSecret(c *gin.Context) {
 func DeleteGlobalSecret(c *gin.Context) {
 	name := c.Param("secret")
 	secretService := server.Config.Services.Manager.SecretService()
+	secret, err := secretService.GlobalSecretFind(name)
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+	if denyGatedSecretChange(c, secret, nil) {
+		return
+	}
 	if err := secretService.GlobalSecretDelete(name); err != nil {
 		handleDBError(c, err)
 		return
