@@ -60,6 +60,9 @@ var migrationTasks = []*xormigrate.Migration{
 	&replaceZeroForgeIDsInUsers,
 	&deduplicateLogEntries,
 	&addWorkflowOnMetadataEdit,
+	&addSecretApprovalAndBranches,
+	&addSecretVersion,
+	&addPipelineEventOverridden,
 }
 
 var allBeans = []any{

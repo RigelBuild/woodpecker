@@ -846,6 +846,8 @@ The maximum time in minutes you can set in the repo settings before a pipeline g
 
 How often the server checks for orphaned workflows. Set to `0` to disable reaping. With multiple server replicas, enable the reaper on one replica only and set this value to `0` on the others.
 
+Approving and canceling the same pipeline is serialized only within one server replica, so with multiple replicas a cancel racing an approval can leave the approved run queued; run a single replica if you rely on approval-gated secrets.
+
 ### ORPHAN_REAP_GRACE
 
 - Name: `WOODPECKER_ORPHAN_REAP_GRACE`
@@ -871,6 +873,16 @@ a user can log into Woodpecker, without re-authentication.
 Docker images to run in privileged mode. Only change if you are sure what you do!
 
 You should specify the tag of your images too, as this enforces exact matches.
+
+### SECRET_APPROVERS
+
+- Name: `WOODPECKER_SECRET_APPROVERS`
+- Default: none
+
+Comma-separated list of logins whose approval releases secrets that require approval.
+Only an approval made from the web UI (a browser session) counts; an API token approval does not.
+When empty, no approval releases such a secret.
+These logins are also the only users who can create, change or delete such a secret.
 
 ### PLUGINS_TRUSTED_CLONE
 

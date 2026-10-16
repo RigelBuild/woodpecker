@@ -27,7 +27,7 @@ WOODPECKER_SECRET_EXTENSION_NETRC=false
 
 ## How it works
 
-When a pipeline is triggered, Woodpecker will fetch secrets from your service. The extension secrets are merged with the secrets configured directly in Woodpecker, with extension secrets taking priority by name. If the extension is unavailable, Woodpecker falls back to the locally configured secrets.
+When a pipeline is triggered, Woodpecker will fetch secrets from your service. The extension secrets are merged with the secrets configured directly in Woodpecker, with extension secrets taking priority by name, compared without case. An extension secret never loosens the approval setting or filters of a stored secret with the same name. If the extension is unavailable, every locally configured secret then needs approval, so a pipeline that uses one is blocked until a secret approver approves it.
 
 ### Request
 

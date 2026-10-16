@@ -71,15 +71,91 @@ func TestCombinedSecretListPipeline(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:     "Extension error falls back to base secrets",
+			name:     "Extension error gates every base secret",
 			repoName: "server-error",
 			dbSecrets: []*model.Secret{
 				{ID: 1, RepoID: 1, Name: "db-secret", Value: "db-value"},
 			},
 			expected: []*model.Secret{
-				{ID: 1, RepoID: 1, Name: "db-secret", Value: "db-value"},
+				{ID: 1, RepoID: 1, Name: "db-secret", Value: "db-value", RequireApproval: true},
 			},
 			wantErr: false,
+		},
+		{
+			name:     "Extension cannot shadow a gated secret",
+			repoName: "override-test",
+			dbSecrets: []*model.Secret{
+				{ID: 1, RepoID: 1, Name: "shared", Value: "db-value", RequireApproval: true},
+			},
+			expected: []*model.Secret{
+				{Name: "shared", Value: "external-value", RequireApproval: true},
+				{Name: "ext-only", Value: "only-in-ext"},
+			},
+			wantErr: false,
+		},
+		{
+			name:     "Extension shadow keeps the stored events and branches",
+			repoName: "override-test",
+			dbSecrets: []*model.Secret{{
+				ID: 1, RepoID: 1, Name: "shared", Value: "db-value",
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+				Images:   []string{"plugins/deploy"},
+			}},
+			expected: []*model.Secret{
+				{
+					Name: "shared", Value: "external-value",
+					Events:   []model.WebhookEvent{model.EventPush},
+					Branches: []string{"main"},
+					Images:   []string{"plugins/deploy"},
+				},
+				{Name: "ext-only", Value: "only-in-ext"},
+			},
+		},
+		{
+			name:     "Gated extension shadow keeps the stored events and branches",
+			repoName: "override-test",
+			dbSecrets: []*model.Secret{{
+				ID: 1, RepoID: 1, Name: "shared", Value: "db-value", RequireApproval: true,
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+			}},
+			expected: []*model.Secret{
+				{
+					Name: "shared", Value: "external-value", RequireApproval: true,
+					Events:   []model.WebhookEvent{model.EventPush},
+					Branches: []string{"main"},
+				},
+				{Name: "ext-only", Value: "only-in-ext"},
+			},
+		},
+		{
+			// The compiler lowercases names, so a lowercase extension token must not
+			// slip past the stored TOKEN's branch, event and image limits.
+			name:     "Case-variant extension shadow keeps the stored limits",
+			repoName: "case-variant",
+			dbSecrets: []*model.Secret{{
+				ID: 1, RepoID: 1, Name: "TOKEN", Value: "db-value",
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+				Images:   []string{"plugins/deploy"},
+			}},
+			expected: []*model.Secret{{
+				Name: "token", Value: "external-value",
+				Events:   []model.WebhookEvent{model.EventPush},
+				Branches: []string{"main"},
+				Images:   []string{"plugins/deploy"},
+			}},
+		},
+		{
+			name:     "Case-variant extension shadow keeps the stored gate",
+			repoName: "case-variant",
+			dbSecrets: []*model.Secret{
+				{ID: 1, RepoID: 1, Name: "TOKEN", Value: "db-value", RequireApproval: true},
+			},
+			expected: []*model.Secret{
+				{Name: "token", Value: "external-value", RequireApproval: true},
+			},
 		},
 	}
 
@@ -128,6 +204,13 @@ func TestCombinedSecretListPipeline(t *testing.T) {
 			return
 		case "server-error":
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		case "case-variant":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"secrets": []*model.Secret{{Name: "token", Value: "external-value"}},
+			}))
 			return
 		}
 

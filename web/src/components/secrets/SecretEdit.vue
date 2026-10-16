@@ -37,6 +37,24 @@
         <CheckboxesField v-model="innerValue.events" :options="secretEventsOptions" />
       </InputField>
 
+      <InputField v-slot="{ id }" :label="$t('secrets.branches.branches')">
+        <span class="text-wp-text-alt-100 mb-2 ml-1">{{ $t('secrets.branches.desc') }}</span>
+
+        <ListEditor
+          :id="id"
+          ref="branchesEditor"
+          v-model="innerValue.branches"
+          :placeholder="$t('secrets.branches.placeholder')"
+        />
+      </InputField>
+
+      <Checkbox
+        :model-value="innerValue.require_approval ?? false"
+        :label="$t('secrets.require_approval.require_approval')"
+        :description="$t('secrets.require_approval.desc')"
+        @update:model-value="innerValue.require_approval = $event"
+      />
+
       <InputField v-slot="{ id }" :label="$t('secrets.note')">
         <TextField :id="id" v-model="innerValue.note" :placeholder="$t('secrets.note')" :lines="3" />
       </InputField>
@@ -60,6 +78,7 @@ import { useI18n } from 'vue-i18n';
 
 import Button from '~/components/atomic/Button.vue';
 import Warning from '~/components/atomic/Warning.vue';
+import Checkbox from '~/components/form/Checkbox.vue';
 import CheckboxesField from '~/components/form/CheckboxesField.vue';
 import type { CheckboxOption } from '~/components/form/form.types';
 import InputField from '~/components/form/InputField.vue';
@@ -91,6 +110,7 @@ const innerValue = computed({
 const isEditingSecret = computed(() => !!innerValue.value?.id);
 
 const imagesEditor = useTemplateRef<InstanceType<typeof ListEditor>>('imagesEditor');
+const branchesEditor = useTemplateRef<InstanceType<typeof ListEditor>>('branchesEditor');
 
 const secretEventsOptions: CheckboxOption[] = [
   { value: WebhookEvents.Push, text: i18n.t('repo.pipeline.event.push') },
@@ -107,8 +127,9 @@ function save() {
     return;
   }
 
-  // an image the user typed without confirming it should still be saved
+  // a list item the user typed without confirming it should still be saved
   imagesEditor.value?.commitPendingItem();
+  branchesEditor.value?.commitPendingItem();
 
   emit('save', innerValue.value);
 }

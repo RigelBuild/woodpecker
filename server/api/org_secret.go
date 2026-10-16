@@ -94,15 +94,20 @@ func PostOrgSecret(c *gin.Context) {
 		return
 	}
 	secret := &model.Secret{
-		OrgID:  org.ID,
-		Name:   in.Name,
-		Value:  in.Value,
-		Events: in.Events,
-		Images: in.Images,
-		Note:   in.Note,
+		OrgID:           org.ID,
+		Name:            in.Name,
+		Value:           in.Value,
+		Events:          in.Events,
+		Images:          in.Images,
+		RequireApproval: in.RequireApproval,
+		Branches:        in.Branches,
+		Note:            in.Note,
 	}
 	if err := secret.Validate(); err != nil {
 		c.String(http.StatusUnprocessableEntity, "Error inserting org %q secret. %s", org.ID, err)
+		return
+	}
+	if denyGatedSecretChange(c, nil, secret) {
 		return
 	}
 
@@ -141,26 +146,19 @@ func PatchOrgSecret(c *gin.Context) {
 		handleDBError(c, err)
 		return
 	}
-	if in.Value != nil && *in.Value != "" {
-		secret.Value = *in.Value
-	}
-	if in.Events != nil {
-		secret.Events = in.Events
-	}
-	if in.Images != nil {
-		secret.Images = in.Images
-	}
-	if in.Note != nil {
-		secret.Note = *in.Note
-	}
+	before := secret.Copy()
+	applySecretPatch(secret, in)
 
 	if err := secret.Validate(); err != nil {
 		c.String(http.StatusUnprocessableEntity, "Error updating org %q secret. %s", org.ID, err)
 		return
 	}
+	if denyGatedSecretChange(c, before, secret) || denySecretFilterWidening(c, isServerAdmin(c), before, secret) {
+		return
+	}
 
 	if err := secretService.OrgSecretUpdate(org.ID, secret); err != nil {
-		c.String(http.StatusInternalServerError, "Error updating org %q secret %q. %s", org.ID, in.Name, err)
+		writeSecretUpdateErr(c, secret.Name, err)
 		return
 	}
 	c.JSON(http.StatusOK, secret.Copy())
@@ -181,9 +179,14 @@ func DeleteOrgSecret(c *gin.Context) {
 	name := c.Param("secret")
 
 	secretService := server.Config.Services.Manager.SecretService()
-	if err := secretService.OrgSecretDelete(org.ID, name); err != nil {
+	secret, err := secretService.OrgSecretFind(org.ID, name)
+	if err != nil {
 		handleDBError(c, err)
 		return
 	}
-	c.Status(http.StatusNoContent)
+	if denyGatedSecretChange(c, secret, nil) {
+		return
+	}
+	deleteGuardedSecret(c, secret, func(s *model.Secret) error { return secretService.OrgSecretDelete(org.ID, s) },
+		func() (*model.Secret, error) { return secretService.OrgSecretFind(org.ID, name) })
 }

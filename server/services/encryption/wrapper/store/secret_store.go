@@ -51,6 +51,8 @@ func (wrapper *EncryptedSecretStore) SecretCreate(secret *model.Secret) error {
 		return err
 	}
 	secret.ID = newSecret.ID
+	// The placeholder insert stored a version; the update must name it to pass the lock.
+	secret.Version = newSecret.Version
 
 	err = wrapper.encrypt(secret)
 	if err != nil {

@@ -225,7 +225,8 @@ func TestDeleteGlobalSecret(t *testing.T) {
 	t.Run("happy path returns no content", func(t *testing.T) {
 		c, _, svc := newGlobalSecretCtxWithService(t, http.MethodDelete, nil)
 		c.Params = gin.Params{{Key: "secret", Value: "api_token"}}
-		svc.On("GlobalSecretDelete", "api_token").Return(nil)
+		svc.On("GlobalSecretFind", "api_token").Return(storedGlobalSecret(), nil)
+		svc.On("GlobalSecretDelete", mock.MatchedBy(func(s *model.Secret) bool { return s.Name == "api_token" })).Return(nil)
 
 		DeleteGlobalSecret(c)
 
@@ -235,7 +236,7 @@ func TestDeleteGlobalSecret(t *testing.T) {
 	t.Run("missing secret returns not found", func(t *testing.T) {
 		c, rec, svc := newGlobalSecretCtxWithService(t, http.MethodDelete, nil)
 		c.Params = gin.Params{{Key: "secret", Value: "nope"}}
-		svc.On("GlobalSecretDelete", "nope").Return(types.ErrRecordNotExist)
+		svc.On("GlobalSecretFind", "nope").Return(nil, types.ErrRecordNotExist)
 
 		DeleteGlobalSecret(c)
 

@@ -488,7 +488,7 @@ func PostApproval(c *gin.Context) {
 		pl     = session.Pipeline(c)
 	)
 
-	newPipeline, err := pipeline.Approve(c, _store, pl, user, repo)
+	newPipeline, err := pipeline.Approve(c, _store, pl, user, repo, secretApproval(c))
 	if err != nil {
 		handlePipelineErr(c, err)
 	} else {

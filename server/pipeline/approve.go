@@ -18,17 +18,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/compiler"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 // Approve update the status to pending for a blocked pipeline so it can be executed.
-func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo) (*model.Pipeline, error) {
+func Approve(
+	ctx context.Context,
+	store store.Store,
+	currentPipeline *model.Pipeline,
+	user *model.User,
+	repo *model.Repo,
+	approval *Approval,
+) (*model.Pipeline, error) {
+	// Held through enqueue so a cancel either precedes the claim or sees the queued run.
+	unlock := pipelineLocks.lock(currentPipeline.ID)
+	defer unlock()
+
 	if currentPipeline.Status != model.StatusBlocked {
 		return nil, ErrBadRequest{Msg: fmt.Sprintf("cannot approve a pipeline with status %s", currentPipeline.Status)}
 	}
@@ -56,22 +71,68 @@ func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipe
 	// derives workflow and step state from the pipeline status, so the status
 	// must already be pending when the new workflows are persisted.
 	currentPipeline.Status = model.StatusPending
-
-	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, currentPipeline, user, repo, yamls, nil, true)
-	if handleParseErrors(currentPipeline, parseErr) {
-		if err := updatePipelineWithErr(ctx, forge, store, currentPipeline, repo, user, parseErr); err != nil {
-			log.Error().Err(err).Msgf("error setting error status of pipeline for %s#%d after approval", repo.FullName, currentPipeline.Number)
+	// Drop the approval errors from the blocked parse; this parse records its own.
+	currentPipeline.Errors = nil
+	// Claim the pipeline only while it is still blocked, so an approval racing a
+	// decline (or another approval) cannot queue it.
+	if err := store.UpdatePipelineIfStatus(currentPipeline, model.StatusBlocked); err != nil {
+		if errors.Is(err, types.ErrUpdateConflict) {
+			return nil, ErrBadRequest{Msg: "cannot approve a pipeline that is no longer blocked"}
 		}
+		return nil, fmt.Errorf("error claiming blocked pipeline. %w", err)
+	}
+	claimed := currentPipeline
+
+	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(
+		ctx,
+		forge,
+		store,
+		currentPipeline,
+		user,
+		repo,
+		yamls,
+		nil,
+		true,
+		approval,
+	)
+	// An approval that cannot release a gated secret leaves the pipeline blocked.
+	if compiler.OnlyApprovalErrors(parseErr) {
+		claimed.Errors = pipeline_errors.GetPipelineErrors(parseErr)
+		claimed.Status = model.StatusBlocked
+		if err := releaseClaim(store, claimed); err != nil {
+			return nil, fmt.Errorf("error re-blocking pipeline. %w", err)
+		}
+		publishPipeline(ctx, forge, store, claimed, repo, user)
+		return claimed, nil
+	}
+	if handleParseErrors(claimed, parseErr) {
+		claimed.Errors = pipeline_errors.GetPipelineErrors(parseErr)
+		claimed.Status = model.StatusError
+		claimed.Started = time.Now().Unix()
+		claimed.Finished = claimed.Started
+		if err := releaseClaim(store, claimed); err != nil {
+			return nil, fmt.Errorf("error setting error status of pipeline for %s#%d after approval: %w", repo.FullName, claimed.Number, err)
+		}
+		publishPipeline(ctx, forge, store, claimed, repo, user)
 		msg := fmt.Sprintf("failure to parse pipeline config for %s", repo.FullName)
 		log.Error().Err(parseErr).Msg(msg)
 		return nil, errors.New(msg)
 	}
 	if err != nil {
-		log.Error().Err(err).Str("repo", repo.FullName).Msgf("error persisting new steps for %s#%d after approval", repo.FullName, currentPipeline.Number)
+		log.Error().Err(err).Str("repo", repo.FullName).Msgf("error persisting new steps for %s#%d after approval", repo.FullName, claimed.Number)
+		// Undo the claim so the pipeline can be approved again.
+		claimed.Status = model.StatusBlocked
+		if rbErr := releaseClaim(store, claimed); rbErr != nil {
+			return nil, fmt.Errorf("error persisting workflows after approval: %w; re-blocking failed: %w", err, rbErr)
+		}
 		return nil, err
 	}
 
-	if currentPipeline, err = UpdateToStatusPending(store, *currentPipeline, user.Login); err != nil {
+	// Finalize only while the claim still holds; a cancel that landed meanwhile
+	// wins, and nothing is queued for it.
+	currentPipeline.Reviewer = user.Login
+	currentPipeline.Reviewed = time.Now().Unix()
+	if err := releaseClaim(store, currentPipeline); err != nil {
 		return nil, fmt.Errorf("error updating pipeline. %w", err)
 	}
 
@@ -85,4 +146,14 @@ func Approve(ctx context.Context, store store.Store, currentPipeline *model.Pipe
 	}
 
 	return currentPipeline, nil
+}
+
+// releaseClaim writes the pipeline only while it still holds Approve's pending
+// claim. Losing means a concurrent cancel already moved it, and that result stands.
+func releaseClaim(store store.Store, pipeline *model.Pipeline) error {
+	err := store.UpdatePipelineIfStatus(pipeline, model.StatusPending)
+	if errors.Is(err, types.ErrUpdateConflict) {
+		return ErrBadRequest{Msg: "the pipeline was canceled during approval"}
+	}
+	return err
 }

@@ -19,8 +19,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 func TestSecretFind(t *testing.T) {
@@ -224,4 +226,54 @@ func TestGlobalSecretList(t *testing.T) {
 	assert.Len(t, list, 1)
 
 	assert.True(t, list[0].IsGlobal())
+}
+
+// A PATCH writes back a row it read earlier, so a write based on a stale read must
+// fail instead of silently undoing a concurrent gate change.
+func TestSecretUpdateRejectsStaleRow(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Secret))
+	defer closer()
+
+	require.NoError(t, store.SecretCreate(&model.Secret{RepoID: 1, Name: "foo", Value: "baz", Events: []model.WebhookEvent{model.EventPush}}))
+	approverRead, err := store.SecretFind(&model.Repo{ID: 1}, "foo")
+	require.NoError(t, err)
+	staleRead, err := store.SecretFind(&model.Repo{ID: 1}, "foo")
+	require.NoError(t, err)
+
+	approverRead.RequireApproval = true
+	require.NoError(t, store.SecretUpdate(approverRead))
+
+	staleRead.Value = "stale"
+	assert.ErrorIs(t, store.SecretUpdate(staleRead), types.ErrUpdateConflict)
+
+	stored, err := store.SecretFind(&model.Repo{ID: 1}, "foo")
+	require.NoError(t, err)
+	assert.True(t, stored.RequireApproval, "a stale write must not remove the gate")
+	assert.Equal(t, "baz", stored.Value)
+
+	stored.Value = "fresh"
+	assert.NoError(t, store.SecretUpdate(stored), "a write based on the current row succeeds")
+}
+
+// A delete is guarded against the row the caller read, so a stale read must not
+// remove a secret that was gated after the read.
+func TestSecretDeleteRejectsStaleRow(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Secret))
+	defer closer()
+
+	require.NoError(t, store.SecretCreate(&model.Secret{RepoID: 1, Name: "foo", Value: "baz", Events: []model.WebhookEvent{model.EventPush}}))
+	staleRead, err := store.SecretFind(&model.Repo{ID: 1}, "foo")
+	require.NoError(t, err)
+	approverRead, err := store.SecretFind(&model.Repo{ID: 1}, "foo")
+	require.NoError(t, err)
+	approverRead.RequireApproval = true
+	require.NoError(t, store.SecretUpdate(approverRead))
+
+	assert.ErrorIs(t, store.SecretDelete(staleRead), types.ErrUpdateConflict)
+	stored, err := store.SecretFind(&model.Repo{ID: 1}, "foo")
+	require.NoError(t, err, "a stale delete must leave the row")
+	assert.True(t, stored.RequireApproval)
+
+	require.NoError(t, store.SecretDelete(stored), "a delete of the current row succeeds")
+	assert.ErrorIs(t, store.SecretDelete(stored), types.ErrRecordNotExist)
 }

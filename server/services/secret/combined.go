@@ -44,29 +44,54 @@ func (c *combined) SecretListPipeline(ctx context.Context, repo *model.Repo, pip
 	// Get secrets from HTTP extension
 	extensionSecrets, err := c.extension.SecretListPipeline(ctx, repo, pipeline, netrc)
 	if err != nil {
-		// Log the error but don't fail - use base secrets only
-		log.Warn().Err(err).Msg("failed to fetch secrets from extension")
-		return baseSecrets, nil
+		// Stored values may be stale overrides the extension meant to replace, so
+		// they wait for an approver instead of running without review.
+		log.Warn().Err(err).Msg("failed to fetch secrets from extension, gating every stored secret")
+		gated := make([]*model.Secret, 0, len(baseSecrets))
+		for _, s := range baseSecrets {
+			g := *s
+			g.RequireApproval = true
+			gated = append(gated, &g)
+		}
+		return gated, nil
 	}
 
 	if len(extensionSecrets) == 0 {
 		return baseSecrets, nil
 	}
 
-	// Merge secrets, with extension secrets taking priority (no duplicates by name)
-	exists := make(map[string]struct{}, len(extensionSecrets))
-	for _, s := range extensionSecrets {
-		exists[s.Name] = struct{}{}
+	// Merge secrets, with extension secrets taking priority (no duplicates by name).
+	// An extension can replace a stored row's value but never loosen its policy.
+	// Names match case-insensitively, as the compiler lowercases them.
+	stored := make(map[string]*model.Secret, len(baseSecrets))
+	for _, s := range baseSecrets {
+		stored[secretKey(s.Name)] = s
 	}
 
+	exists := make(map[string]struct{}, len(extensionSecrets))
 	merged := make([]*model.Secret, 0, len(baseSecrets)+len(extensionSecrets))
-	merged = append(merged, extensionSecrets...)
-
-	for _, s := range baseSecrets {
-		if _, ok := exists[s.Name]; ok {
+	for _, s := range extensionSecrets {
+		key := secretKey(s.Name)
+		if _, ok := exists[key]; ok {
 			continue
 		}
-		exists[s.Name] = struct{}{}
+		exists[key] = struct{}{}
+		if base, ok := stored[key]; ok {
+			narrowed, usable := withStrictestPolicy(s, base)
+			if !usable {
+				continue
+			}
+			s = narrowed
+		}
+		merged = append(merged, s)
+	}
+
+	for _, s := range baseSecrets {
+		key := secretKey(s.Name)
+		if _, ok := exists[key]; ok {
+			continue
+		}
+		exists[key] = struct{}{}
 		merged = append(merged, s)
 	}
 
@@ -91,8 +116,8 @@ func (c *combined) SecretUpdate(repo *model.Repo, secret *model.Secret) error {
 	return c.base.SecretUpdate(repo, secret)
 }
 
-func (c *combined) SecretDelete(repo *model.Repo, name string) error {
-	return c.base.SecretDelete(repo, name)
+func (c *combined) SecretDelete(repo *model.Repo, secret *model.Secret) error {
+	return c.base.SecretDelete(repo, secret)
 }
 
 func (c *combined) OrgSecretFind(orgID int64, name string) (*model.Secret, error) {
@@ -111,8 +136,8 @@ func (c *combined) OrgSecretUpdate(orgID int64, secret *model.Secret) error {
 	return c.base.OrgSecretUpdate(orgID, secret)
 }
 
-func (c *combined) OrgSecretDelete(orgID int64, name string) error {
-	return c.base.OrgSecretDelete(orgID, name)
+func (c *combined) OrgSecretDelete(orgID int64, secret *model.Secret) error {
+	return c.base.OrgSecretDelete(orgID, secret)
 }
 
 func (c *combined) GlobalSecretFind(name string) (*model.Secret, error) {
@@ -131,6 +156,6 @@ func (c *combined) GlobalSecretUpdate(secret *model.Secret) error {
 	return c.base.GlobalSecretUpdate(secret)
 }
 
-func (c *combined) GlobalSecretDelete(name string) error {
-	return c.base.GlobalSecretDelete(name)
+func (c *combined) GlobalSecretDelete(secret *model.Secret) error {
+	return c.base.GlobalSecretDelete(secret)
 }

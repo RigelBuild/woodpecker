@@ -14,7 +14,11 @@
 
 package compiler
 
-import "fmt"
+import (
+	"fmt"
+
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+)
 
 type ErrExtraHostFormat struct {
 	host string
@@ -81,4 +85,51 @@ func (err *ErrStepDependencyCycle) Error() string {
 func (*ErrStepDependencyCycle) Is(target error) bool {
 	_, ok := target.(*ErrStepDependencyCycle)
 	return ok
+}
+
+// ErrSecretWithheld marks a gated secret held back until an approver releases it.
+// It surfaces as an approval PipelineError so the pipeline blocks instead of failing.
+type ErrSecretWithheld struct {
+	Name string
+}
+
+func (err *ErrSecretWithheld) Error() string {
+	return fmt.Sprintf("secret %q is withheld until the pipeline is approved", err.Name)
+}
+
+func (*ErrSecretWithheld) Is(target error) bool {
+	_, ok := target.(*ErrSecretWithheld)
+	return ok
+}
+
+func (err *ErrSecretWithheld) As(target any) bool {
+	pipelineErr, ok := target.(**pipeline_errors.PipelineError)
+	if !ok {
+		return false
+	}
+	*pipelineErr = &pipeline_errors.PipelineError{
+		Type:    pipeline_errors.PipelineErrorTypeApproval,
+		Message: err.Error(),
+		Data:    &pipeline_errors.ApprovalErrorData{Name: err.Name},
+	}
+	return true
+}
+
+// OnlyApprovalErrors reports whether err holds at least one approval error and
+// no other blocking error, which is the one case a pipeline may wait for approval.
+func OnlyApprovalErrors(err error) bool {
+	if err == nil {
+		return false
+	}
+	found := false
+	for _, pipelineErr := range pipeline_errors.GetPipelineErrors(err) {
+		if pipelineErr.IsWarning {
+			continue
+		}
+		if pipelineErr.Type != pipeline_errors.PipelineErrorTypeApproval {
+			return false
+		}
+		found = true
+	}
+	return found
 }

@@ -25,4 +25,7 @@ var (
 
 	// ErrInsertDuplicateDetected is returned when an insert fails because of unique constrains.
 	ErrInsertDuplicateDetected = errors.New("on insert duplicate based on constraints was detected")
+
+	// ErrUpdateConflict a conditional update found the row changed since it was read.
+	ErrUpdateConflict = errors.New("record changed since it was read")
 )

@@ -110,6 +110,10 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 
 	getSecretValue := func(name string) (string, error) {
 		name = strings.ToLower(name)
+		// The withheld check comes first so a same-named secret can never stand in.
+		if original, ok := c.withheldSecrets[name]; ok {
+			return "", &ErrSecretWithheld{Name: original}
+		}
 		secret, ok := c.secrets[name]
 		if !ok {
 			return "", fmt.Errorf("secret %q not found", name)

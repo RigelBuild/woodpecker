@@ -363,3 +363,27 @@ func TestGetPipelineLastBeforeUsesNumber(t *testing.T) {
 	assert.EqualValues(t, 2, previous.Number)
 	assert.EqualValues(t, model.StatusFailure, previous.Status)
 }
+
+// Approve and Decline both start from a blocked pipeline; only the first writer may
+// move it, so a declined run can never be approved into the queue.
+func TestUpdatePipelineIfStatus(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Repo), new(model.Step), new(model.Pipeline))
+	defer closer()
+
+	repo := &model.Repo{UserID: 1, FullName: "owner/test", Owner: "owner", Name: "test"}
+	require.NoError(t, store.CreateRepo(repo))
+	blocked := &model.Pipeline{RepoID: repo.ID, Status: model.StatusBlocked}
+	require.NoError(t, store.CreatePipeline(blocked))
+
+	declined := *blocked
+	declined.Status = model.StatusDeclined
+	require.NoError(t, store.UpdatePipelineIfStatus(&declined, model.StatusBlocked))
+
+	approved := *blocked
+	approved.Status = model.StatusPending
+	assert.ErrorIs(t, store.UpdatePipelineIfStatus(&approved, model.StatusBlocked), types.ErrUpdateConflict)
+
+	stored, err := store.GetPipeline(blocked.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusDeclined, stored.Status)
+}

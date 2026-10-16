@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -88,4 +89,26 @@ func unsetEnvForTest(t *testing.T, key string) {
 			_ = os.Unsetenv(key)
 		}
 	})
+}
+
+func TestSecretApproversFlagParsesCommaList(t *testing.T) {
+	t.Setenv("WOODPECKER_SECRET_APPROVERS", "mattwilkinsonn, second-approver")
+	var approvers []string
+	for _, f := range flags {
+		flag, ok := f.(*cli.StringSliceFlag)
+		if !ok || flag.Name != "secret-approvers" {
+			continue
+		}
+		cmd := &cli.Command{
+			Flags: []cli.Flag{flag},
+			Action: func(_ context.Context, c *cli.Command) error {
+				approvers = c.StringSlice("secret-approvers")
+				return nil
+			},
+		}
+		require.NoError(t, cmd.Run(t.Context(), []string{"test"}))
+		assert.Equal(t, []string{"mattwilkinsonn", "second-approver"}, approvers)
+		return
+	}
+	t.Fatal("secret-approvers flag not found")
 }

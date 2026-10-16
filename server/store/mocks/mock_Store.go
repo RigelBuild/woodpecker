@@ -6180,6 +6180,63 @@ func (_c *MockStore_UpdatePipeline_Call) RunAndReturn(run func(pipeline *model.P
 	return _c
 }
 
+// UpdatePipelineIfStatus provides a mock function for the type MockStore
+func (_mock *MockStore) UpdatePipelineIfStatus(pipeline *model.Pipeline, statusValue model.StatusValue) error {
+	ret := _mock.Called(pipeline, statusValue)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdatePipelineIfStatus")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(*model.Pipeline, model.StatusValue) error); ok {
+		r0 = returnFunc(pipeline, statusValue)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_UpdatePipelineIfStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdatePipelineIfStatus'
+type MockStore_UpdatePipelineIfStatus_Call struct {
+	*mock.Call
+}
+
+// UpdatePipelineIfStatus is a helper method to define mock.On call
+//   - pipeline *model.Pipeline
+//   - statusValue model.StatusValue
+func (_e *MockStore_Expecter) UpdatePipelineIfStatus(pipeline any, statusValue any) *MockStore_UpdatePipelineIfStatus_Call {
+	return &MockStore_UpdatePipelineIfStatus_Call{Call: _e.mock.On("UpdatePipelineIfStatus", pipeline, statusValue)}
+}
+
+func (_c *MockStore_UpdatePipelineIfStatus_Call) Run(run func(pipeline *model.Pipeline, statusValue model.StatusValue)) *MockStore_UpdatePipelineIfStatus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.Pipeline
+		if args[0] != nil {
+			arg0 = args[0].(*model.Pipeline)
+		}
+		var arg1 model.StatusValue
+		if args[1] != nil {
+			arg1 = args[1].(model.StatusValue)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdatePipelineIfStatus_Call) Return(err error) *MockStore_UpdatePipelineIfStatus_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_UpdatePipelineIfStatus_Call) RunAndReturn(run func(pipeline *model.Pipeline, statusValue model.StatusValue) error) *MockStore_UpdatePipelineIfStatus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // UpdateRepo provides a mock function for the type MockStore
 func (_mock *MockStore) UpdateRepo(repo *model.Repo) error {
 	ret := _mock.Called(repo)

@@ -59,7 +59,9 @@ func TestUpdateToStatusDeclined(t *testing.T) {
 
 	now := time.Now().Unix()
 
-	pipeline, _ := UpdateToStatusDeclined(mockStorePipeline(t), model.Pipeline{}, "Reviewer")
+	s := mocks.NewMockStore(t)
+	s.On("UpdatePipelineIfStatus", mock.Anything, model.StatusBlocked).Return(nil)
+	pipeline, _ := UpdateToStatusDeclined(s, model.Pipeline{}, "Reviewer")
 
 	assert.Equal(t, model.StatusDeclined, pipeline.Status)
 	assert.Equal(t, "Reviewer", pipeline.Reviewer)

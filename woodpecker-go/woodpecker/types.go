@@ -183,14 +183,16 @@ type (
 
 	// Secret represents a secret variable, such as a password or token.
 	Secret struct {
-		ID     int64    `json:"id"`
-		OrgID  int64    `json:"org_id"`
-		RepoID int64    `json:"repo_id"`
-		Name   string   `json:"name"`
-		Value  string   `json:"value,omitempty"`
-		Images []string `json:"images"`
-		Events []string `json:"events"`
-		Note   string   `json:"note"`
+		ID              int64    `json:"id"`
+		OrgID           int64    `json:"org_id"`
+		RepoID          int64    `json:"repo_id"`
+		Name            string   `json:"name"`
+		Value           string   `json:"value,omitempty"`
+		Images          []string `json:"images"`
+		Events          []string `json:"events"`
+		RequireApproval bool     `json:"require_approval"`
+		Branches        []string `json:"branches"`
+		Note            string   `json:"note"`
 	}
 
 	// Feed represents an item in the user's feed or timeline.

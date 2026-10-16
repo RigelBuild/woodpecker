@@ -89,9 +89,11 @@ var Config = struct {
 		Volumes                             []string
 		Networks                            []string
 		PrivilegedPlugins                   []string
-		DefaultTimeout                      int64
-		MaxTimeout                          int64
-		Proxy                               struct {
+		// Logins whose browser-session approval releases gated secrets; empty releases none.
+		SecretApprovers []string
+		DefaultTimeout  int64
+		MaxTimeout      int64
+		Proxy           struct {
 			No    string
 			HTTP  string
 			HTTPS string

@@ -506,6 +506,8 @@ func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
 		// Workflows deliberately nil: cancel.go loads the tree locally, so
 		// killedPipeline reaches updatePipelineStatus with nil Workflows.
 	}
+	// Cancel re-reads the stored row under the pipeline lock.
+	s.On("GetPipeline", pipeline.ID).Return(pipeline, nil)
 
 	err := Cancel(context.Background(), f, s, repo, user, pipeline, &model.CancelInfo{})
 	require.NoError(t, err)
@@ -532,7 +534,7 @@ func TestDeclinePostsTerminalMeta(t *testing.T) {
 		{ID: 2, Name: "spec-impact", State: model.StatusBlocked, OnMetadataEdit: true},
 	}, nil)
 	s.On("WorkflowUpdate", mock.Anything).Return(nil)
-	s.On("UpdatePipeline", mock.Anything).Return(nil)
+	s.On("UpdatePipelineIfStatus", mock.Anything, model.StatusBlocked).Return(nil)
 	// Freshness: this pipeline is the only meta-carrying one for the commit.
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
 		Return([]*model.Pipeline{{Number: 5, Event: model.EventPull, Commit: "abc123"}}, nil)

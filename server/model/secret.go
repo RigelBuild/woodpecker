@@ -52,7 +52,14 @@ type Secret struct {
 	Value  string         `json:"value,omitempty" xorm:"TEXT 'value'"`
 	Images []string       `json:"images"          xorm:"json 'images'"`
 	Events []WebhookEvent `json:"events"          xorm:"json 'events'"`
-	Note   string         `json:"note" xorm:"note"`
+	// A gated secret reaches a pipeline only after an approver's browser-session approval.
+	RequireApproval bool `json:"require_approval" xorm:"require_approval"`
+	// When set, non-pull_request runs get the secret only on these branches.
+	Branches []string `json:"branches" xorm:"json 'branches'"`
+	Note     string   `json:"note" xorm:"note"`
+	// Version makes an update based on a stale read fail instead of reverting a
+	// concurrent change, such as an approver adding a gate.
+	Version int64 `json:"-" xorm:"version 'version'"`
 } //	@name	Secret
 
 // TableName return database table name for xorm.
@@ -125,13 +132,15 @@ func (s *Secret) Validate() error {
 // Copy makes a copy of the secret without the value.
 func (s *Secret) Copy() *Secret {
 	return &Secret{
-		ID:     s.ID,
-		OrgID:  s.OrgID,
-		RepoID: s.RepoID,
-		Name:   s.Name,
-		Images: s.Images,
-		Events: sortEvents(s.Events),
-		Note:   s.Note,
+		ID:              s.ID,
+		OrgID:           s.OrgID,
+		RepoID:          s.RepoID,
+		Name:            s.Name,
+		Images:          s.Images,
+		Events:          sortEvents(s.Events),
+		RequireApproval: s.RequireApproval,
+		Branches:        s.Branches,
+		Note:            s.Note,
 	}
 }
 
@@ -141,9 +150,11 @@ func sortEvents(wel WebhookEventList) WebhookEventList {
 }
 
 type SecretPatch struct {
-	Name   *string        `json:"name"            `
-	Value  *string        `json:"value,omitempty" `
-	Images []string       `json:"images"          `
-	Events []WebhookEvent `json:"events"          `
-	Note   *string        `json:"note" `
+	Name            *string        `json:"name"            `
+	Value           *string        `json:"value,omitempty" `
+	Images          []string       `json:"images"          `
+	Events          []WebhookEvent `json:"events"          `
+	RequireApproval *bool          `json:"require_approval"`
+	Branches        []string       `json:"branches"        `
+	Note            *string        `json:"note" `
 } //	@name	SecretPatch

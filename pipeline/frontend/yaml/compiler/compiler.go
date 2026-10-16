@@ -93,6 +93,7 @@ type Compiler struct {
 	metadata           metadata.Metadata
 	registries         []Registry
 	secrets            map[string]Secret
+	withheldSecrets    map[string]string
 	defaultClonePlugin string
 	// TODO: remove with version 4.x
 	forceIgnoreServiceFailure bool
@@ -105,6 +106,7 @@ func New(opts ...Option) *Compiler {
 		nonPluginEnv:       map[string]string{},
 		cloneEnv:           map[string]string{},
 		secrets:            map[string]Secret{},
+		withheldSecrets:    map[string]string{},
 		defaultClonePlugin: constant.DefaultClonePlugin,
 	}
 	for _, opt := range opts {
@@ -137,7 +139,10 @@ func (c *Compiler) Compile(conf *yaml_types.Workflow) (*backend_types.Config, er
 	config.Network = fmt.Sprintf("%s_default", c.prefix)
 
 	// create secrets for mask
-	for _, sec := range c.secrets {
+	for key, sec := range c.secrets {
+		if _, withheld := c.withheldSecrets[key]; withheld {
+			continue
+		}
 		config.Secrets = append(config.Secrets, &backend_types.Secret{
 			Name:  sec.Name,
 			Value: sec.Value,

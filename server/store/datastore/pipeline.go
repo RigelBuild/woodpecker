@@ -216,6 +216,19 @@ func (s storage) UpdatePipeline(pipeline *model.Pipeline) error {
 	return err
 }
 
+// UpdatePipelineIfStatus writes the pipeline only while its stored status is still
+// from, so two reviewers acting on the same blocked pipeline cannot both win.
+func (s storage) UpdatePipelineIfStatus(pipeline *model.Pipeline, from model.StatusValue) error {
+	affected, err := s.engine.ID(pipeline.ID).Where("status = ?", from).AllCols().Update(pipeline)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return types.ErrUpdateConflict
+	}
+	return nil
+}
+
 func (s storage) DeletePipeline(pipeline *model.Pipeline) error {
 	return s.deletePipeline(s.engine.NewSession(), pipeline.ID)
 }
