@@ -102,6 +102,7 @@ Example request:
     "author": "myUser",
     "author_avatar": "https://myforge.com/avatars/d6b3f7787a685fcdf2a44e2c685c7e03",
     "author_email": "my@email.com",
+    "before": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
     "branch": "main",
     "changed_files": ["some-filename.txt"],
     "commit": "2fff90f8d288a4640e90f05049fe30e61a14fd50",
@@ -143,6 +144,11 @@ Example request:
   }
 }
 ```
+
+`pipeline.before` holds the previous head of a pushed commit range, which an extension can use
+as the base for its own changed-file comparison. It is populated for GitHub push events only,
+and is absent when the push has no usable base: a force push, a tag, a new branch, or a ref
+that did not move.
 
 ### Response
 
