@@ -15,6 +15,7 @@
 package model
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -96,6 +97,48 @@ func TestAgent_GetServerLabels(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, map[string]string{"gpu": "true"}, agent.Filters)
 	})
+}
+
+func TestAgentPollLabels(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent *Agent
+		want  map[string]string
+	}{
+		{
+			name:  "defaults with wildcard hostname",
+			agent: &Agent{OrgID: IDNotSet, Platform: "linux/amd64", Backend: "docker"},
+			want: map[string]string{
+				pipeline.LabelFilterHostname: "*", pipeline.LabelFilterPlatform: "linux/amd64",
+				pipeline.LabelFilterBackend: "docker", pipeline.LabelFilterRepo: "*", pipeline.LabelFilterOrg: "*",
+			},
+		},
+		{
+			name: "custom labels override defaults and server filters override both",
+			agent: &Agent{
+				OrgID: 7, Platform: "linux/amd64", Backend: "docker",
+				CustomLabels: map[string]string{pipeline.LabelFilterHostname: "builder-1", "type": "gpu", pipeline.LabelFilterOrg: "9", "pool": "a"},
+				Filters:      map[string]string{"pool": "b"},
+			},
+			want: map[string]string{
+				pipeline.LabelFilterHostname: "builder-1", pipeline.LabelFilterPlatform: "linux/amd64",
+				pipeline.LabelFilterBackend: "docker", pipeline.LabelFilterRepo: "*", pipeline.LabelFilterOrg: "7",
+				"type": "gpu", "pool": "b",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			custom := maps.Clone(tt.agent.CustomLabels)
+			got, err := tt.agent.PollLabels()
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			if got != nil {
+				got["mutated"] = "yes"
+			}
+			assert.Equal(t, custom, tt.agent.CustomLabels, "custom labels unchanged")
+		})
+	}
 }
 
 func TestAgent_CanAccessRepo(t *testing.T) {

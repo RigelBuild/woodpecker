@@ -59,6 +59,8 @@ type aggregateResilienceForge struct {
 	// was handed, so a test can assert CI (pr) rolled up ONLY the code workflows
 	// (the meta gates excluded).
 	aggregateWorkflows []*model.Workflow
+	// aggregatePipeline is a copy of the pipeline the last StatusAggregate call got.
+	aggregatePipeline *model.Pipeline
 
 	// metaCalls counts StatusMeta invocations, and metaWorkflows captures the
 	// workflow set the last meta call was handed, so a test can assert both that
@@ -75,9 +77,11 @@ func (f *aggregateResilienceForge) Status(_ context.Context, _ *model.User, _ *m
 	return nil
 }
 
-func (f *aggregateResilienceForge) StatusAggregate(_ context.Context, _ *model.User, _ *model.Repo, _ *model.Pipeline, workflows []*model.Workflow) error {
+func (f *aggregateResilienceForge) StatusAggregate(_ context.Context, _ *model.User, _ *model.Repo, pipeline *model.Pipeline, workflows []*model.Workflow) error {
 	f.aggregateCalls++
 	f.aggregateWorkflows = workflows
+	got := *pipeline
+	f.aggregatePipeline = &got
 	return nil
 }
 

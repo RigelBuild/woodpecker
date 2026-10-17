@@ -80,6 +80,23 @@ func (a *Agent) GetServerLabels() (map[string]string, error) {
 	return filters, nil
 }
 
+// PollLabels rebuilds the labels the agent polls with; hostname is a wildcard unless set by a custom label.
+func (a *Agent) PollLabels() (map[string]string, error) {
+	labels := map[string]string{
+		pipeline.LabelFilterHostname: "*",
+		pipeline.LabelFilterPlatform: a.Platform,
+		pipeline.LabelFilterBackend:  a.Backend,
+		pipeline.LabelFilterRepo:     "*",
+	}
+	maps.Copy(labels, a.CustomLabels)
+	serverLabels, err := a.GetServerLabels()
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(labels, serverLabels)
+	return labels, nil
+}
+
 func (a *Agent) CanAccessRepo(repo *Repo) bool {
 	// global agent
 	if a.OrgID == IDNotSet {

@@ -853,6 +853,13 @@ Approving and canceling the same pipeline is serialized only within one server r
 
 Minimum age before a missing agent or workflow is treated as orphaned.
 
+### PENDING_TIMEOUT
+
+- Name: `WOODPECKER_PENDING_TIMEOUT`
+- Default: `6h`
+
+Maximum time a runnable pending workflow waits without a matching live agent. Set to `0` to disable pending workflow timeouts. Timeout checks are suspended while the queue is paused, and a task pinned to an agent `hostname` never times out. This setting requires `ORPHAN_REAP_INTERVAL` above `0`.
+
 ### SESSION_EXPIRES
 
 - Name: `WOODPECKER_SESSION_EXPIRES`

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 	queue_mocks "go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
 	manager_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/mocks"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
@@ -279,6 +281,54 @@ func TestRPCNextInjectsReadOnlyNetrc(t *testing.T) {
 	require.Len(t, workflow.Config.Secrets, 1)
 	assert.Equal(t, "__WOODPECKER_READ_ONLY_NETRC__", workflow.Config.Secrets[0].Name)
 	assert.Equal(t, "dispatch-token", workflow.Config.Secrets[0].Value)
+}
+
+func TestRPCNextFilterMatchesAgentPollLabels(t *testing.T) {
+	agent := &model.Agent{
+		ID: 1, Name: "test-agent", OrgID: model.IDNotSet, Platform: "linux/amd64", Backend: "docker",
+		CustomLabels: map[string]string{"type": "gpu", "pool": "a"},
+		Filters:      map[string]string{"pool": "b"},
+	}
+	// The labels the agent's run loop sends: defaults, then its custom labels.
+	sent := map[string]string{"hostname": "builder-1", "platform": "linux/amd64", "backend": "docker", "repo": "*"}
+	maps.Copy(sent, agent.CustomLabels)
+
+	var nextFilter func(*model.Task) (bool, int)
+	queue := queue_mocks.NewMockQueue(t)
+	queue.On("Poll", mock.Anything, int64(1), mock.Anything).Run(func(args mock.Arguments) {
+		filter, ok := args.Get(2).(func(*model.Task) (bool, int))
+		require.True(t, ok, "queue poll filter type")
+		nextFilter = filter
+	}).Return(nil, nil).Once()
+	mockStore := store_mocks.NewMockStore(t)
+	mockStore.On("AgentFind", int64(1)).Return(agent, nil)
+	s := newTestRPC(t, mockStore, queue)
+	ctx := context.WithValue(t.Context(), agentIDKey, int64(1))
+	workflow, err := s.Next(ctx, rpc.Filter{Labels: sent})
+	require.NoError(t, err)
+	require.Nil(t, workflow)
+	require.NotNil(t, nextFilter)
+
+	labels, err := agent.PollLabels()
+	require.NoError(t, err)
+	pollFilter := scheduler.NewLabelFilter(labels)
+	tasks := []*model.Task{
+		{ID: "1", Labels: map[string]string{"type": "gpu", "platform": "linux/amd64"}},
+		{ID: "2", Labels: map[string]string{"type": "gpu", "pool": "a"}},
+		{ID: "3", Labels: map[string]string{"type": "gpu", "pool": "b", "repo": "owner/repo", "org-id": "5"}},
+		{ID: "4", Labels: map[string]string{"type": "linux"}},
+		{ID: "5", Labels: map[string]string{"backend": "kubernetes"}},
+		{ID: "6", Labels: map[string]string{"backend": "docker", "woodpecker-ci.org/repo-id": "9"}},
+	}
+	matchedAny := false
+	for _, task := range tasks {
+		wantMatched, wantScore := nextFilter(task)
+		gotMatched, gotScore := pollFilter(task)
+		assert.Equal(t, wantMatched, gotMatched, "task %s matched", task.ID)
+		assert.Equal(t, wantScore, gotScore, "task %s score", task.ID)
+		matchedAny = matchedAny || gotMatched
+	}
+	assert.True(t, matchedAny, "the task set includes a match")
 }
 
 func TestRPCNextStripsNetrcOnFailures(t *testing.T) {
