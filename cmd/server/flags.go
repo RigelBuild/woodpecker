@@ -230,7 +230,6 @@ var flags = append([]cli.Flag{
 		Sources: cli.EnvVars("WOODPECKER_DEFAULT_PIPELINE_TIMEOUT"),
 		Name:    "default-pipeline-timeout",
 		Usage:   "The default time in minutes for a repo in minutes before a pipeline gets killed",
-		// The dispatch netrc needs timeout+2m of a ~60-minute GitHub App token.
 		Value: 55,
 	},
 	&cli.Int64Flag{
