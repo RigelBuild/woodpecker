@@ -72,6 +72,8 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 		running[task.ID] = struct{}{}
 	}
 	loaded := make(map[string]model.StatusValue)
+	// Workflows loaded from outside the walked trees, shared by both dependent checks.
+	outsideTree := make(map[string]*model.Workflow)
 	// Live agent filters load once per pass, on the first timeout candidate.
 	var liveFilters []scheduler.FilterFn
 	var liveErr error
@@ -211,7 +213,7 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				Str("reason", reason).
 				Msg("reaped orphaned workflow")
 		}
-		if pendingTimeout > 0 && len(finalizeDeadWorkflows(ctx, storage, workflows, waiting)) > 0 {
+		if pendingTimeout > 0 && len(finalizeDeadWorkflows(ctx, storage, workflows, waiting, now.Unix(), outsideTree)) > 0 {
 			changed = true
 		}
 
@@ -249,7 +251,7 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 	}
 
 	if pendingTimeout > 0 {
-		removeStaleTaskRows(ctx, storage, persistedTasks, loaded, waiting, running)
+		removeStaleTaskRows(ctx, storage, persistedTasks, loaded, waiting, running, outsideTree)
 	}
 	return nil
 }
@@ -302,6 +304,6 @@ func pendingTimedOut(p *model.Pipeline, workflows []*model.Workflow, task *model
 	if !ok || !(&model.Task{RunOn: task.RunOn, DepStatus: deps}).ShouldRun() {
 		return false
 	}
-	since := runnableSince(p, workflows, task)
+	since := runnableSince(p, workflows, task, now.Unix())
 	return since > 0 && time.Unix(since, 0).Before(now.Add(-timeout))
 }

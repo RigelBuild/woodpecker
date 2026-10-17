@@ -858,7 +858,7 @@ Minimum age before a missing agent or workflow is treated as orphaned.
 - Name: `WOODPECKER_PENDING_TIMEOUT`
 - Default: `6h`
 
-Maximum time a runnable pending workflow waits without a matching live agent. Set to `0` to disable pending workflow timeouts. This setting requires `ORPHAN_REAP_INTERVAL` above `0`.
+Maximum time a runnable pending workflow waits without a matching live agent. Set to `0` to disable pending workflow timeouts. A paused queue and a task pinned to an agent `hostname` never time out. This setting requires `ORPHAN_REAP_INTERVAL` above `0`.
 
 ### SESSION_EXPIRES
 
