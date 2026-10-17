@@ -69,13 +69,14 @@ func TestUsableFor(t *testing.T) {
 		remaining time.Duration
 		want      bool
 	}{
-		{name: "59 minutes for 55 minute timeout", remaining: 59 * time.Minute, want: true},
-		{name: "exact two minute margin", remaining: 57 * time.Minute, want: true},
-		{name: "less than two minute margin", remaining: 56*time.Minute + time.Second},
+		{name: "fresh token", remaining: 59*time.Minute + 59*time.Second, want: true},
+		{name: "exact minimum", remaining: 10 * time.Minute, want: true},
+		{name: "below minimum", remaining: 10*time.Minute - time.Second},
+		{name: "expired", remaining: -time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, usableFor(now.Add(tt.remaining), now, 55*time.Minute))
+			assert.Equal(t, tt.want, usableFor(now.Add(tt.remaining), now))
 		})
 	}
 }
@@ -126,14 +127,26 @@ func TestInjectNetrc(t *testing.T) {
 		require.Len(t, workflow.Config.Secrets, 3)
 	})
 
-	t.Run("strips the approver token when expiry is too soon", func(t *testing.T) {
+	t.Run("strips the token when it expires too soon", func(t *testing.T) {
 		setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
-			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "new-token", ExpiresAt: now.Add(56 * time.Minute)}, nil
+			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "new-token", ExpiresAt: now.Add(9 * time.Minute)}, nil
 		})
 		workflow := makeWorkflow()
 		s := RPC{now: func() time.Time { return now }}
 		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
 		assertNoNetrc(t, workflow)
+	})
+
+	// A 60-minute repo timeout with a fresh one-hour App token must still clone.
+	t.Run("injects a fresh token for a 60 minute workflow", func(t *testing.T) {
+		setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "hour-token", ExpiresAt: now.Add(59*time.Minute + 59*time.Second)}, nil
+		})
+		workflow := makeWorkflow()
+		workflow.Timeout = 60
+		s := RPC{now: func() time.Time { return now }}
+		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
+		assert.Equal(t, "hour-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
 	})
 
 	t.Run("mint failure strips existing netrc values", func(t *testing.T) {
@@ -167,13 +180,6 @@ func TestInjectNetrc(t *testing.T) {
 			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "expired", ExpiresAt: now.Add(-time.Second)}, nil
 		})
 		workflow := makeWorkflow()
-		s := RPC{now: func() time.Time { return now }}
-		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
-		assertNoNetrc(t, workflow)
-	})
-	t.Run("nonpositive timeout strips netrc values", func(t *testing.T) {
-		workflow := makeWorkflow()
-		workflow.Timeout = 0
 		s := RPC{now: func() time.Time { return now }}
 		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
 		assertNoNetrc(t, workflow)
@@ -215,34 +221,6 @@ func TestInjectNetrc(t *testing.T) {
 		require.NoError(t, s.injectNetrc(t.Context(), workflow, &publicRepo))
 		assert.Equal(t, "public-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
 	})
-	t.Run("timeout above safe duration skips mint", func(t *testing.T) {
-		manager := manager_mocks.NewMockManager(t)
-		manager.On("ForgeFromRepo", repo).Return(&readOnlyNetrcForge{readOnlyNetrc: func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
-			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "token", ExpiresAt: now.Add(time.Hour)}, nil
-		}}, nil).Maybe()
-		previousManager := server.Config.Services.Manager
-		server.Config.Services.Manager = manager
-		t.Cleanup(func() { server.Config.Services.Manager = previousManager })
-		workflow := makeWorkflow()
-		workflow.Timeout = maxWorkflowTimeoutMinutes + 1
-		s := RPC{now: func() time.Time { return now }}
-		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
-		assertNoNetrc(t, workflow)
-	})
-	t.Run("maximum safe timeout reaches lifetime check without overflow", func(t *testing.T) {
-		mints := 0
-		setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
-			mints++
-			return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "token", ExpiresAt: now.Add(time.Hour)}, nil
-		})
-		workflow := makeWorkflow()
-		workflow.Timeout = maxWorkflowTimeoutMinutes
-		s := RPC{now: func() time.Time { return now }}
-		require.NoError(t, s.injectNetrc(t.Context(), workflow, repo))
-		assert.Equal(t, 1, mints)
-		assertNoNetrc(t, workflow)
-	})
-
 	t.Run("each dispatch mints its own token", func(t *testing.T) {
 		mints := 0
 		setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {

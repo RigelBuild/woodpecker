@@ -828,8 +828,6 @@ Example: `platform=linux/amd64,backend=docker`
 
 The default time for a repo in minutes before a pipeline gets killed.
 
-GitHub App installation tokens last about 60 minutes from mint. Their remaining lifetime at dispatch must be at least the workflow timeout plus two minutes, so the default is 55 minutes. A repo with a longer timeout gets no clone credential, and the server logs a warning.
-
 ### MAX_PIPELINE_TIMEOUT
 
 - Name: `WOODPECKER_MAX_PIPELINE_TIMEOUT`

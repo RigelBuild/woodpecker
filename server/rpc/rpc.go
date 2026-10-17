@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,8 +43,6 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
-
-const maxWorkflowTimeoutMinutes = (math.MaxInt64 - int64(2*time.Minute)) / int64(time.Minute)
 
 type ctxKey struct{}
 
@@ -146,10 +143,6 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 	if !repo.IsSCMPrivate && !server.Config.Pipeline.AuthenticatePublicRepos {
 		return nil
 	}
-	if w.Timeout <= 0 || w.Timeout > maxWorkflowTimeoutMinutes {
-		log.Warn().Int64("timeout", w.Timeout).Msg("skipping read-only netrc injection for invalid workflow timeout")
-		return nil
-	}
 
 	forgeClient, err := server.Config.Services.Manager.ForgeFromRepo(repo)
 	if err != nil {
@@ -175,12 +168,10 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 	if s.now != nil {
 		now = s.now()
 	}
-	timeout := time.Duration(w.Timeout) * time.Minute
-	if !usableFor(netrc.ExpiresAt, now, timeout) {
+	if !usableFor(netrc.ExpiresAt, now) {
 		log.Warn().
-			Int64("timeout_minutes", w.Timeout).
 			Dur("remaining_lifetime", netrc.ExpiresAt.Sub(now)).
-			Msg("skipping read-only netrc injection because token expires before workflow timeout")
+			Msg("skipping read-only netrc injection because the token expires too soon")
 		return nil
 	}
 	if w.Config == nil {
@@ -201,8 +192,11 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 	return nil
 }
 
-func usableFor(expiresAt, now time.Time, timeout time.Duration) bool {
-	return expiresAt.Sub(now) >= timeout+2*time.Minute
+// A fresh App token lasts about 60m; clone runs first, so only dispatch delay needs covering.
+const minNetrcLifetime = 10 * time.Minute
+
+func usableFor(expiresAt, now time.Time) bool {
+	return expiresAt.Sub(now) >= minNetrcLifetime
 }
 
 func stripNetrc(w *rpc.Workflow) {

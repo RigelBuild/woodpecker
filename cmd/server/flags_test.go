@@ -18,26 +18,11 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 )
-
-// A new repo's default timeout plus the dispatch margin must fit a GitHub App
-// token's one-hour lifetime, or new repos clone without credentials.
-func TestDefaultPipelineTimeoutFitsDispatchToken(t *testing.T) {
-	for _, f := range flags {
-		flag, ok := f.(*cli.Int64Flag)
-		if !ok || flag.Name != "default-pipeline-timeout" {
-			continue
-		}
-		assert.LessOrEqual(t, time.Duration(flag.Value)*time.Minute+2*time.Minute, 60*time.Minute)
-		return
-	}
-	t.Fatal("default-pipeline-timeout flag not found")
-}
 
 func TestDatasourceDefaultValue(t *testing.T) {
 	t.Run("outside container", func(t *testing.T) {
