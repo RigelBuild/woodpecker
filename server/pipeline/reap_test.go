@@ -1003,6 +1003,45 @@ func TestReapPendingTimeoutNextPass(t *testing.T) {
 		return store_mocks.NewMockStore(t), schedulerMock, managerMock
 	}
 
+	t.Run("previously started workflow back in pending times out error", func(t *testing.T) {
+		storeMock, schedulerMock, managerMock := setup(t)
+		pipeline := &model.Pipeline{ID: 100, RepoID: repo.ID, Number: 13, Status: model.StatusRunning, Created: nowUnix - 9*3600}
+		workflow := &model.Workflow{
+			ID: 41, State: model.StatusPending, Started: nowUnix - 8*3600,
+			Children: []*model.Step{
+				{ID: 411, State: model.StatusRunning, Started: nowUnix - 8*3600},
+				{ID: 412, State: model.StatusPending},
+			},
+		}
+		storeMock.On("GetPipelineQueue").Return([]*model.Feed{{ID: pipeline.ID}}, nil).Once()
+		storeMock.On("TaskList").Return([]*model.Task{}, nil).Once()
+		storeMock.On("GetPipeline", pipeline.ID).Return(pipeline, nil)
+		storeMock.On("GetRepo", repo.ID).Return(repo, nil).Once()
+		storeMock.On("WorkflowGetTree", pipeline).Return([]*model.Workflow{workflow}, nil).Once()
+		schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{Pending: []*model.Task{linuxTask("41")}}).Once()
+		storeMock.On("AgentList", &model.ListOptionsWithAll{All: true}).Return([]*model.Agent{}, nil).Once()
+		storeMock.On("StepUpdate", mock.MatchedBy(func(s *model.Step) bool {
+			return s.ID == 411 && s.State == model.StatusKilled && s.Finished == nowUnix && s.Error == reason
+		})).Return(nil).Once()
+		storeMock.On("StepUpdate", mock.MatchedBy(func(s *model.Step) bool {
+			return s.ID == 412 && s.State == model.StatusError && s.Finished == nowUnix && s.Error == reason
+		})).Return(nil).Once()
+		storeMock.On("WorkflowUpdate", mock.MatchedBy(func(w *model.Workflow) bool {
+			return w.ID == 41 && w.State == model.StatusError && w.Finished == nowUnix && w.Error == reason
+		})).Return(nil).Once()
+		schedulerMock.On("CancelWorkflows", mock.Anything, []string{"41"}).Return(nil).Once()
+		storeMock.On("UpdatePipeline", mock.MatchedBy(func(p *model.Pipeline) bool {
+			return p.Status == model.StatusError && p.Finished == nowUnix
+		})).Return(nil).Once()
+		storeMock.On("GetUser", repo.UserID).Return(user, nil).Once()
+		managerMock.On("ForgeFromRepo", repo).Return(nil, nil).Once()
+		schedulerMock.On("PublishPipelineEvent", mock.Anything, repo, mock.Anything).Return(nil).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout))
+		assert.Equal(t, model.StatusError, workflow.State)
+		assert.Equal(t, model.StatusKilled, workflow.Children[0].State)
+		assert.Equal(t, model.StatusError, workflow.Children[1].State)
+	})
+
 	t.Run("failed dependent write is skipped on the next pass", func(t *testing.T) {
 		storeMock, schedulerMock, managerMock := setup(t)
 		pipeline := &model.Pipeline{ID: 100, RepoID: repo.ID, Number: 13, Status: model.StatusPending, Created: nowUnix - 7*3600}

@@ -262,24 +262,50 @@ func TestCreateFilterFunc(t *testing.T) {
 func TestNewLabelFilter(t *testing.T) {
 	labels := map[string]string{"platform": "linux", "org-id": "*", "!gpu": "true"}
 	tests := []struct {
-		name string
-		task *model.Task
+		name        string
+		task        *model.Task
+		wantMatched bool
+		wantScore   int
 	}{
-		{name: "match", task: &model.Task{Labels: map[string]string{"platform": "linux", "gpu": "true"}}},
-		{name: "wrong platform", task: &model.Task{Labels: map[string]string{"platform": "windows", "gpu": "true"}}},
-		{name: "required label missing", task: &model.Task{Labels: map[string]string{"platform": "linux"}}},
-		{name: "unknown label", task: &model.Task{Labels: map[string]string{"platform": "linux", "gpu": "true", "type": "linux"}}},
+		{
+			name:        "exact and required labels score ten each",
+			task:        &model.Task{Labels: map[string]string{"platform": "linux", "gpu": "true"}},
+			wantMatched: true, wantScore: 20,
+		},
+		{
+			name:        "wildcard label scores one",
+			task:        &model.Task{Labels: map[string]string{"platform": "linux", "gpu": "true", "org-id": "5"}},
+			wantMatched: true, wantScore: 21,
+		},
+		{
+			name:        "empty task label is ignored",
+			task:        &model.Task{Labels: map[string]string{"platform": "linux", "gpu": "true", "type": ""}},
+			wantMatched: true, wantScore: 20,
+		},
+		{
+			name: "wrong platform",
+			task: &model.Task{Labels: map[string]string{"platform": "windows", "gpu": "true"}},
+		},
+		{
+			name: "required label missing",
+			task: &model.Task{Labels: map[string]string{"platform": "linux"}},
+		},
+		{
+			name: "required label with another value",
+			task: &model.Task{Labels: map[string]string{"platform": "linux", "gpu": "false"}},
+		},
+		{
+			name: "label the agent lacks",
+			task: &model.Task{Labels: map[string]string{"platform": "linux", "gpu": "true", "type": "linux"}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wantMatched, wantScore := createFilterFunc(rpc.Filter{Labels: labels})(tt.task)
-			gotMatched, gotScore := NewLabelFilter(labels)(tt.task)
-			assert.Equal(t, wantMatched, gotMatched, "Matched result")
-			assert.Equal(t, wantScore, gotScore, "Score")
+			matched, score := NewLabelFilter(labels)(tt.task)
+			assert.Equal(t, tt.wantMatched, matched, "Matched result")
+			assert.Equal(t, tt.wantScore, score, "Score")
 		})
 	}
-	matched, _ := NewLabelFilter(labels)(tests[0].task)
-	assert.True(t, matched, "a matching task is matched")
 }
 
 func TestMissingRequiredLabels(t *testing.T) {

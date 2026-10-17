@@ -284,10 +284,11 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 	}
 
 	updated := *workflow
-	if updated.Started != 0 {
+	if updated.Started != 0 && errMsg == "" {
 		updated.State = model.StatusKilled
 		updated.Finished = finished
 	} else {
+		// A pending timeout ends the workflow in pendingState even when an expired lease once started it.
 		updated.State = pendingState
 	}
 	if errMsg != "" {
