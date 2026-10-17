@@ -73,7 +73,7 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 	}
 	loaded := make(map[string]model.StatusValue)
 	// Workflows loaded from outside the walked trees, shared by both dependent checks.
-	outsideTree := make(map[string]*model.Workflow)
+	outsideTree := make(map[int64]*model.Workflow)
 	// Live agent filters load once per pass, on the first timeout candidate.
 	var liveFilters []scheduler.FilterFn
 	var liveErr error
@@ -303,7 +303,7 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 }
 
 // pendingTimedOut reports whether a runnable task has waited longer than the timeout.
-func pendingTimedOut(p *model.Pipeline, workflows []*model.Workflow, deleted map[string]bool, task *model.Task, now time.Time, timeout time.Duration) bool {
+func pendingTimedOut(p *model.Pipeline, workflows []*model.Workflow, deleted map[int64]bool, task *model.Task, now time.Time, timeout time.Duration) bool {
 	deps, ok := treeDepStatus(task, workflows)
 	if !ok || !(&model.Task{RunOn: task.RunOn, DepStatus: deps}).ShouldRun() {
 		return false

@@ -58,12 +58,29 @@ func loadLiveAgentFilters(storage store.Store, now time.Time, window time.Durati
 		if err != nil {
 			return nil, fmt.Errorf("labels of agent %d: %w", agent.ID, err)
 		}
-		filters = append(filters, hostnameAwareFilter(scheduler.NewLabelFilter(labels), agent.CustomLabels[pipeline.LabelFilterHostname] == "*"))
+		wildcard, err := explicitHostnameWildcard(agent)
+		if err != nil {
+			return nil, fmt.Errorf("server labels of agent %d: %w", agent.ID, err)
+		}
+		filters = append(filters, hostnameAwareFilter(scheduler.NewLabelFilter(labels), wildcard))
 	}
 	return filters, nil
 }
 
-// hostnameAwareFilter rejects a task with hostname "*" unless the agent's own labels set hostname "*".
+// explicitHostnameWildcard reports whether a server filter, or else a custom label, sets hostname "*".
+// The "*" PollLabels uses as a default stands in for the concrete hostname a real agent polls with.
+func explicitHostnameWildcard(agent *model.Agent) (bool, error) {
+	serverLabels, err := agent.GetServerLabels()
+	if err != nil {
+		return false, err
+	}
+	if hostname, ok := serverLabels[pipeline.LabelFilterHostname]; ok {
+		return hostname == "*", nil
+	}
+	return agent.CustomLabels[pipeline.LabelFilterHostname] == "*", nil
+}
+
+// hostnameAwareFilter rejects a task with hostname "*" unless the agent explicitly sets hostname "*".
 // A real agent polls with its concrete hostname, which the scheduler never matches against a task's "*".
 func hostnameAwareFilter(filter scheduler.FilterFn, agentHostnameWildcard bool) scheduler.FilterFn {
 	return func(task *model.Task) (bool, int) {
@@ -90,10 +107,9 @@ func hostnamePinned(task *model.Task) bool {
 
 // stampUnfinishedDeps persists now as the finish time of each terminal dependency that has none.
 // The stored value anchors the pending clock; a failed write is retried next pass.
-func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, deleted map[string]bool, task *model.Task, now int64) {
+func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, deleted map[int64]bool, task *model.Task, now int64) {
 	for _, workflow := range workflows {
-		id := fmt.Sprint(workflow.ID)
-		if workflow.Finished != 0 || workflow.Running() || deleted[id] || !slices.Contains(task.Dependencies, id) {
+		if workflow.Finished != 0 || workflow.Running() || deleted[workflow.ID] || !slices.Contains(task.Dependencies, fmt.Sprint(workflow.ID)) {
 			continue
 		}
 		updated := *workflow
@@ -108,14 +124,13 @@ func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, delet
 
 // runnableSince returns when the task became runnable, or 0 while a dependency is missing or active.
 // A dependency without a finish time gives now; a deleted one adds no time.
-func runnableSince(p *model.Pipeline, workflows []*model.Workflow, deleted map[string]bool, task *model.Task, now int64) int64 {
+func runnableSince(p *model.Pipeline, workflows []*model.Workflow, deleted map[int64]bool, task *model.Task, now int64) int64 {
 	if _, ok := treeDepStatus(task, workflows); !ok {
 		return 0
 	}
 	since := max(p.Created, p.Reviewed)
 	for _, workflow := range workflows {
-		id := fmt.Sprint(workflow.ID)
-		if deleted[id] || !slices.Contains(task.Dependencies, id) {
+		if deleted[workflow.ID] || !slices.Contains(task.Dependencies, fmt.Sprint(workflow.ID)) {
 			continue
 		}
 		if workflow.Finished == 0 {
@@ -158,20 +173,16 @@ func treeDepStatus(task *model.Task, workflows []*model.Workflow) (map[string]mo
 }
 
 // loadOutsideTree loads a workflow absent from the walked tree once per pass; nil means it does not exist.
-func loadOutsideTree(storage store.Store, id string, cache map[string]*model.Workflow) (*model.Workflow, error) {
+func loadOutsideTree(storage store.Store, id int64, cache map[int64]*model.Workflow) (*model.Workflow, error) {
 	if workflow, ok := cache[id]; ok {
 		return workflow, nil
 	}
-	workflowID, err := strconv.ParseInt(id, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid workflow id %q: %w", id, err)
-	}
-	workflow, err := storage.WorkflowLoad(workflowID)
+	workflow, err := storage.WorkflowLoad(id)
 	switch {
 	case errors.Is(err, store_types.ErrRecordNotExist):
 		workflow = nil
 	case err != nil:
-		return nil, fmt.Errorf("load workflow %s: %w", id, err)
+		return nil, fmt.Errorf("load workflow %d: %w", id, err)
 	}
 	cache[id] = workflow
 	return workflow, nil
@@ -179,19 +190,11 @@ func loadOutsideTree(storage store.Store, id string, cache map[string]*model.Wor
 
 // withMissingDeps adds an error-state stand-in for each dependency proven deleted from the store
 // and returns the IDs of those stand-ins.
-func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.Workflow, cache map[string]*model.Workflow) ([]*model.Workflow, map[string]bool) {
+func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.Workflow, cache map[int64]*model.Workflow) ([]*model.Workflow, map[int64]bool) {
 	extended := workflows
-	var deleted map[string]bool
+	var deleted map[int64]bool
 	for _, dep := range task.Dependencies {
 		if slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return fmt.Sprint(workflow.ID) == dep }) {
-			continue
-		}
-		workflow, err := loadOutsideTree(storage, dep, cache)
-		if err != nil {
-			log.Error().Err(err).Str("task_id", task.ID).Msg("could not check dependency outside the pipeline tree")
-			continue
-		}
-		if workflow != nil {
 			continue
 		}
 		id, err := strconv.ParseInt(dep, 10, 64)
@@ -199,10 +202,18 @@ func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.W
 			log.Error().Err(err).Str("task_id", task.ID).Str("dependency", dep).Msg("invalid dependency workflow id")
 			continue
 		}
-		if deleted == nil {
-			deleted = make(map[string]bool)
+		workflow, err := loadOutsideTree(storage, id, cache)
+		if err != nil {
+			log.Error().Err(err).Str("task_id", task.ID).Msg("could not check dependency outside the pipeline tree")
+			continue
 		}
-		deleted[dep] = true
+		if workflow != nil {
+			continue
+		}
+		if deleted == nil {
+			deleted = make(map[int64]bool)
+		}
+		deleted[id] = true
 		extended = append(slices.Clip(extended), &model.Workflow{ID: id, State: model.StatusError})
 	}
 	return extended, deleted
@@ -210,7 +221,7 @@ func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.W
 
 // finalizeDeadWorkflows ends queued workflows whose finished dependencies forbid them to run.
 // A dependent of a deleted dependency ends error so later passes and the forge see the failure; others end skipped.
-func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows []*model.Workflow, waiting map[string]*model.Task, now int64, cache map[string]*model.Workflow) []*model.Workflow {
+func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows []*model.Workflow, waiting map[string]*model.Task, now int64, cache map[int64]*model.Workflow) []*model.Workflow {
 	var finalized []*model.Workflow
 	failed := make(map[int64]struct{})
 	for found := true; found; {
@@ -253,9 +264,8 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 }
 
 // deletedDependencyReason names the lowest deleted dependency ID.
-func deletedDependencyReason(deleted map[string]bool) string {
-	ids := slices.Sorted(maps.Keys(deleted))
-	return fmt.Sprintf("dependency workflow %s no longer exists", ids[0])
+func deletedDependencyReason(deleted map[int64]bool) string {
+	return fmt.Sprintf("dependency workflow %d no longer exists", slices.Min(slices.Collect(maps.Keys(deleted))))
 }
 
 // skipDeadWorkflow writes the pending steps then the workflow as skipped; a failed write leaves it pending.
@@ -291,7 +301,7 @@ func skipPendingSteps(storage store.Store, workflow *model.Workflow) bool {
 }
 
 // removeStaleTaskRows drops persisted tasks whose workflow is terminal or gone.
-func removeStaleTaskRows(ctx context.Context, storage store.Store, rows []*model.Task, loaded map[string]model.StatusValue, waiting map[string]*model.Task, running map[string]struct{}, cache map[string]*model.Workflow) {
+func removeStaleTaskRows(ctx context.Context, storage store.Store, rows []*model.Task, loaded map[string]model.StatusValue, waiting map[string]*model.Task, running map[string]struct{}, cache map[int64]*model.Workflow) {
 	for _, row := range rows {
 		if _, leased := running[row.ID]; leased {
 			continue
@@ -299,7 +309,12 @@ func removeStaleTaskRows(ctx context.Context, storage store.Store, rows []*model
 		state, ok := loaded[row.ID]
 		var missingErr error
 		if !ok {
-			workflow, err := loadOutsideTree(storage, row.ID, cache)
+			id, err := strconv.ParseInt(row.ID, 10, 64)
+			if err != nil {
+				log.Error().Err(err).Str("task_id", row.ID).Msg("invalid workflow id of persisted task")
+				continue
+			}
+			workflow, err := loadOutsideTree(storage, id, cache)
 			switch {
 			case err != nil:
 				log.Error().Err(err).Str("task_id", row.ID).Msg("could not load workflow of persisted task")

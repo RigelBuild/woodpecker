@@ -510,6 +510,19 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			listAgents: true,
 		},
 		{
+			name:            "hostname wildcard task stays when a live agent's server filter sets hostname wildcard",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			pending:         []*model.Task{{ID: "41", Labels: map[string]string{"hostname": "*", "type": "linux"}}},
+			agentList: []*model.Agent{{
+				ID: 72, OrgID: model.IDNotSet, LastContact: nowUnix - 30,
+				CustomLabels: map[string]string{"type": "linux"},
+				Filters:      map[string]string{"hostname": "*"},
+			}},
+			listAgents: true,
+		},
+		{
 			name:              "failure dependent of a deleted dependency times out",
 			pipelineStatus:    model.StatusPending,
 			pipelineCreated:   nowUnix - 7*hour,
