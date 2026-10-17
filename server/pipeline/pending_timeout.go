@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,9 +58,20 @@ func loadLiveAgentFilters(storage store.Store, now time.Time, window time.Durati
 		if err != nil {
 			return nil, fmt.Errorf("labels of agent %d: %w", agent.ID, err)
 		}
-		filters = append(filters, scheduler.NewLabelFilter(labels))
+		filters = append(filters, hostnameAwareFilter(scheduler.NewLabelFilter(labels), agent.CustomLabels[pipeline.LabelFilterHostname] == "*"))
 	}
 	return filters, nil
+}
+
+// hostnameAwareFilter rejects a task with hostname "*" unless the agent's own labels set hostname "*".
+// A real agent polls with its concrete hostname, which the scheduler never matches against a task's "*".
+func hostnameAwareFilter(filter scheduler.FilterFn, agentHostnameWildcard bool) scheduler.FilterFn {
+	return func(task *model.Task) (bool, int) {
+		if task.Labels[pipeline.LabelFilterHostname] == "*" && !agentHostnameWildcard {
+			return false, 0
+		}
+		return filter(task)
+	}
 }
 
 // anyAgentTakes reports whether one of the filters matches the task.
@@ -76,19 +88,12 @@ func hostnamePinned(task *model.Task) bool {
 	return hostname != "" && hostname != "*"
 }
 
-// deletedDependencyError marks the error stand-in for a dependency deleted from the store.
-const deletedDependencyError = "dependency workflow no longer exists"
-
-func isDeletedStandIn(workflow *model.Workflow) bool {
-	return workflow.Error == deletedDependencyError
-}
-
 // stampUnfinishedDeps persists now as the finish time of each terminal dependency that has none.
 // The stored value anchors the pending clock; a failed write is retried next pass.
-func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, task *model.Task, now int64) {
+func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, deleted map[string]bool, task *model.Task, now int64) {
 	for _, workflow := range workflows {
-		if workflow.Finished != 0 || workflow.Running() || isDeletedStandIn(workflow) ||
-			!slices.Contains(task.Dependencies, fmt.Sprint(workflow.ID)) {
+		id := fmt.Sprint(workflow.ID)
+		if workflow.Finished != 0 || workflow.Running() || deleted[id] || !slices.Contains(task.Dependencies, id) {
 			continue
 		}
 		updated := *workflow
@@ -103,13 +108,14 @@ func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, task 
 
 // runnableSince returns when the task became runnable, or 0 while a dependency is missing or active.
 // A dependency without a finish time gives now; a deleted one adds no time.
-func runnableSince(p *model.Pipeline, workflows []*model.Workflow, task *model.Task, now int64) int64 {
+func runnableSince(p *model.Pipeline, workflows []*model.Workflow, deleted map[string]bool, task *model.Task, now int64) int64 {
 	if _, ok := treeDepStatus(task, workflows); !ok {
 		return 0
 	}
 	since := max(p.Created, p.Reviewed)
 	for _, workflow := range workflows {
-		if isDeletedStandIn(workflow) || !slices.Contains(task.Dependencies, fmt.Sprint(workflow.ID)) {
+		id := fmt.Sprint(workflow.ID)
+		if deleted[id] || !slices.Contains(task.Dependencies, id) {
 			continue
 		}
 		if workflow.Finished == 0 {
@@ -171,9 +177,11 @@ func loadOutsideTree(storage store.Store, id string, cache map[string]*model.Wor
 	return workflow, nil
 }
 
-// withMissingDeps adds an error-state stand-in for each dependency proven deleted from the store.
-func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.Workflow, cache map[string]*model.Workflow) []*model.Workflow {
+// withMissingDeps adds an error-state stand-in for each dependency proven deleted from the store
+// and returns the IDs of those stand-ins.
+func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.Workflow, cache map[string]*model.Workflow) ([]*model.Workflow, map[string]bool) {
 	extended := workflows
+	var deleted map[string]bool
 	for _, dep := range task.Dependencies {
 		if slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return fmt.Sprint(workflow.ID) == dep }) {
 			continue
@@ -188,18 +196,22 @@ func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.W
 		}
 		id, err := strconv.ParseInt(dep, 10, 64)
 		if err != nil {
+			log.Error().Err(err).Str("task_id", task.ID).Str("dependency", dep).Msg("invalid dependency workflow id")
 			continue
 		}
-		extended = append(slices.Clip(extended), &model.Workflow{ID: id, State: model.StatusError, Error: deletedDependencyError})
+		if deleted == nil {
+			deleted = make(map[string]bool)
+		}
+		deleted[dep] = true
+		extended = append(slices.Clip(extended), &model.Workflow{ID: id, State: model.StatusError})
 	}
-	return extended
+	return extended, deleted
 }
 
-// finalizeDeadWorkflows skips queued workflows whose finished dependencies forbid them to run.
-// It also reports whether a deleted dependency caused a skip, which the pipeline status must count as an error.
-func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows []*model.Workflow, waiting map[string]*model.Task, now int64, cache map[string]*model.Workflow) ([]*model.Workflow, bool) {
+// finalizeDeadWorkflows ends queued workflows whose finished dependencies forbid them to run.
+// A dependent of a deleted dependency ends error so later passes and the forge see the failure; others end skipped.
+func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows []*model.Workflow, waiting map[string]*model.Task, now int64, cache map[string]*model.Workflow) []*model.Workflow {
 	var finalized []*model.Workflow
-	deletedDep := false
 	failed := make(map[int64]struct{})
 	for found := true; found; {
 		found = false
@@ -209,39 +221,57 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 			if _, skip := failed[workflow.ID]; skip || !queued || workflow.State != model.StatusPending {
 				continue
 			}
-			resolved := withMissingDeps(storage, task, workflows, cache)
+			resolved, deleted := withMissingDeps(storage, task, workflows, cache)
 			deps, ok := treeDepStatus(task, resolved)
 			if !ok || (&model.Task{RunOn: task.RunOn, DepStatus: deps}).ShouldRun() {
 				continue
 			}
-			// Steps go first: a failed step write leaves the workflow pending for the next pass.
-			if !skipPendingSteps(storage, workflow) {
+			reason := "dependency-failed"
+			if len(deleted) > 0 {
+				reason = "dependency-deleted"
+				if !reapWorkflow(storage, workflow, now, model.StatusError, deletedDependencyReason(deleted)) {
+					failed[workflow.ID] = struct{}{}
+					continue
+				}
+			} else if !skipDeadWorkflow(storage, workflow, now) {
 				failed[workflow.ID] = struct{}{}
 				continue
 			}
-			updated := *workflow
-			updated.Finished = now
-			skipped, err := UpdateWorkflowToStatusSkipped(storage, updated)
-			if err != nil {
-				log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not skip workflow whose dependencies failed")
-				failed[workflow.ID] = struct{}{}
-				continue
-			}
-			*workflow = *skipped
 			if err := server.Config.Services.Scheduler.CancelWorkflows(ctx, []string{id}); err != nil {
-				log.Error().Err(err).Str("task_id", id).Msg("could not remove skipped workflow from queue")
+				log.Error().Err(err).Str("task_id", id).Msg("could not remove finalized workflow from queue")
 			}
 			log.Info().
 				Int64("workflow_id", workflow.ID).
-				Str("reason", "dependency-failed").
+				Str("reason", reason).
 				Strs("labels", reasonLabels(task)).
 				Msg("finalized queued workflow")
 			finalized = append(finalized, workflow)
-			deletedDep = deletedDep || slices.ContainsFunc(resolved, isDeletedStandIn)
 			found = true
 		}
 	}
-	return finalized, deletedDep
+	return finalized
+}
+
+// deletedDependencyReason names the lowest deleted dependency ID.
+func deletedDependencyReason(deleted map[string]bool) string {
+	ids := slices.Sorted(maps.Keys(deleted))
+	return fmt.Sprintf("dependency workflow %s no longer exists", ids[0])
+}
+
+// skipDeadWorkflow writes the pending steps then the workflow as skipped; a failed write leaves it pending.
+func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) bool {
+	if !skipPendingSteps(storage, workflow) {
+		return false
+	}
+	updated := *workflow
+	updated.Finished = now
+	skipped, err := UpdateWorkflowToStatusSkipped(storage, updated)
+	if err != nil {
+		log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not skip workflow whose dependencies failed")
+		return false
+	}
+	*workflow = *skipped
+	return true
 }
 
 // skipPendingSteps cancels each pending step and reports whether every write succeeded.

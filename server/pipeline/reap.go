@@ -125,9 +125,9 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				if pendingTimeout <= 0 || queueInfo.Paused || !isPending || hostnamePinned(task) {
 					continue
 				}
-				resolved := withMissingDeps(storage, task, workflows, outsideTree)
-				stampUnfinishedDeps(storage, resolved, task, now.Unix())
-				if !pendingTimedOut(pipeline, resolved, task, now, pendingTimeout) {
+				resolved, deleted := withMissingDeps(storage, task, workflows, outsideTree)
+				stampUnfinishedDeps(storage, resolved, deleted, task, now.Unix())
+				if !pendingTimedOut(pipeline, resolved, deleted, task, now, pendingTimeout) {
 					continue
 				}
 				if !liveLoaded {
@@ -217,22 +217,14 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				Str("reason", reason).
 				Msg("reaped orphaned workflow")
 		}
-		deletedDepError := false
-		if pendingTimeout > 0 {
-			var finalized []*model.Workflow
-			finalized, deletedDepError = finalizeDeadWorkflows(ctx, storage, workflows, waiting, now.Unix(), outsideTree)
-			if len(finalized) > 0 {
-				changed = true
-			}
+		if pendingTimeout > 0 && len(finalizeDeadWorkflows(ctx, storage, workflows, waiting, now.Unix(), outsideTree)) > 0 {
+			changed = true
 		}
 
 		if !model.IsThereRunningStage(workflows) {
 			status := PipelineStatus(workflows)
-			if deletedDepError {
-				status = MergeStatusValues(status, model.StatusError)
-			}
 			// A never-started canceled pipeline posts success, so an error keeps its status.
-			hasError := deletedDepError || slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return workflow.State == model.StatusError })
+			hasError := slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return workflow.State == model.StatusError })
 			if changed && !pipelineEverStarted && !hasError {
 				status = model.StatusCanceled
 			}
@@ -311,11 +303,11 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 }
 
 // pendingTimedOut reports whether a runnable task has waited longer than the timeout.
-func pendingTimedOut(p *model.Pipeline, workflows []*model.Workflow, task *model.Task, now time.Time, timeout time.Duration) bool {
+func pendingTimedOut(p *model.Pipeline, workflows []*model.Workflow, deleted map[string]bool, task *model.Task, now time.Time, timeout time.Duration) bool {
 	deps, ok := treeDepStatus(task, workflows)
 	if !ok || !(&model.Task{RunOn: task.RunOn, DepStatus: deps}).ShouldRun() {
 		return false
 	}
-	since := runnableSince(p, workflows, task, now.Unix())
+	since := runnableSince(p, workflows, deleted, task, now.Unix())
 	return since > 0 && time.Unix(since, 0).Before(now.Add(-timeout))
 }
