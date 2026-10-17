@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -37,25 +38,65 @@ import (
 
 func TestReapOrphanedWorkflows(t *testing.T) {
 	const nowUnix = int64(1_700_000_000)
+	const hour = int64(3600)
 	now := time.Unix(nowUnix, 0)
 	grace := 10 * time.Minute
+	reason := "no agent took this workflow within 6h0m0s (pending-timeout); labels: [type=linux]"
+	// linuxTask carries a label no agent advertises, plus labels the reason leaves out.
+	linuxTask := func(id string, deps ...string) *model.Task {
+		return &model.Task{
+			ID:           id,
+			Labels:       map[string]string{"type": "linux", "repo": "owner/repo", "org-id": "0", "woodpecker-ci.org/repo-id": "200", "empty": ""},
+			Dependencies: deps,
+			DepStatus:    map[string]model.StatusValue{},
+		}
+	}
+	runsOnFailure := func(task *model.Task) *model.Task {
+		task.RunOn = []string{string(model.StatusFailure)}
+		return task
+	}
+	queuedWorkflow := func(id int64) *model.Workflow {
+		return &model.Workflow{ID: id, State: model.StatusPending, Children: []*model.Step{{ID: id*10 + 1, State: model.StatusPending}}}
+	}
+	linuxAgent := func(noSchedule bool, lastContact int64) *model.Agent {
+		return &model.Agent{ID: 70, OrgID: model.IDNotSet, NoSchedule: noSchedule, LastContact: lastContact, CustomLabels: map[string]string{"type": "linux"}}
+	}
 
 	tests := []struct {
 		name              string
 		pipelineStatus    model.StatusValue
 		pipelineCreated   int64
 		pipelineUpdated   int64
+		pipelineReviewed  int64
+		event             model.WebhookEvent
 		workflows         []*model.Workflow
 		repoTimeout       int64
 		maxTimeout        int64
 		queueTasks        []string
 		persistedTasks    []string
 		queueState        string
+		pending           []*model.Task
+		waiting           []*model.Task
+		running           []*model.Task
+		paused            bool
+		noPendingTimeout  bool
 		taskListErr       error
 		missingAgents     map[int64]bool
 		agents            map[int64]*model.Agent
+		agentList         []*model.Agent
+		agentListErr      error
+		listAgents        bool
 		workflowStates    map[int64]model.StatusValue
 		stepStates        map[int64]model.StatusValue
+		workflowUpdateErr map[int64]error
+		cancels           []string
+		cancelErr         error
+		done              map[string]model.StatusValue
+		errored           []string
+		workflowLoads     map[int64]*model.Workflow
+		taskDeletes       []string
+		timedOut          float64
+		aggregate         model.StatusValue
 		pipelineFinal     model.StatusValue
 		pipelineFinalized bool
 		forgeStatus       bool
@@ -268,6 +309,286 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			pipelineFinal:     model.StatusFailure,
 			pipelineFinalized: true,
 		},
+		{
+			name:              "pending task older than pending-timeout ends error",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{linuxTask("41")},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:              "timed out push pipeline reports error aggregate",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			event:             model.EventPush,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{linuxTask("41")},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			aggregate:         model.StatusError,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:            "timed out pull workflow beside a leased sibling rolls up error",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - 7*hour,
+			event:           model.EventPull,
+			workflows: []*model.Workflow{
+				queuedWorkflow(41),
+				{ID: 42, State: model.StatusRunning, Started: nowUnix - hour, AgentID: 7},
+			},
+			pending:        []*model.Task{linuxTask("41")},
+			running:        []*model.Task{{ID: "42"}},
+			workflowStates: map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:     map[int64]model.StatusValue{411: model.StatusError},
+			cancels:        []string{"41"},
+			timedOut:       1,
+			aggregate:      model.StatusError,
+		},
+		{
+			name:            "timeout skips its default dependent and keeps its failure dependent",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41), queuedWorkflow(43), queuedWorkflow(44)},
+			pending:         []*model.Task{linuxTask("41")},
+			waiting:         []*model.Task{linuxTask("43", "41"), runsOnFailure(linuxTask("44", "41"))},
+			workflowStates:  map[int64]model.StatusValue{41: model.StatusError, 43: model.StatusSkipped},
+			stepStates:      map[int64]model.StatusValue{411: model.StatusError, 431: model.StatusCanceled},
+			cancels:         []string{"41", "43"},
+			timedOut:        1,
+		},
+		{
+			name:            "failure dependent of a timed out and a successful workflow is skipped",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows: []*model.Workflow{
+				queuedWorkflow(41),
+				{ID: 45, State: model.StatusSuccess, Started: nowUnix - 2*hour, Finished: nowUnix - hour},
+				queuedWorkflow(46),
+			},
+			pending:           []*model.Task{linuxTask("41")},
+			waiting:           []*model.Task{runsOnFailure(linuxTask("46", "41", "45"))},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError, 46: model.StatusSkipped},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError, 461: model.StatusCanceled},
+			cancels:           []string{"41", "46"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:            "failure dependent waits while its other dependency runs",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows: []*model.Workflow{
+				queuedWorkflow(41),
+				{ID: 45, State: model.StatusRunning, Started: nowUnix - hour, AgentID: 7},
+				queuedWorkflow(46),
+			},
+			pending:        []*model.Task{linuxTask("41")},
+			waiting:        []*model.Task{runsOnFailure(linuxTask("46", "41", "45"))},
+			running:        []*model.Task{{ID: "45"}},
+			workflowStates: map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:     map[int64]model.StatusValue{411: model.StatusError},
+			cancels:        []string{"41"},
+			timedOut:       1,
+		},
+		{
+			name:            "dead pending dependent of an old failure is skipped not errored",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - 9*hour,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusFailure, Started: nowUnix - 9*hour, Finished: nowUnix - 8*hour},
+				queuedWorkflow(41),
+			},
+			pending:           []*model.Task{linuxTask("41", "40")},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusSkipped},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusCanceled},
+			cancels:           []string{"41"},
+			pipelineFinal:     model.StatusFailure,
+			pipelineFinalized: true,
+		},
+		{
+			name:              "failed workflow write leaves the task queued",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{linuxTask("41")},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			workflowUpdateErr: map[int64]error{41: errors.New("database unavailable")},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			listAgents:        true,
+		},
+		{
+			name:              "failed queue cancel still ends the workflow error",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{linuxTask("41")},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			cancelErr:         errors.New("failed to delete tasks from persistent store"),
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:              "stale queued row of a successful workflow is marked done",
+			pipelineStatus:    model.StatusRunning,
+			pipelineCreated:   nowUnix - hour,
+			workflows:         []*model.Workflow{{ID: 41, State: model.StatusSuccess, Started: nowUnix - hour, Finished: nowUnix - 600}},
+			persistedTasks:    []string{"41"},
+			pending:           []*model.Task{linuxTask("41")},
+			done:              map[string]model.StatusValue{"41": model.StatusSuccess},
+			pipelineFinal:     model.StatusSuccess,
+			pipelineFinalized: true,
+		},
+		{
+			name:            "stale queued row without a workflow is errored",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			persistedTasks:  []string{"39"},
+			pending:         []*model.Task{linuxTask("39")},
+			waiting:         []*model.Task{linuxTask("41", "39")},
+			workflowLoads:   map[int64]*model.Workflow{39: nil},
+			errored:         []string{"39"},
+		},
+		{
+			name:            "dependent chain of a timed out workflow is skipped in one pass",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41), queuedWorkflow(42), queuedWorkflow(43)},
+			pending:         []*model.Task{linuxTask("41")},
+			waiting:         []*model.Task{linuxTask("42", "41"), linuxTask("43", "42")},
+			workflowStates: map[int64]model.StatusValue{
+				41: model.StatusError, 42: model.StatusSkipped, 43: model.StatusSkipped,
+			},
+			stepStates: map[int64]model.StatusValue{
+				411: model.StatusError, 421: model.StatusCanceled, 431: model.StatusCanceled,
+			},
+			cancels:           []string{"41", "42", "43"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:            "old task waiting on dependencies stays queued",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			waiting:         []*model.Task{linuxTask("41")},
+		},
+		{
+			name:            "old leased task stays queued",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			running:         []*model.Task{linuxTask("41")},
+		},
+		{
+			name:            "dependency finished an hour ago keeps the task queued",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusSuccess, Started: nowUnix - 2*hour, Finished: nowUnix - hour},
+				queuedWorkflow(41),
+			},
+			pending: []*model.Task{linuxTask("41", "40")},
+		},
+		{
+			name:             "approval an hour ago keeps the task queued",
+			pipelineStatus:   model.StatusPending,
+			pipelineCreated:  nowUnix - 7*hour,
+			pipelineReviewed: nowUnix - hour,
+			workflows:        []*model.Workflow{queuedWorkflow(41)},
+			pending:          []*model.Task{linuxTask("41")},
+		},
+		{
+			name:            "five hour old task stays queued",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 5*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			pending:         []*model.Task{linuxTask("41")},
+		},
+		{
+			name:             "zero pending-timeout keeps the task queued",
+			pipelineStatus:   model.StatusPending,
+			pipelineCreated:  nowUnix - 7*hour,
+			workflows:        []*model.Workflow{queuedWorkflow(41)},
+			pending:          []*model.Task{linuxTask("41")},
+			noPendingTimeout: true,
+		},
+		{
+			name:            "paused queue keeps the task queued",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			pending:         []*model.Task{linuxTask("41")},
+			paused:          true,
+		},
+		{
+			name:            "busy live agent with matching labels keeps the task queued",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			pending:         []*model.Task{linuxTask("41")},
+			agentList:       []*model.Agent{linuxAgent(false, nowUnix-30)},
+			listAgents:      true,
+		},
+		{
+			name:              "matching agent marked no-schedule does not keep the task",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{linuxTask("41")},
+			agentList:         []*model.Agent{linuxAgent(true, nowUnix-30)},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:              "matching agent last seen beyond the window does not keep the task",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{linuxTask("41")},
+			agentList:         []*model.Agent{linuxAgent(false, nowUnix-7*hour)},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:            "hostname pinned task stays queued",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			pending:         []*model.Task{{ID: "41", Labels: map[string]string{"hostname": "builder-1"}}},
+		},
+		{
+			name:            "agent list error keeps the task queued",
+			pipelineStatus:  model.StatusPending,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows:       []*model.Workflow{queuedWorkflow(41)},
+			pending:         []*model.Task{linuxTask("41")},
+			agentListErr:    errors.New("database unavailable"),
+			listAgents:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -275,8 +596,12 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			const pipelineID = int64(100)
 			repo := &model.Repo{ID: 200, UserID: 300, FullName: "owner/repo", Timeout: tt.repoTimeout}
 			pipeline := &model.Pipeline{
-				ID: pipelineID, RepoID: repo.ID, Number: 13,
-				Status: tt.pipelineStatus, Created: tt.pipelineCreated, Updated: tt.pipelineUpdated,
+				ID: pipelineID, RepoID: repo.ID, Number: 13, Event: tt.event,
+				Status: tt.pipelineStatus, Created: tt.pipelineCreated, Updated: tt.pipelineUpdated, Reviewed: tt.pipelineReviewed,
+			}
+			pendingTimeout := 6 * time.Hour
+			if tt.noPendingTimeout {
+				pendingTimeout = 0
 			}
 
 			oldScheduler := server.Config.Services.Scheduler
@@ -294,7 +619,7 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 				server.Config.Pipeline.MaxTimeout = oldMaxTimeout
 			})
 			server.Config.Server.StatusPerWorkflow = tt.forgeStatus
-			server.Config.Server.StatusAggregate = false
+			server.Config.Server.StatusAggregate = tt.aggregate != ""
 			server.Config.Server.StatusMeta = false
 			server.Config.Pipeline.MaxTimeout = tt.maxTimeout
 
@@ -304,7 +629,7 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			for _, id := range tt.queueTasks {
 				tasks = append(tasks, &model.Task{ID: id})
 			}
-			queueInfo := queue.InfoT{}
+			queueInfo := queue.InfoT{Paused: tt.paused}
 			switch tt.queueState {
 			case "waiting":
 				queueInfo.WaitingOnDeps = tasks
@@ -312,6 +637,13 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 				queueInfo.Running = tasks
 			default:
 				queueInfo.Pending = tasks
+			}
+			queueInfo.Pending = append(queueInfo.Pending, tt.pending...)
+			queueInfo.WaitingOnDeps = append(queueInfo.WaitingOnDeps, tt.waiting...)
+			queueInfo.Running = append(queueInfo.Running, tt.running...)
+			queuedIDs := slices.Concat(tt.queueTasks, tt.persistedTasks)
+			for _, task := range slices.Concat(tt.pending, tt.waiting, tt.running) {
+				queuedIDs = append(queuedIDs, task.ID)
 			}
 
 			managerMock := manager_mocks.NewMockManager(t)
@@ -335,7 +667,7 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			if tt.taskListErr == nil {
 				seenAgents := make(map[int64]struct{})
 				for _, workflow := range tt.workflows {
-					if slices.Contains(tt.queueTasks, fmt.Sprint(workflow.ID)) || !workflow.Running() || workflow.AgentID == 0 {
+					if slices.Contains(queuedIDs, fmt.Sprint(workflow.ID)) || !workflow.Running() || workflow.AgentID == 0 {
 						continue
 					}
 					if _, seen := seenAgents[workflow.AgentID]; seen {
@@ -350,29 +682,58 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 				}
 			}
 
+			// A timed-out workflow or step gets the reason and a finish time.
+			wantFinished := func(started int64, want model.StatusValue) int64 {
+				if started != 0 || want == model.StatusError {
+					return nowUnix
+				}
+				return 0
+			}
+			wantError := func(want model.StatusValue) string {
+				if want == model.StatusError {
+					return reason
+				}
+				return ""
+			}
 			for _, workflow := range tt.workflows {
 				if want, reap := tt.workflowStates[workflow.ID]; reap {
-					finished := int64(0)
-					if workflow.Started != 0 {
-						finished = nowUnix
-					}
+					finished := wantFinished(workflow.Started, want)
 					storeMock.On("WorkflowUpdate", mock.MatchedBy(func(updated *model.Workflow) bool {
-						return updated.ID == workflow.ID && updated.State == want && updated.Finished == finished
-					})).Return(nil).Once()
+						return updated.ID == workflow.ID && updated.State == want && updated.Finished == finished && updated.Error == wantError(want)
+					})).Return(tt.workflowUpdateErr[workflow.ID]).Once()
 				}
 				for _, step := range workflow.Children {
 					want, reap := tt.stepStates[step.ID]
 					if !reap {
 						continue
 					}
-					finished := int64(0)
-					if step.Started != 0 {
-						finished = nowUnix
-					}
+					finished := wantFinished(step.Started, want)
 					storeMock.On("StepUpdate", mock.MatchedBy(func(updated *model.Step) bool {
-						return updated.ID == step.ID && updated.State == want && updated.Finished == finished
+						return updated.ID == step.ID && updated.State == want && updated.Finished == finished && updated.Error == wantError(want)
 					})).Return(nil).Once()
 				}
+			}
+			for _, id := range tt.cancels {
+				schedulerMock.On("CancelWorkflows", mock.Anything, []string{id}).Return(tt.cancelErr).Once()
+			}
+			for id, state := range tt.done {
+				schedulerMock.On("Done", mock.Anything, id, state).Return(nil).Once()
+			}
+			for _, id := range tt.errored {
+				schedulerMock.On("Error", mock.Anything, id, mock.Anything).Return(nil).Once()
+			}
+			for id, workflow := range tt.workflowLoads {
+				if workflow == nil {
+					storeMock.On("WorkflowLoad", id).Return(nil, store_types.ErrRecordNotExist).Once()
+				} else {
+					storeMock.On("WorkflowLoad", id).Return(workflow, nil).Once()
+				}
+			}
+			for _, id := range tt.taskDeletes {
+				storeMock.On("TaskDelete", id).Return(nil).Once()
+			}
+			if tt.timedOut > 0 || tt.listAgents {
+				storeMock.On("AgentList", &model.ListOptionsWithAll{All: true}).Return(tt.agentList, tt.agentListErr).Once()
 			}
 
 			pipelineUpdated := false
@@ -384,7 +745,13 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 				}).Return(nil).Once()
 			}
 
-			changed := len(tt.workflowStates) > 0 || tt.pipelineFinalized
+			changed := tt.pipelineFinalized
+			for id := range tt.workflowStates {
+				if tt.workflowUpdateErr[id] == nil {
+					changed = true
+				}
+			}
+			aggregateForge := &aggregateResilienceForge{statusErrForWorkflowID: -1}
 			if changed {
 				user := &model.User{ID: repo.UserID}
 				storeMock.On("GetUser", repo.UserID).Return(user, nil).Once()
@@ -392,7 +759,8 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 					// A non-terminal post re-reads the pipeline first (stale-pending guard).
 					storeMock.On("GetPipeline", pipeline.ID).Return(pipeline, nil).Once()
 				}
-				if tt.forgeStatus {
+				switch {
+				case tt.forgeStatus:
 					forgeMock := forge_mocks.NewMockForge(t)
 					forgeMock.On("Status", mock.Anything, user, repo, mock.MatchedBy(func(got *model.Pipeline) bool {
 						return got.Status == tt.pipelineFinal && got.Finished == nowUnix
@@ -400,7 +768,9 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 						return got.ID == 464 && got.State == model.StatusCanceled
 					})).Return(nil).Once()
 					managerMock.On("ForgeFromRepo", repo).Return(forgeMock, nil).Once()
-				} else {
+				case tt.aggregate != "":
+					managerMock.On("ForgeFromRepo", repo).Return(aggregateForge, nil).Once()
+				default:
 					managerMock.On("ForgeFromRepo", repo).Return(nil, nil).Once()
 				}
 				schedulerMock.On("PublishPipelineEvent", mock.Anything, repo, mock.Anything).Return(nil).Once()
@@ -414,31 +784,39 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 					stepInitialStates[step.ID] = step.State
 				}
 			}
+			timedOutBefore := testutil.ToFloat64(pendingWorkflowsTimedOut)
 			wantErr := tt.taskListErr
-			err := ReapOrphanedWorkflows(t.Context(), storeMock, now, grace)
+			err := ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout)
 			if wantErr != nil {
 				require.ErrorIs(t, err, wantErr)
 			} else {
 				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.pipelineFinalized, pipelineUpdated)
+			assert.InDelta(t, tt.timedOut, testutil.ToFloat64(pendingWorkflowsTimedOut)-timedOutBefore, 0, "timed out counter")
 			for _, workflow := range tt.workflows {
-				if want, reap := tt.workflowStates[workflow.ID]; reap {
+				if want, reap := tt.workflowStates[workflow.ID]; reap && tt.workflowUpdateErr[workflow.ID] == nil {
 					assert.Equal(t, want, workflow.State, "workflow %d", workflow.ID)
-					finished := int64(0)
-					if workflow.Started != 0 {
-						finished = nowUnix
-					}
-					assert.Equal(t, finished, workflow.Finished, "workflow %d finished", workflow.ID)
+					assert.Equal(t, wantFinished(workflow.Started, want), workflow.Finished, "workflow %d finished", workflow.ID)
+					assert.Equal(t, wantError(want), workflow.Error, "workflow %d error", workflow.ID)
 				} else {
 					assert.Equal(t, workflowInitialStates[workflow.ID], workflow.State, "workflow %d", workflow.ID)
 				}
 				for _, step := range workflow.Children {
 					if want, reap := tt.stepStates[step.ID]; reap {
 						assert.Equal(t, want, step.State, "step %d", step.ID)
+						assert.Equal(t, wantError(want), step.Error, "step %d error", step.ID)
 					} else {
 						assert.Equal(t, stepInitialStates[step.ID], step.State, "step %d", step.ID)
 					}
+				}
+			}
+			if tt.aggregate != "" {
+				require.Equal(t, 1, aggregateForge.aggregateCalls, "aggregate calls")
+				if tt.event == model.EventPull {
+					assert.Equal(t, tt.aggregate, PipelineStatus(aggregateForge.aggregateWorkflows), "pull aggregate roll-up")
+				} else {
+					assert.Equal(t, tt.aggregate, aggregateForge.aggregatePipeline.Status, "aggregate pipeline status")
 				}
 			}
 			if changed {
@@ -448,4 +826,122 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReapPendingTimeoutNextPass(t *testing.T) {
+	const nowUnix = int64(1_700_000_000)
+	now := time.Unix(nowUnix, 0)
+	grace := 10 * time.Minute
+	pendingTimeout := 6 * time.Hour
+	reason := "no agent took this workflow within 6h0m0s (pending-timeout); labels: [type=linux]"
+	repo := &model.Repo{ID: 200, UserID: 300, FullName: "owner/repo"}
+	user := &model.User{ID: repo.UserID}
+	linuxTask := func(id string, deps ...string) *model.Task {
+		return &model.Task{ID: id, Labels: map[string]string{"type": "linux"}, Dependencies: deps, DepStatus: map[string]model.StatusValue{}}
+	}
+	isState := func(id int64, state model.StatusValue) any {
+		return mock.MatchedBy(func(w *model.Workflow) bool { return w.ID == id && w.State == state })
+	}
+	isStep := func(id int64, state model.StatusValue) any {
+		return mock.MatchedBy(func(s *model.Step) bool { return s.ID == id && s.State == state })
+	}
+	setup := func(t *testing.T) (*store_mocks.MockStore, *scheduler_mocks.MockScheduler, *manager_mocks.MockManager) {
+		oldScheduler := server.Config.Services.Scheduler
+		oldManager := server.Config.Services.Manager
+		oldPerWorkflow := server.Config.Server.StatusPerWorkflow
+		oldAggregate := server.Config.Server.StatusAggregate
+		oldMeta := server.Config.Server.StatusMeta
+		t.Cleanup(func() {
+			server.Config.Services.Scheduler = oldScheduler
+			server.Config.Services.Manager = oldManager
+			server.Config.Server.StatusPerWorkflow = oldPerWorkflow
+			server.Config.Server.StatusAggregate = oldAggregate
+			server.Config.Server.StatusMeta = oldMeta
+		})
+		server.Config.Server.StatusPerWorkflow = false
+		server.Config.Server.StatusAggregate = false
+		server.Config.Server.StatusMeta = false
+		schedulerMock := scheduler_mocks.NewMockScheduler(t)
+		managerMock := manager_mocks.NewMockManager(t)
+		server.Config.Services.Scheduler = schedulerMock
+		server.Config.Services.Manager = managerMock
+		return store_mocks.NewMockStore(t), schedulerMock, managerMock
+	}
+
+	t.Run("failed dependent write is skipped on the next pass", func(t *testing.T) {
+		storeMock, schedulerMock, managerMock := setup(t)
+		pipeline := &model.Pipeline{ID: 100, RepoID: repo.ID, Number: 13, Status: model.StatusPending, Created: nowUnix - 7*3600}
+		workflows := []*model.Workflow{
+			{ID: 41, State: model.StatusPending, Children: []*model.Step{{ID: 411, State: model.StatusPending}}},
+			{ID: 42, State: model.StatusPending, Children: []*model.Step{{ID: 421, State: model.StatusPending}}},
+		}
+		storeMock.On("GetPipelineQueue").Return([]*model.Feed{{ID: pipeline.ID}}, nil).Twice()
+		storeMock.On("TaskList").Return([]*model.Task{}, nil).Twice()
+		storeMock.On("GetPipeline", pipeline.ID).Return(pipeline, nil)
+		storeMock.On("GetRepo", repo.ID).Return(repo, nil).Twice()
+		storeMock.On("WorkflowGetTree", pipeline).Return(workflows, nil).Twice()
+		storeMock.On("GetUser", repo.UserID).Return(user, nil).Twice()
+		managerMock.On("ForgeFromRepo", repo).Return(nil, nil).Twice()
+		schedulerMock.On("PublishPipelineEvent", mock.Anything, repo, mock.Anything).Return(nil).Twice()
+		schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{
+			Pending: []*model.Task{linuxTask("41")}, WaitingOnDeps: []*model.Task{linuxTask("42", "41")},
+		}).Once()
+		schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{WaitingOnDeps: []*model.Task{linuxTask("42", "41")}}).Once()
+
+		// Pass 1: workflow 41 times out, the write for its dependent fails.
+		storeMock.On("AgentList", &model.ListOptionsWithAll{All: true}).Return([]*model.Agent{}, nil).Once()
+		storeMock.On("StepUpdate", isStep(411, model.StatusError)).Return(nil).Once()
+		storeMock.On("WorkflowUpdate", isState(41, model.StatusError)).Return(nil).Once()
+		schedulerMock.On("CancelWorkflows", mock.Anything, []string{"41"}).Return(nil).Once()
+		storeMock.On("WorkflowUpdate", isState(42, model.StatusSkipped)).Return(errors.New("database unavailable")).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout))
+		assert.Equal(t, model.StatusError, workflows[0].State)
+		assert.Equal(t, reason, workflows[0].Error)
+		assert.Equal(t, model.StatusPending, workflows[1].State)
+		schedulerMock.AssertNotCalled(t, "CancelWorkflows", mock.Anything, []string{"42"})
+
+		// Pass 2: the dependency is already error, so the dependent ends skipped.
+		storeMock.On("WorkflowUpdate", isState(42, model.StatusSkipped)).Return(nil).Once()
+		storeMock.On("StepUpdate", isStep(421, model.StatusCanceled)).Return(nil).Once()
+		schedulerMock.On("CancelWorkflows", mock.Anything, []string{"42"}).Return(nil).Once()
+		storeMock.On("UpdatePipeline", mock.MatchedBy(func(p *model.Pipeline) bool {
+			return p.Status == model.StatusError && p.Finished == nowUnix
+		})).Return(nil).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout))
+		assert.Equal(t, model.StatusSkipped, workflows[1].State)
+		assert.Equal(t, model.StatusCanceled, workflows[1].Children[0].State)
+	})
+
+	t.Run("failed row delete is removed on the next pass", func(t *testing.T) {
+		storeMock, schedulerMock, managerMock := setup(t)
+		pipeline := &model.Pipeline{ID: 100, RepoID: repo.ID, Number: 13, Status: model.StatusPending, Created: nowUnix - 7*3600}
+		workflow := &model.Workflow{ID: 41, State: model.StatusPending, Children: []*model.Step{{ID: 411, State: model.StatusPending}}}
+		storeMock.On("GetPipelineQueue").Return([]*model.Feed{{ID: pipeline.ID}}, nil).Once()
+		storeMock.On("GetPipelineQueue").Return([]*model.Feed{}, nil).Once()
+		storeMock.On("TaskList").Return([]*model.Task{{ID: "41"}}, nil).Twice()
+		schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{Pending: []*model.Task{linuxTask("41")}}).Once()
+		schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Once()
+
+		// Pass 1: the workflow ends error, the queue fails to delete its row.
+		storeMock.On("AgentList", &model.ListOptionsWithAll{All: true}).Return([]*model.Agent{}, nil).Once()
+		storeMock.On("GetPipeline", pipeline.ID).Return(pipeline, nil).Once()
+		storeMock.On("GetRepo", repo.ID).Return(repo, nil).Once()
+		storeMock.On("WorkflowGetTree", pipeline).Return([]*model.Workflow{workflow}, nil).Once()
+		storeMock.On("StepUpdate", isStep(411, model.StatusError)).Return(nil).Once()
+		storeMock.On("WorkflowUpdate", isState(41, model.StatusError)).Return(nil).Once()
+		schedulerMock.On("CancelWorkflows", mock.Anything, []string{"41"}).Return(errors.New("failed to delete tasks from persistent store")).Once()
+		storeMock.On("UpdatePipeline", mock.Anything).Return(nil).Once()
+		storeMock.On("GetUser", repo.UserID).Return(user, nil).Once()
+		managerMock.On("ForgeFromRepo", repo).Return(nil, nil).Once()
+		schedulerMock.On("PublishPipelineEvent", mock.Anything, repo, mock.Anything).Return(nil).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout))
+		assert.Equal(t, model.StatusError, workflow.State)
+		storeMock.AssertNotCalled(t, "TaskDelete", mock.Anything)
+
+		// Pass 2: the row outlived the queue, so the reaper deletes it.
+		storeMock.On("WorkflowLoad", int64(41)).Return(&model.Workflow{ID: 41, State: model.StatusError}, nil).Once()
+		storeMock.On("TaskDelete", "41").Return(nil).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout))
+		storeMock.AssertNumberOfCalls(t, "TaskDelete", 1)
+	})
 }

@@ -63,6 +63,7 @@ var Config = struct {
 		HookDedupWindow        time.Duration
 		OrphanReapInterval     time.Duration
 		OrphanReapGrace        time.Duration
+		PendingTimeout         time.Duration
 		CreationTimeout        time.Duration
 	}
 	Agent struct {

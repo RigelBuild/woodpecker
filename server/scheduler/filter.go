@@ -74,6 +74,11 @@ func createFilterFunc(agentFilter rpc.Filter) FilterFn {
 	}
 }
 
+// NewLabelFilter matches tasks the way an agent polling with these labels does.
+func NewLabelFilter(labels map[string]string) FilterFn {
+	return createFilterFunc(rpc.Filter{Labels: labels})
+}
+
 func requiredLabelsMissing(taskLabels, agentLabels map[string]string) bool {
 	for label, value := range agentLabels {
 		if len(label) > 0 && label[0] == '!' {

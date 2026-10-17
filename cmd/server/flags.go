@@ -134,6 +134,12 @@ var flags = append([]cli.Flag{
 		Usage:   "minimum age before an orphaned workflow can be reaped",
 		Value:   10 * time.Minute,
 	},
+	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_PENDING_TIMEOUT"),
+		Name:    "pending-timeout",
+		Usage:   "maximum time a runnable pending workflow waits without a matching live agent; 0 disables",
+		Value:   6 * time.Hour,
+	},
 	&cli.StringFlag{
 		Sources: cli.EnvVars("WOODPECKER_GRPC_ADDR"),
 		Name:    "grpc-addr",

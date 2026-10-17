@@ -191,6 +191,7 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Server.HookDedupWindow = c.Duration("hook-dedup-window")
 	server.Config.Server.OrphanReapInterval = c.Duration("orphan-reap-interval")
 	server.Config.Server.OrphanReapGrace = c.Duration("orphan-reap-grace")
+	server.Config.Server.PendingTimeout = c.Duration("pending-timeout")
 	server.Config.Server.CreationTimeout = pipelineCreationTimeout(c.Duration("extensions-timeout"), c.Duration("forge-timeout"), c.Uint("forge-retry"))
 
 	// Pull requests
