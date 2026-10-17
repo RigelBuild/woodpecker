@@ -72,18 +72,44 @@ func anyAgentTakes(filters []scheduler.FilterFn, task *model.Task) bool {
 
 // hostnamePinned reports whether the task names one agent host; such a task never times out.
 func hostnamePinned(task *model.Task) bool {
-	return task.Labels[pipeline.LabelFilterHostname] != ""
+	hostname := task.Labels[pipeline.LabelFilterHostname]
+	return hostname != "" && hostname != "*"
+}
+
+// deletedDependencyError marks the error stand-in for a dependency deleted from the store.
+const deletedDependencyError = "dependency workflow no longer exists"
+
+func isDeletedStandIn(workflow *model.Workflow) bool {
+	return workflow.Error == deletedDependencyError
+}
+
+// stampUnfinishedDeps persists now as the finish time of each terminal dependency that has none.
+// The stored value anchors the pending clock; a failed write is retried next pass.
+func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, task *model.Task, now int64) {
+	for _, workflow := range workflows {
+		if workflow.Finished != 0 || workflow.Running() || isDeletedStandIn(workflow) ||
+			!slices.Contains(task.Dependencies, fmt.Sprint(workflow.ID)) {
+			continue
+		}
+		updated := *workflow
+		updated.Finished = now
+		if err := storage.WorkflowUpdate(&updated); err != nil {
+			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not stamp finish time of dependency")
+			continue
+		}
+		*workflow = updated
+	}
 }
 
 // runnableSince returns when the task became runnable, or 0 while a dependency is missing or active.
-// A terminal dependency without a finish time gives now, so the clock starts at this observation.
+// A dependency without a finish time gives now; a deleted one adds no time.
 func runnableSince(p *model.Pipeline, workflows []*model.Workflow, task *model.Task, now int64) int64 {
 	if _, ok := treeDepStatus(task, workflows); !ok {
 		return 0
 	}
 	since := max(p.Created, p.Reviewed)
 	for _, workflow := range workflows {
-		if !slices.Contains(task.Dependencies, fmt.Sprint(workflow.ID)) {
+		if isDeletedStandIn(workflow) || !slices.Contains(task.Dependencies, fmt.Sprint(workflow.ID)) {
 			continue
 		}
 		if workflow.Finished == 0 {
@@ -164,14 +190,16 @@ func withMissingDeps(storage store.Store, task *model.Task, workflows []*model.W
 		if err != nil {
 			continue
 		}
-		extended = append(slices.Clip(extended), &model.Workflow{ID: id, State: model.StatusError})
+		extended = append(slices.Clip(extended), &model.Workflow{ID: id, State: model.StatusError, Error: deletedDependencyError})
 	}
 	return extended
 }
 
 // finalizeDeadWorkflows skips queued workflows whose finished dependencies forbid them to run.
-func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows []*model.Workflow, waiting map[string]*model.Task, now int64, cache map[string]*model.Workflow) []*model.Workflow {
+// It also reports whether a deleted dependency caused a skip, which the pipeline status must count as an error.
+func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows []*model.Workflow, waiting map[string]*model.Task, now int64, cache map[string]*model.Workflow) ([]*model.Workflow, bool) {
 	var finalized []*model.Workflow
+	deletedDep := false
 	failed := make(map[int64]struct{})
 	for found := true; found; {
 		found = false
@@ -181,7 +209,8 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 			if _, skip := failed[workflow.ID]; skip || !queued || workflow.State != model.StatusPending {
 				continue
 			}
-			deps, ok := treeDepStatus(task, withMissingDeps(storage, task, workflows, cache))
+			resolved := withMissingDeps(storage, task, workflows, cache)
+			deps, ok := treeDepStatus(task, resolved)
 			if !ok || (&model.Task{RunOn: task.RunOn, DepStatus: deps}).ShouldRun() {
 				continue
 			}
@@ -208,10 +237,11 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 				Strs("labels", reasonLabels(task)).
 				Msg("finalized queued workflow")
 			finalized = append(finalized, workflow)
+			deletedDep = deletedDep || slices.ContainsFunc(resolved, isDeletedStandIn)
 			found = true
 		}
 	}
-	return finalized
+	return finalized, deletedDep
 }
 
 // skipPendingSteps cancels each pending step and reports whether every write succeeded.

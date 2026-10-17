@@ -95,6 +95,8 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 		errored           []string
 		workflowLoads     map[int64]*model.Workflow
 		taskDeletes       []string
+		stamps            []int64
+		errMsg            string
 		timedOut          float64
 		aggregate         model.StatusValue
 		pipelineFinal     model.StatusValue
@@ -465,11 +467,11 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			workflowStates:    map[int64]model.StatusValue{41: model.StatusSkipped},
 			stepStates:        map[int64]model.StatusValue{411: model.StatusCanceled},
 			cancels:           []string{"41"},
-			pipelineFinal:     model.StatusCanceled,
+			pipelineFinal:     model.StatusError,
 			pipelineFinalized: true,
 		},
 		{
-			name:            "failure dependent of an unstarted skipped dependency does not time out",
+			name:            "failure dependent of an unstarted skipped dependency stamps it and does not time out",
 			pipelineStatus:  model.StatusRunning,
 			pipelineCreated: nowUnix - 7*hour,
 			workflows: []*model.Workflow{
@@ -477,6 +479,35 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 				queuedWorkflow(41),
 			},
 			pending: []*model.Task{runsOnFailure(linuxTask("41", "40"))},
+			stamps:  []int64{40},
+		},
+		{
+			name:              "hostname wildcard task times out",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{{ID: "41", Labels: map[string]string{"hostname": "*", "type": "linux"}}},
+			errMsg:            "no agent took this workflow within 6h0m0s (pending-timeout); labels: [hostname=*, type=linux]",
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:              "failure dependent of a deleted dependency times out",
+			pipelineStatus:    model.StatusPending,
+			pipelineCreated:   nowUnix - 7*hour,
+			workflows:         []*model.Workflow{queuedWorkflow(41)},
+			pending:           []*model.Task{runsOnFailure(linuxTask("41", "39"))},
+			workflowLoads:     map[int64]*model.Workflow{39: nil},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
 		},
 		{
 			name:            "dependent chain of a timed out workflow is skipped in one pass",
@@ -706,6 +737,9 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			}
 			wantError := func(want model.StatusValue) string {
 				if want == model.StatusError {
+					if tt.errMsg != "" {
+						return tt.errMsg
+					}
 					return reason
 				}
 				return ""
@@ -746,6 +780,11 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			}
 			for _, id := range tt.taskDeletes {
 				storeMock.On("TaskDelete", id).Return(nil).Once()
+			}
+			for _, id := range tt.stamps {
+				storeMock.On("WorkflowUpdate", mock.MatchedBy(func(updated *model.Workflow) bool {
+					return updated.ID == id && updated.Finished == nowUnix && !updated.Running()
+				})).Return(nil).Once()
 			}
 			if tt.timedOut > 0 || tt.listAgents {
 				storeMock.On("AgentList", &model.ListOptionsWithAll{All: true}).Return(tt.agentList, tt.agentListErr).Once()
@@ -965,6 +1004,47 @@ func TestReapPendingTimeoutNextPass(t *testing.T) {
 		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout))
 		assert.Equal(t, model.StatusSkipped, workflows[1].State)
 		assert.Equal(t, model.StatusCanceled, workflows[1].Children[0].State)
+	})
+
+	t.Run("stamped dependency anchors the clock across passes", func(t *testing.T) {
+		storeMock, schedulerMock, managerMock := setup(t)
+		pipeline := &model.Pipeline{ID: 100, RepoID: repo.ID, Number: 13, Status: model.StatusRunning, Created: nowUnix - 7*3600}
+		workflows := []*model.Workflow{
+			{ID: 40, State: model.StatusSkipped},
+			{ID: 41, State: model.StatusPending, Children: []*model.Step{{ID: 411, State: model.StatusPending}}},
+		}
+		dependent := linuxTask("41", "40")
+		dependent.RunOn = []string{string(model.StatusFailure)}
+		storeMock.On("GetPipelineQueue").Return([]*model.Feed{{ID: pipeline.ID}}, nil).Twice()
+		storeMock.On("TaskList").Return([]*model.Task{}, nil).Twice()
+		storeMock.On("GetPipeline", pipeline.ID).Return(pipeline, nil).Twice()
+		storeMock.On("GetRepo", repo.ID).Return(repo, nil).Twice()
+		storeMock.On("WorkflowGetTree", pipeline).Return(workflows, nil).Twice()
+		schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{Pending: []*model.Task{dependent}}).Twice()
+
+		// Pass 1: the dependency gets its finish time and the dependent's clock starts.
+		storeMock.On("WorkflowUpdate", mock.MatchedBy(func(w *model.Workflow) bool {
+			return w.ID == 40 && w.State == model.StatusSkipped && w.Finished == nowUnix
+		})).Return(nil).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout))
+		assert.Equal(t, nowUnix, workflows[0].Finished)
+		assert.Equal(t, model.StatusPending, workflows[1].State)
+
+		// Pass 2: more than six hours later the dependent times out.
+		later := now.Add(7 * time.Hour)
+		storeMock.On("AgentList", &model.ListOptionsWithAll{All: true}).Return([]*model.Agent{}, nil).Once()
+		storeMock.On("StepUpdate", isStep(411, model.StatusError)).Return(nil).Once()
+		storeMock.On("WorkflowUpdate", isState(41, model.StatusError)).Return(nil).Once()
+		schedulerMock.On("CancelWorkflows", mock.Anything, []string{"41"}).Return(nil).Once()
+		storeMock.On("UpdatePipeline", mock.MatchedBy(func(p *model.Pipeline) bool {
+			return p.Status == model.StatusError && p.Finished == later.Unix()
+		})).Return(nil).Once()
+		storeMock.On("GetUser", repo.UserID).Return(user, nil).Once()
+		managerMock.On("ForgeFromRepo", repo).Return(nil, nil).Once()
+		schedulerMock.On("PublishPipelineEvent", mock.Anything, repo, mock.Anything).Return(nil).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, later, grace, pendingTimeout))
+		assert.Equal(t, model.StatusError, workflows[1].State)
+		assert.Equal(t, reason, workflows[1].Error)
 	})
 
 	t.Run("failed row delete is removed on the next pass", func(t *testing.T) {

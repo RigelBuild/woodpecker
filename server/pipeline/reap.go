@@ -122,8 +122,12 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			}
 			if _, exists := queued[fmt.Sprint(workflow.ID)]; exists {
 				task, isPending := pending[fmt.Sprint(workflow.ID)]
-				if pendingTimeout <= 0 || queueInfo.Paused || !isPending || hostnamePinned(task) ||
-					!pendingTimedOut(pipeline, workflows, task, now, pendingTimeout) {
+				if pendingTimeout <= 0 || queueInfo.Paused || !isPending || hostnamePinned(task) {
+					continue
+				}
+				resolved := withMissingDeps(storage, task, workflows, outsideTree)
+				stampUnfinishedDeps(storage, resolved, task, now.Unix())
+				if !pendingTimedOut(pipeline, resolved, task, now, pendingTimeout) {
 					continue
 				}
 				if !liveLoaded {
@@ -213,14 +217,22 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				Str("reason", reason).
 				Msg("reaped orphaned workflow")
 		}
-		if pendingTimeout > 0 && len(finalizeDeadWorkflows(ctx, storage, workflows, waiting, now.Unix(), outsideTree)) > 0 {
-			changed = true
+		deletedDepError := false
+		if pendingTimeout > 0 {
+			var finalized []*model.Workflow
+			finalized, deletedDepError = finalizeDeadWorkflows(ctx, storage, workflows, waiting, now.Unix(), outsideTree)
+			if len(finalized) > 0 {
+				changed = true
+			}
 		}
 
 		if !model.IsThereRunningStage(workflows) {
 			status := PipelineStatus(workflows)
+			if deletedDepError {
+				status = MergeStatusValues(status, model.StatusError)
+			}
 			// A never-started canceled pipeline posts success, so an error keeps its status.
-			hasError := slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return workflow.State == model.StatusError })
+			hasError := deletedDepError || slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return workflow.State == model.StatusError })
 			if changed && !pipelineEverStarted && !hasError {
 				status = model.StatusCanceled
 			}

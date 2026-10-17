@@ -137,7 +137,7 @@ var flags = append([]cli.Flag{
 	&cli.DurationFlag{
 		Sources: cli.EnvVars("WOODPECKER_PENDING_TIMEOUT"),
 		Name:    "pending-timeout",
-		Usage:   "maximum time a runnable pending workflow waits without a matching live agent; paused queues and hostname-pinned tasks never time out; 0 disables",
+		Usage:   "maximum time a runnable pending workflow waits without a matching live agent; timeout checks are suspended while the queue is paused, and hostname-pinned tasks never time out; 0 disables",
 		Value:   6 * time.Hour,
 	},
 	&cli.StringFlag{
