@@ -33,6 +33,7 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v3/rpc/proto"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/queue"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler/mocks"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
@@ -47,6 +48,7 @@ func TestServeReleasesPollingAgentsOnShutdown(t *testing.T) {
 
 	polling := make(chan struct{})
 	sched := mocks.NewMockScheduler(t)
+	sched.On("Expired").Return((<-chan queue.ExpiredTask)(make(chan queue.ExpiredTask))).Maybe()
 	sched.On("Poll", mock.Anything, int64(1), mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			close(polling)
