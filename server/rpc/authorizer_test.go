@@ -225,6 +225,39 @@ func TestAuthorizeProtoVersion(t *testing.T) {
 		assert.Contains(t, s.Message(), "incompatible with server proto version")
 	})
 
+	t.Run("strict proto version matching", func(t *testing.T) {
+		for _, version := range []string{"16", "17", "18"} {
+			err := checkClientProtoVersion(metadata.Pairs("proto-version", version), 7)
+			if version == "17" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+			}
+		}
+	})
+
+	t.Run("older proto version returns FailedPrecondition", func(t *testing.T) {
+		t.Parallel()
+
+		err := checkClientProtoVersion(metadata.Pairs("proto-version", "16"), 7)
+		require.Error(t, err)
+		assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	})
+
+	t.Run("newer proto version returns FailedPrecondition", func(t *testing.T) {
+		t.Parallel()
+
+		err := checkClientProtoVersion(metadata.Pairs("proto-version", "18"), 7)
+		require.Error(t, err)
+		assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	})
+
+	t.Run("missing proto version remains allowed", func(t *testing.T) {
+		t.Parallel()
+
+		assert.NoError(t, checkClientProtoVersion(metadata.MD{}, 7))
+	})
 	t.Run("unparseable proto version returns InvalidArgument", func(t *testing.T) {
 		t.Parallel()
 

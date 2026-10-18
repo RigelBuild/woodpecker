@@ -125,15 +125,20 @@ func (s *WoodpeckerServer) Update(c context.Context, req *proto.UpdateRequest) (
 
 // Done let agent signal to server the workflow has stopped.
 func (s *WoodpeckerServer) Done(c context.Context, req *proto.DoneRequest) (*proto.Empty, error) {
-	state := rpc.WorkflowState{
-		Started:  req.GetState().GetStarted(),
-		Finished: req.GetState().GetFinished(),
-		Error:    req.GetState().GetError(),
-		Canceled: req.GetState().GetCanceled(),
-	}
+	state := workflowStateFromProto(req.GetState())
 	res := new(proto.Empty)
 	err := s.peer.Done(c, req.GetId(), state)
 	return res, err
+}
+
+func workflowStateFromProto(state *proto.WorkflowState) rpc.WorkflowState {
+	return rpc.WorkflowState{
+		Started:       state.GetStarted(),
+		Finished:      state.GetFinished(),
+		Error:         state.GetError(),
+		Canceled:      state.GetCanceled(),
+		AgentShutdown: state.GetAgentShutdown(),
+	}
 }
 
 // Wait blocks until the workflow is complete.

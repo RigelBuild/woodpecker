@@ -298,10 +298,11 @@ func (c *client) Done(ctx context.Context, workflowID string, state rpc.Workflow
 	req := &proto.DoneRequest{
 		Id: workflowID,
 		State: &proto.WorkflowState{
-			Started:  state.Started,
-			Finished: state.Finished,
-			Error:    state.Error,
-			Canceled: state.Canceled,
+			Started:       state.Started,
+			Finished:      state.Finished,
+			Error:         state.Error,
+			Canceled:      state.Canceled,
+			AgentShutdown: state.AgentShutdown,
 		},
 	}
 
