@@ -94,12 +94,26 @@
               />
               <PipelineStatusIcon :status="workflow.state" class="h-4! w-4!" />
               <span class="truncate">{{ workflow.name }}</span>
+              <span
+                v-if="workflow.attempts !== undefined && workflow.attempts > 0"
+                class="text-wp-text-alt-100 shrink-0 text-xs"
+              >
+                {{ $t('repo.pipeline.attempt', { attempt: workflow.attempts + 1 }) }}
+              </span>
               <PipelineStepDuration
                 v-if="workflow.started !== workflow.finished"
                 :workflow="workflow"
                 class="pr-2px mr-1"
               />
             </button>
+            <div
+              v-else-if="workflow.attempts !== undefined && workflow.attempts > 0"
+              class="flex items-center px-2 py-1"
+            >
+              <span class="text-wp-text-alt-100 shrink-0 text-xs">
+                {{ $t('repo.pipeline.attempt', { attempt: workflow.attempts + 1 }) }}
+              </span>
+            </div>
           </div>
           <div
             class="transition-height overflow-hidden duration-150"
