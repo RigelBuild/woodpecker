@@ -40,7 +40,7 @@ func TestRunReportsAgentShutdown(t *testing.T) {
 
 	var done rpc.WorkflowState
 	peer := shutdownPeer(t, &done, dummyWorkflow(), false, nil)
-	runner := NewRunner(peer, rpc.Filter{}, "test-agent", &State{Metadata: map[string]Info{}}, shutdownBackend(t, nil))
+	runner := NewRunner(peer, rpc.Filter{}, "test-agent", 1, &State{Metadata: map[string]Info{}}, shutdownBackend(t, nil))
 
 	require.NoError(t, runner.Run(root))
 	assert.True(t, done.Canceled)
@@ -68,7 +68,7 @@ func TestRunPreservesEarlierCancellationCause(t *testing.T) {
 				close(stepCanceled)
 				<-root.Done()
 			})
-			runner := NewRunner(peer, rpc.Filter{}, "test-agent", &State{Metadata: map[string]Info{}}, engine)
+			runner := NewRunner(peer, rpc.Filter{}, "test-agent", 1, &State{Metadata: map[string]Info{}}, engine)
 			finished := make(chan error, 1)
 			go func() { finished <- runner.Run(root) }()
 
@@ -106,7 +106,7 @@ func TestRunShutdownDoneContext(t *testing.T) {
 		doneContextLive = ctx.Err() == nil
 	})
 
-	runner := NewRunner(peer, rpc.Filter{}, "test-agent", &State{Metadata: map[string]Info{}}, shutdownBackend(t, nil))
+	runner := NewRunner(peer, rpc.Filter{}, "test-agent", 1, &State{Metadata: map[string]Info{}}, shutdownBackend(t, nil))
 	require.NoError(t, runner.Run(runnerCtx))
 	assert.True(t, doneContextLive)
 	require.NotNil(t, doneCtx)
