@@ -152,7 +152,8 @@ func shutdownPeer(t *testing.T, done *rpc.WorkflowState, workflow *rpc.Workflow,
 	peer := rpc_mocks.NewMockPeer(t)
 	peer.On("Next", mock.Anything, mock.Anything).Return(workflow, nil)
 	peer.On("Init", mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	peer.On("Wait", mock.Anything, mock.Anything).Return(waitCanceled, nil)
+	// Wait runs on an unjoined goroutine, so Run can return before it is called.
+	peer.On("Wait", mock.Anything, mock.Anything).Return(waitCanceled, nil).Maybe()
 	peer.On("Update", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	peer.On("Done", mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
