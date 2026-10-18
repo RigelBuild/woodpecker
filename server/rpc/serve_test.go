@@ -48,7 +48,9 @@ func TestServeReleasesPollingAgentsOnShutdown(t *testing.T) {
 
 	polling := make(chan struct{})
 	sched := mocks.NewMockScheduler(t)
-	sched.On("Expired").Return((<-chan queue.ExpiredTask)(make(chan queue.ExpiredTask))).Maybe()
+	consuming := make(chan struct{})
+	sched.On("Expired").Run(func(mock.Arguments) { close(consuming) }).
+		Return((<-chan queue.ExpiredTask)(make(chan queue.ExpiredTask))).Once()
 	sched.On("Poll", mock.Anything, int64(1), mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			close(polling)
@@ -98,6 +100,11 @@ func TestServeReleasesPollingAgentsOnShutdown(t *testing.T) {
 	case <-polling:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Next did not reach the scheduler")
+	}
+	select {
+	case <-consuming:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not start the expired-lease consumer")
 	}
 
 	stopServe(nil)
