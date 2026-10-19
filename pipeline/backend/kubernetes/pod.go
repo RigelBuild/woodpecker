@@ -293,7 +293,7 @@ func podContainer(step *types.Step, podName, goos string, options BackendOptions
 	}
 
 	// filter environment variables to non-secrets and secrets, refer secrets from step secrets
-	envs, secs := filterSecrets(step.Environment, step.SecretMapping)
+	envs, secs := filterSecrets(step.Environment, stepSecretData(step))
 	envsFromSecrets := mapToEnvVarsFromStepSecrets(secs, stepSecret)
 	container.Env = append(mapToEnvVars(envs), envsFromSecrets...)
 

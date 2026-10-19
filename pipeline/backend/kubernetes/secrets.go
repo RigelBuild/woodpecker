@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/distribution/reference"
@@ -311,8 +312,24 @@ func stopRegistrySecret(ctx context.Context, engine *kube, step *types.Step, del
 	return err
 }
 
+// netrcPasswordEnv carries the clone token; it goes through the step Secret so
+// principals that can read pods but not secrets never see it.
+const netrcPasswordEnv = "CI_NETRC_PASSWORD"
+
 func needsStepSecret(step *types.Step) bool {
-	return len(step.SecretMapping) > 0
+	_, hasNetrc := step.Environment[netrcPasswordEnv]
+	return len(step.SecretMapping) > 0 || hasNetrc
+}
+
+func stepSecretData(step *types.Step) map[string]string {
+	password, hasNetrc := step.Environment[netrcPasswordEnv]
+	if !hasNetrc {
+		return step.SecretMapping
+	}
+	data := make(map[string]string, len(step.SecretMapping)+1)
+	maps.Copy(data, step.SecretMapping)
+	data[netrcPasswordEnv] = password
+	return data
 }
 
 func startStepSecret(ctx context.Context, e *kube, step *types.Step) error {
@@ -338,7 +355,7 @@ func mkStepSecret(step *types.Step, config *config) (*kube_core_v1.Secret, error
 		Namespace:  config.GetNamespace(step.OrgID),
 		Name:       name,
 		Type:       kube_core_v1.SecretTypeOpaque,
-		StringData: step.SecretMapping,
+		StringData: stepSecretData(step),
 	}, nil
 }
 

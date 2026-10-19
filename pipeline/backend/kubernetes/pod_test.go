@@ -1235,6 +1235,36 @@ func TestStepSecret(t *testing.T) {
 	ja.Assertf(string(secretJSON), expected)
 }
 
+func TestNetrcPasswordUsesStepSecret(t *testing.T) {
+	step := &types.Step{
+		UUID:        "01he8bebctabr3kgk0qj36d2me-0",
+		Name:        "clone",
+		Image:       "woodpeckerci/plugin-git",
+		Environment: map[string]string{"CI_NETRC_USERNAME": "x-access-token", "CI_NETRC_PASSWORD": "clone-token"},
+	}
+	assert.True(t, needsStepSecret(step))
+
+	secret, err := mkStepSecret(step, &config{Namespace: "woodpecker"})
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{"CI_NETRC_PASSWORD": "clone-token"}, secret.StringData)
+
+	pod, err := mkPod(step, &config{Namespace: "woodpecker"}, "wp-01he8bebctabr3kgk0qj36d2me-0", "linux/amd64", BackendOptions{}, taskUUID)
+	assert.NoError(t, err)
+	podJSON, err := json.Marshal(pod)
+	assert.NoError(t, err)
+	assert.NotContains(t, string(podJSON), "clone-token")
+	var ref *kube_core_v1.SecretKeySelector
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == "CI_NETRC_PASSWORD" {
+			ref = env.ValueFrom.SecretKeyRef
+		}
+	}
+	if assert.NotNil(t, ref) {
+		assert.Equal(t, "wp-01he8bebctabr3kgk0qj36d2me-0-step-secret", ref.Name)
+		assert.Equal(t, "CI_NETRC_PASSWORD", ref.Key)
+	}
+}
+
 func TestPodAffinity(t *testing.T) {
 	const expected = `
 	{

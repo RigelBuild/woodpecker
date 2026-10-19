@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 	kube_core_v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kube_runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -255,6 +256,26 @@ func TestWaitStepReturnsOnContextCancel(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("WaitStep did not return after context cancellation")
 	}
+}
+
+func TestDestroyWorkflowDeletesStepSecretAfterFailedStart(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("netrc-only-03")
+	step.Environment = map[string]string{"CI_NETRC_PASSWORD": "clone-token"}
+	// StartStep's first half: the Secret exists, but the pod was never created.
+	require.NoError(t, startStepSecret(t.Context(), engine, step))
+	name, err := stepSecretName(step)
+	require.NoError(t, err)
+
+	err = engine.DestroyWorkflow(t.Context(), &types.Config{
+		Volume: "task-3-workspace",
+		Stages: []*types.Stage{{Steps: []*types.Step{step}}},
+	}, "task-3")
+	require.NoError(t, err)
+
+	_, err = client.CoreV1().Secrets("test-ns").Get(t.Context(), name, kube_meta_v1.GetOptions{})
+	assert.True(t, errors.IsNotFound(err), "step secret should be deleted, got %v", err)
 }
 
 func TestWaitStepReturnsOnAlreadyDeletedPod(t *testing.T) {
