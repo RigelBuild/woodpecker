@@ -417,3 +417,56 @@ func TestWaitStepNoGoroutineLeak(t *testing.T) {
 		"goroutines leaked after canceling %d WaitStep calls: got %d leaked",
 		numSteps, leaked)
 }
+
+func TestStartPodRetriesResourceQuotaConflict(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("quota-409-01")
+	creates := 0
+	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		creates++
+		if creates == 1 {
+			return true, nil, errors.NewConflict(
+				kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+		}
+		return false, nil, nil
+	})
+
+	pod, err := startPod(t.Context(), engine, step, BackendOptions{}, "task-409")
+	require.NoError(t, err)
+	assert.Equal(t, 2, creates)
+	_, err = client.CoreV1().Pods("test-ns").Get(t.Context(), pod.Name, kube_meta_v1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestStartPodFailsAfterPersistentConflict(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("quota-409-02")
+	creates := 0
+	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		creates++
+		return true, nil, errors.NewConflict(
+			kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+	})
+
+	_, err := startPod(t.Context(), engine, step, BackendOptions{}, "task-409")
+	assert.True(t, errors.IsConflict(err), "want conflict, got %v", err)
+	assert.Greater(t, creates, 1)
+	assert.LessOrEqual(t, creates, 5)
+}
+
+func TestStartPodDoesNotRetryOtherErrors(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("quota-403-01")
+	creates := 0
+	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		creates++
+		return true, nil, errors.NewForbidden(kube_core_v1.Resource("pods"), "x", fmt.Errorf("exceeded quota"))
+	})
+
+	_, err := startPod(t.Context(), engine, step, BackendOptions{}, "task-403")
+	assert.True(t, errors.IsForbidden(err))
+	assert.Equal(t, 1, creates)
+}
