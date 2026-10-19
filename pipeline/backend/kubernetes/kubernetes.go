@@ -550,6 +550,13 @@ func (e *kube) DestroyWorkflow(ctx context.Context, conf *types.Config, taskUUID
 			if err != nil {
 				return err
 			}
+			// A step whose start failed never reaches DestroyStep; its Secret may hold the clone token.
+			if needsStepSecret(step) {
+				err = stopStepSecret(ctx, e, step, e.config.newDefaultDeleteOptions())
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 
