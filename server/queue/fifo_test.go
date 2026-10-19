@@ -723,6 +723,55 @@ func TestFifoConcurrency(t *testing.T) {
 		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
 		waitForProcess()
 	})
+	t.Run("dead dependent does not hold the group", func(t *testing.T) {
+		taskA := &model.Task{ID: "1000", PipelineID: 1, Created: 100, ConcurrencyGroup: "repo:fleet", ConcurrencyLimit: 1}
+		taskB := &model.Task{
+			ID:               "1001",
+			PipelineID:       1,
+			Created:          100,
+			Name:             "redeploy",
+			ConcurrencyGroup: "repo:fleet",
+			ConcurrencyLimit: 1,
+			Dependencies:     []string{"1000"},
+			DepStatus:        make(map[string]model.StatusValue),
+		}
+		taskA2 := &model.Task{ID: "1002", PipelineID: 2, Created: 200, ConcurrencyGroup: "repo:fleet", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{taskA, taskB, taskA2}))
+		waitForProcess()
+
+		filterWithoutB := func(task *model.Task) (bool, int) {
+			return task.ID != "1001", 1
+		}
+		got, err := q.Poll(ctx, 1, filterWithoutB)
+		assert.NoError(t, err)
+		assert.Equal(t, "1000", got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusFailure))
+		waitForProcess()
+
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		got2, err := q.Poll(pollCtx, 2, filterWithoutB)
+		pollCancel()
+		assert.NoError(t, err, "a dead dependent must not block the next pipeline")
+		if err == nil {
+			assert.Equal(t, "1002", got2.ID)
+			assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+			waitForProcess()
+
+			gotB, pollErr := q.Poll(ctx, 3, filterFnTrue)
+			assert.NoError(t, pollErr)
+			assert.Equal(t, "1001", gotB.ID)
+			assert.NoError(t, q.Done(ctx, gotB.ID, model.StatusSkipped))
+		} else {
+			assert.NoError(t, q.ErrorAtOnce(ctx, []string{"1002", "1001"}, fmt.Errorf("test cleanup")))
+		}
+		waitForProcess()
+
+		info := q.Info(ctx)
+		for _, task := range info.Pending {
+			assert.NotContains(t, []string{"1000", "1001", "1002"}, task.ID)
+		}
+	})
 
 	t.Run("preserves instantiation order over readiness", func(t *testing.T) {
 		// Pipeline 1's deploy (taskA) waits on its own slow check (dep), while

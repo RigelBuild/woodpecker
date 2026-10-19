@@ -510,6 +510,7 @@ func (q *fifo) pushPendingFront(task *model.Task) {
 // canRunConcurrent reports whether the given task may currently start without
 // violating its workflow concurrency limit. Tasks without a limit always pass,
 // keeping the default scheduling behavior unchanged.
+// Dead dependents do not reserve a slot because they only need a worker to be marked skipped.
 //
 // Slots within a concurrency group are granted in taskOrderLess order, not in
 // the order tasks become ready, so a later pipeline whose dependencies finish
@@ -525,6 +526,9 @@ func (q *fifo) pushPendingFront(task *model.Task) {
 //
 // Expects the queue to be locked by the caller.
 func (q *fifo) canRunConcurrent(task *model.Task) bool {
+	if isDeadTask(task) {
+		return true
+	}
 	if task.ConcurrencyLimit <= 0 || task.ConcurrencyGroup == "" {
 		return true
 	}
@@ -547,7 +551,7 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 	// their dependencies, so cross-pipeline ordering is preserved.
 	ahead := 0
 	countAhead := func(other *model.Task) {
-		if other.ConcurrencyGroup != group || other.ID == task.ID {
+		if other.ConcurrencyGroup != group || other.ID == task.ID || isDeadTask(other) {
 			return
 		}
 		// only reserve order across pipelines; see the function doc above.
@@ -568,6 +572,16 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 	}
 
 	return running+ahead < task.ConcurrencyLimit
+}
+
+func isDeadTask(task *model.Task) bool {
+	for _, dep := range task.Dependencies {
+		if _, ok := task.DepStatus[dep]; !ok {
+			return false
+		}
+	}
+
+	return !task.ShouldRun()
 }
 
 // taskOrderLess orders non-PR events (branch pushes, tags, manual, deploy, cron)
