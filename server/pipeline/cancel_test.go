@@ -35,6 +35,11 @@ func TestSupersedes(t *testing.T) {
 	staleRestart := pr(1, 1, "aaa")
 	staleRestart.Parent = 1
 	other.Refspec = "other:main"
+	meta := func(id, number int64, commit string) *model.Pipeline {
+		p := pr(id, number, commit)
+		p.Event = model.EventPullMetadata
+		return p
+	}
 
 	tests := []struct {
 		name           string
@@ -52,6 +57,10 @@ func TestSupersedes(t *testing.T) {
 		{"a different event", pr(2, 2, "bbb"), push(1, 1, "aaa", "main"), false},
 		{"newer push on the branch", push(2, 2, "bbb", "main"), push(1, 1, "aaa", "main"), true},
 		{"push on another branch", push(2, 2, "bbb", "main"), push(1, 1, "aaa", "dev"), false},
+		{"a newer metadata edit cancels the older one on the same commit", meta(2, 2, "aaa"), meta(1, 1, "aaa"), true},
+		{"an older metadata edit never cancels a newer one", meta(1, 1, "aaa"), meta(2, 2, "aaa"), false},
+		{"metadata never cancels a code pipeline on its commit", meta(2, 2, "aaa"), pr(1, 1, "aaa"), false},
+		{"metadata on another PR", func() *model.Pipeline { p := meta(2, 2, "aaa"); p.Refspec = "other:main"; return p }(), meta(1, 1, "aaa"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
