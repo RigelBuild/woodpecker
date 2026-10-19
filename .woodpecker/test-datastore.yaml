@@ -3,10 +3,7 @@
 # suite against postgres and mysql service containers. postgres and mysql are
 # chained 1-wide (serial) so only one runs at a time on a 4 GiB agent.
 labels:
-  backend: docker
-  # DB tests hang on a busy homelab disk (RIG-4716);
-  # every aws pool run passed, so keep the DB tests there.
-  cloud: aws
+  os: linux
 
 variables:
   - &golang_image 'docker.io/golang:1.27'
@@ -78,8 +75,7 @@ steps:
     when: *when
 
 services:
-  # Throwaway DBs: skip fsync so commits don't wait on a busy host disk; the
-  # homelab agents hit go-test timeouts on DB reads in these legs (RIG-4716).
+  # Throwaway DBs: skip fsync so commits don't wait on a busy node disk.
   postgres:
     image: docker.io/postgres:18
     entrypoint: [docker-entrypoint.sh, postgres, -c, fsync=off, -c, synchronous_commit=off, -c, full_page_writes=off]

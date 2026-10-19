@@ -3,7 +3,7 @@
 # check-openapi, license-header, and the pipeline-config lint. All steps are
 # chained 1-wide so a 4 GiB agent runs one heavy compile at a time.
 labels:
-  backend: docker
+  os: linux
 
 variables:
   - &golang_image 'docker.io/golang:1.27'
