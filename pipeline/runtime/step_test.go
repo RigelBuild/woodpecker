@@ -28,10 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	kube_core_v1 "k8s.io/api/core/v1"
-	kube_errors "k8s.io/apimachinery/pkg/api/errors"
-	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/dummy"
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
@@ -408,6 +404,32 @@ func TestCompleteStep(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, int64(9999), ws.Started)
 	})
+	t.Run("PodLossDuringCancellation", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancelCause(t.Context())
+		loss := &backend_types.PodLossError{Pod: "wp-lost", Reason: "DeletionByPodGC"}
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).Run(func(mock.Arguments) {
+			cancel(loss)
+		}).Return(nil, loss)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+		r := New(
+			&backend_types.Config{},
+			engine,
+			WithTracer(newTestTracer(t)),
+			WithLogger(newTestLogger(t)),
+			WithContext(ctx),
+		)
+
+		const startTime = int64(9999)
+		state, err := r.completeStep(t.Context(), dummyStep("lost"), func() {}, startTime)
+
+		assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+		require.NotNil(t, state)
+		assert.Equal(t, startTime, state.Started)
+		assert.Equal(t, pipeline_errors.ErrCancel, state.Error)
+		engine.AssertCalled(t, "DestroyStep", mock.Anything, mock.Anything, mock.Anything)
+	})
 
 	t.Run("CtxCanceledAfterDestroyStep", func(t *testing.T) {
 		t.Parallel()
@@ -438,43 +460,27 @@ func TestCompleteStep(t *testing.T) {
 	})
 }
 
-func TestCompleteStepPodLossCleansSecretsAndFails(t *testing.T) {
-	client := fake.NewClientset()
+// An unconfirmed loss still destroys the step (the kube backend deletes its secrets there) and fails it.
+func TestExecuteStepPodLossDestroysStepAndFails(t *testing.T) {
 	engine := mocks.NewMockBackend(t)
 	step := dummyStep("lost")
-	podName := "wp-" + step.UUID
-	loss := &backend_types.PodLossError{Pod: podName, Reason: "NotFound", Evidence: "node unknown"}
-	step.SecretMapping = map[string]string{"token": "value"}
-	step.AuthConfig.Username = "registry-user"
-	step.AuthConfig.Password = "registry-password"
+	loss := &backend_types.PodLossError{Pod: "wp-lost", Reason: "NotFound", Evidence: "node unknown"}
 	engine.On("StartStep", mock.Anything, step, mock.Anything).Return(nil)
 	engine.On("TailStep", mock.Anything, step, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
 	engine.On("WaitStep", mock.Anything, step, mock.Anything).Return(nil, loss)
-	engine.On("DestroyStep", mock.Anything, step, mock.Anything).
-		Run(func(args mock.Arguments) {
-			ctx, ok := args.Get(0).(context.Context)
-			require.True(t, ok)
-			for _, name := range []string{podName, podName + "-step-secret"} {
-				assert.NoError(t, client.CoreV1().Secrets("test-ns").Delete(ctx, name, kube_meta_v1.DeleteOptions{}))
-			}
-		}).Return(nil).Once()
+	engine.On("DestroyStep", mock.Anything, step, mock.Anything).Return(nil).Once()
 	tracer := newTestTracer(t)
 	r := New(&backend_types.Config{}, engine, WithTracer(tracer), WithLogger(newTestLogger(t)))
-	for _, name := range []string{podName, podName + "-step-secret"} {
-		_, err := client.CoreV1().Secrets("test-ns").Create(t.Context(), &kube_core_v1.Secret{Name: name, Namespace: "test-ns"}, kube_meta_v1.CreateOptions{})
-		require.NoError(t, err)
-	}
+
 	err := r.executeStep(t.Context(), step)
+
 	assert.ErrorIs(t, err, backend_types.ErrStepPodLost)
-	engine.AssertCalled(t, "DestroyStep", mock.Anything, step, mock.Anything)
-	for _, name := range []string{podName, podName + "-step-secret"} {
-		_, err := client.CoreV1().Secrets("test-ns").Get(t.Context(), name, kube_meta_v1.GetOptions{})
-		assert.True(t, kube_errors.IsNotFound(err), "secret %s should be deleted", name)
-	}
+	engine.AssertNumberOfCalls(t, "DestroyStep", 1)
 	calls := getTracerStates(tracer)
 	require.Len(t, calls, 2)
 	assert.Equal(t, 1, calls[1].CurrStepState.ExitCode)
 	assert.ErrorIs(t, calls[1].CurrStepState.Error, backend_types.ErrStepPodLost)
+	assert.NotErrorIs(t, calls[1].CurrStepState.Error, pipeline_errors.ErrCancel)
 }
 
 // The executeStep uses dummy for the full step lifecycle.
