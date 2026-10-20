@@ -52,7 +52,8 @@ steps:
       - echo "test" > web/dist/index.html
     when: *when
 
-  postgres:
+  # Not named after the service: on Kubernetes a step pod's hostname resolves to itself.
+  test-postgres:
     depends_on:
       - dummy-web
     image: *golang_image
@@ -63,9 +64,9 @@ steps:
       - make test-server-datastore
     when: *when
 
-  mysql:
+  test-mysql:
     depends_on:
-      - postgres
+      - test-postgres
     image: *golang_image
     environment:
       WOODPECKER_DATABASE_DRIVER: mysql
