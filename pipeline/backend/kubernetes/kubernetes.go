@@ -123,13 +123,18 @@ func (e *kube) preemptionEvidence(ctx context.Context, node string, at time.Time
 	return "no matching PreemptScheduled event", false, nil
 }
 
+// lossTime bounds the evidence window: the disruption time, else the deletion time, else now.
 func lossTime(last *kube_core_v1.Pod) time.Time {
-	if last != nil {
-		for _, condition := range last.Status.Conditions {
-			if condition.Type == kube_core_v1.DisruptionTarget && condition.Status == kube_core_v1.ConditionTrue && !condition.LastTransitionTime.IsZero() {
-				return condition.LastTransitionTime.Time
-			}
+	if last == nil {
+		return time.Now()
+	}
+	for _, condition := range last.Status.Conditions {
+		if condition.Type == kube_core_v1.DisruptionTarget && condition.Status == kube_core_v1.ConditionTrue && !condition.LastTransitionTime.IsZero() {
+			return condition.LastTransitionTime.Time
 		}
+	}
+	if last.DeletionTimestamp != nil {
+		return last.DeletionTimestamp.Time
 	}
 	return time.Now()
 }
@@ -495,16 +500,12 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if types.InTeardown(ctx) {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			lossAt := time.Now()
 			newest := last.Load()
 			reason, lost := podLost(newest, true)
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			if newest != nil {
-				lossAt = lossTime(newest)
-			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossAt)
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
 		}
 		return nil, err
 	} else {
@@ -517,14 +518,6 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	if !types.InTeardown(ctx) {
-		if newest := last.Load(); newest != nil {
-			if reason, lost := podLost(newest, false); lost {
-				return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
-			}
-		}
-	}
-
 	pod, err := backoff.Retry(
 		ctx,
 		func() (*kube_core_v1.Pod, error) {
@@ -557,16 +550,12 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if types.InTeardown(ctx) {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			lossAt := time.Now()
 			newest := last.Load()
 			reason, lost := podLost(newest, true)
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			if newest != nil {
-				lossAt = lossTime(newest)
-			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossAt)
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
 		}
 		if !types.InTeardown(ctx) {
 			newest := last.Load()

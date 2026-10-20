@@ -526,6 +526,76 @@ func TestWaitStepReturnsOnDisruptionTargetUpdate(t *testing.T) {
 	}
 	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
 	require.NoError(t, err)
+	disrupted := func(state kube_core_v1.ContainerState) *kube_core_v1.Pod {
+		return &kube_core_v1.Pod{
+			Name:      podName,
+			Namespace: "test-ns",
+			Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
+			Status: kube_core_v1.PodStatus{
+				Phase: kube_core_v1.PodRunning,
+				Conditions: []kube_core_v1.PodCondition{{
+					Type:               kube_core_v1.DisruptionTarget,
+					Status:             kube_core_v1.ConditionTrue,
+					Reason:             "DeletionByPodGC",
+					LastTransitionTime: kube_meta_v1.Now(),
+				}},
+				ContainerStatuses: []kube_core_v1.ContainerStatus{{Name: podName, State: state}},
+			},
+		}
+	}
+	// The guard Get runs after the informer's initial List, so an update after it is an Update event.
+	guarded := make(chan struct{})
+	var guardOnce sync.Once
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		guardOnce.Do(func() { close(guarded) })
+		return false, nil, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	type outcome struct {
+		state *types.State
+		err   error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		state, err := engine.WaitStep(ctx, step, "task-1")
+		result <- outcome{state, err}
+	}()
+	<-guarded
+	pods := kube_core_v1.SchemeGroupVersion.WithResource("pods")
+	require.NoError(t, client.Tracker().Update(pods, disrupted(kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}}), "test-ns"))
+	// The container still exits 0 inside the drain's grace window: the step stays green.
+	require.NoError(t, client.Tracker().Update(pods, disrupted(kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}}), "test-ns"))
+	select {
+	case got := <-result:
+		require.NoError(t, got.err)
+		assert.Equal(t, 0, got.state.ExitCode)
+	case <-ctx.Done():
+		t.Fatal("WaitStep did not return after the DisruptionTarget update")
+	}
+}
+
+// A disruption whose container exits non-zero is a loss once the final Get sees the terminated state.
+func TestWaitStepReturnsLossOnDisruptionTargetUpdate(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("disruption-update-lost")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	running := &kube_core_v1.Pod{
+		Name:      podName,
+		Namespace: "test-ns",
+		Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
+		Status:    kube_core_v1.PodStatus{Phase: kube_core_v1.PodRunning},
+	}
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), running, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	guarded := make(chan struct{})
+	var guardOnce sync.Once
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		guardOnce.Do(func() { close(guarded) })
+		return false, nil, nil
+	})
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	result := make(chan error, 1)
@@ -533,30 +603,23 @@ func TestWaitStepReturnsOnDisruptionTargetUpdate(t *testing.T) {
 		_, err := engine.WaitStep(ctx, step, "task-1")
 		result <- err
 	}()
-	if err := client.Tracker().Update(kube_core_v1.SchemeGroupVersion.WithResource("pods"), &kube_core_v1.Pod{
-		Name:      podName,
-		Namespace: "test-ns",
-		Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
-		Status: kube_core_v1.PodStatus{
-			Phase: kube_core_v1.PodRunning,
-			Conditions: []kube_core_v1.PodCondition{{
-				Type:               kube_core_v1.DisruptionTarget,
-				Status:             kube_core_v1.ConditionTrue,
-				Reason:             "DeletionByPodGC",
-				LastTransitionTime: kube_meta_v1.Now(),
-			}},
-			ContainerStatuses: pod.Status.ContainerStatuses,
-		},
-	}, "test-ns"); err != nil {
-		t.Fatal(err)
-	}
+	<-guarded
+	evicted := running.DeepCopy()
+	evicted.Status.Conditions = []kube_core_v1.PodCondition{{
+		Type: kube_core_v1.DisruptionTarget, Status: kube_core_v1.ConditionTrue,
+		Reason: "EvictionByEvictionAPI", LastTransitionTime: kube_meta_v1.Now(),
+	}}
+	evicted.Status.ContainerStatuses = []kube_core_v1.ContainerStatus{{
+		Name: podName, State: kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 143}},
+	}}
+	require.NoError(t, client.Tracker().Update(kube_core_v1.SchemeGroupVersion.WithResource("pods"), evicted, "test-ns"))
 	select {
 	case err := <-result:
 		var loss *types.PodLossError
 		require.ErrorAs(t, err, &loss)
-		assert.Equal(t, "DeletionByPodGC", loss.Reason)
+		assert.Equal(t, "EvictionByEvictionAPI", loss.Reason)
 	case <-ctx.Done():
-		t.Fatal("WaitStep did not return promptly after DisruptionTarget update")
+		t.Fatal("WaitStep did not return after the DisruptionTarget update")
 	}
 }
 
