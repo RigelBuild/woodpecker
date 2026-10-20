@@ -72,7 +72,9 @@ func startHeadlessService(ctx context.Context, engine *kube, namespace, taskUUID
 	}
 
 	log.Trace().Str("name", svc.Name).Interface("selector", svc.Spec.Selector).Msg("creating headless service")
-	return engine.client.CoreV1().Services(namespace).Create(ctx, svc, kube_meta_v1.CreateOptions{})
+	return createRetryOnConflict(func() (*kube_core_v1.Service, error) {
+		return engine.client.CoreV1().Services(namespace).Create(ctx, svc, kube_meta_v1.CreateOptions{})
+	})
 }
 
 func (e *kube) stopHeadlessService(ctx context.Context, engine *kube, namespace, taskUUID string) error {

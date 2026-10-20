@@ -291,11 +291,10 @@ func startRegistrySecret(ctx context.Context, engine *kube, step *types.Step) er
 		return err
 	}
 	log.Trace().Msgf("creating secret: %s", secret.Name)
-	_, err = engine.client.CoreV1().Secrets(engine.config.GetNamespace(step.OrgID)).Create(ctx, secret, kube_meta_v1.CreateOptions{})
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err = createRetryOnConflict(func() (*kube_core_v1.Secret, error) {
+		return engine.client.CoreV1().Secrets(engine.config.GetNamespace(step.OrgID)).Create(ctx, secret, kube_meta_v1.CreateOptions{})
+	})
+	return err
 }
 
 func stopRegistrySecret(ctx context.Context, engine *kube, step *types.Step, deleteOpts kube_meta_v1.DeleteOptions) error {
@@ -338,11 +337,10 @@ func startStepSecret(ctx context.Context, e *kube, step *types.Step) error {
 		return err
 	}
 	log.Trace().Msgf("creating secret: %s", secret.Name)
-	_, err = e.client.CoreV1().Secrets(e.config.GetNamespace(step.OrgID)).Create(ctx, secret, kube_meta_v1.CreateOptions{})
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err = createRetryOnConflict(func() (*kube_core_v1.Secret, error) {
+		return e.client.CoreV1().Secrets(e.config.GetNamespace(step.OrgID)).Create(ctx, secret, kube_meta_v1.CreateOptions{})
+	})
+	return err
 }
 
 func mkStepSecret(step *types.Step, config *config) (*kube_core_v1.Secret, error) {
