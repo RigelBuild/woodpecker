@@ -1,5 +1,4 @@
-# Rigel CI runs a heterogeneous agent pool including a local-backend agent that
-# cannot run service containers or pull images; pin to docker-backend agents.
+# Any Linux agent on the AKS pool (kubernetes backend; services run as pods).
 #
 # RIG-2713: the heavy Go test suite is split across three workflow files
 # (test.yaml, test-checks.yaml, test-datastore.yaml). Each runs as its own
@@ -11,10 +10,7 @@
 # repo's 30-minute per-workflow timeout (a single fully-serial chain exceeded
 # it). This file is the push+PR Go-test spine.
 labels:
-  backend: docker
-  # DB tests hang on a busy homelab disk (RIG-4716);
-  # every aws pool run passed, so keep the DB tests there.
-  cloud: aws
+  os: linux
 
 variables:
   - &golang_image 'docker.io/golang:1.27'

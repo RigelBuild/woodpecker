@@ -1,7 +1,6 @@
-# Rigel CI runs a heterogeneous agent pool including a local-backend agent that
-# cannot run service containers or pull images; pin to docker-backend agents.
+# Any Linux agent on the AKS pool (kubernetes backend).
 labels:
-  backend: docker
+  os: linux
 
 when:
   - event: pull_request
