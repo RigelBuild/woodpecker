@@ -29,6 +29,7 @@ var (
 	ErrCancel = errors.New("Canceled")
 
 	ErrAgentShutdown = fmt.Errorf("agent shutdown: %w", ErrCancel)
+	ErrEvicted       = fmt.Errorf("evicted by azure spot preemption: %w", ErrCancel)
 )
 
 // An ExitError reports an unsuccessful exit.

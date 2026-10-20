@@ -155,7 +155,7 @@ func checkAgentReportedInitState(agentID int64, state rpc.WorkflowState) error {
 // on Done. A canceled workflow was necessarily started, so Canceled combined
 // with a zero Started timestamp cannot come from a compatible agent.
 func checkAgentReportedDoneState(agentID int64, state rpc.WorkflowState) error {
-	if state.Canceled && state.Started == 0 {
+	if (state.Evicted && !state.Canceled) || (state.Canceled && state.Started == 0) {
 		retErr := ErrAgentImpossibleWorkflowState
 		log.Error().Err(retErr).Int64("agentID", agentID).Msgf("done: impossible workflow state reported: %#v", state)
 		return retErr

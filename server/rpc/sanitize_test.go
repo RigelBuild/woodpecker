@@ -381,4 +381,9 @@ func TestCheckAgentReportedDoneState(t *testing.T) {
 		t.Parallel()
 		assert.ErrorIs(t, checkAgentReportedDoneState(1, rpc.WorkflowState{Canceled: true}), ErrAgentImpossibleWorkflowState)
 	})
+
+	t.Run("evicted workflow without canceled is rejected", func(t *testing.T) {
+		t.Parallel()
+		assert.ErrorIs(t, checkAgentReportedDoneState(1, rpc.WorkflowState{Started: now, Evicted: true}), ErrAgentImpossibleWorkflowState)
+	})
 }

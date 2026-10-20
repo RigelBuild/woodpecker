@@ -503,20 +503,24 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		return err
 	}
 
-	if state.AgentShutdown && canRequeueAfterAgentLoss(workflow, currentPipeline) {
-		if err := s.scheduler.Reserve(c, strWorkflowID, agent.ID, false); errors.Is(err, queue.ErrNotFound) {
-			log.Debug().Err(err).Str("workflow_id", strWorkflowID).Msg("done: workflow left the queue before requeue")
-		} else if err != nil {
-			log.Error().Err(err).Str("workflow_id", strWorkflowID).Msg("done: cannot reserve workflow, finalizing it")
+	shouldRequeue := false
+	if state.AgentShutdown {
+		shouldRequeue = canRequeueAfterAgentLoss(workflow, currentPipeline)
+	} else if state.Evicted {
+		if workflow.Attempts >= maxEvictionRequeues {
+			state.Error = "step pod lost to a confirmed Azure Spot preemption; retry cap reached"
 		} else {
-			handled, err := s.requeueReserved(c, workflow, currentPipeline, repo, agent.ID, state)
-			if handled {
-				if err != nil {
-					return err
-				}
-				return s.updateAgentLastWork(agent)
+			shouldRequeue = canRequeueAfterAgentLossWithoutCap(workflow, currentPipeline)
+		}
+	}
+
+	if shouldRequeue {
+		handled, err := s.reserveAndRequeue(c, workflow, currentPipeline, repo, agent.ID, strWorkflowID, state)
+		if handled {
+			if err != nil {
+				return err
 			}
-			log.Warn().Err(err).Str("workflow_id", strWorkflowID).Msg("done: cannot requeue workflow, finalizing it")
+			return s.updateAgentLastWork(agent)
 		}
 	}
 

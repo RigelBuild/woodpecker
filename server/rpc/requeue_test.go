@@ -228,6 +228,57 @@ func stepStates(wf *model.Workflow) []model.StatusValue {
 	return out
 }
 
+func TestDoneEvictedRequeue(t *testing.T) {
+	t.Run("first confirmed eviction requeues", func(t *testing.T) {
+		e := newRequeueEnv(t, time.Hour)
+		wf := e.addWorkflow(1, steps(2))
+		e.start(wf, 1, 0, model.StatusSuccess, model.StatusRunning)
+
+		require.NoError(t, e.rpc.Done(agentCtx(t, 1), strconv.FormatInt(wf.ID, 10), rpc.WorkflowState{
+			Started: 100, Finished: 200, Canceled: true, Evicted: true,
+		}))
+
+		row := e.workflow(wf.ID)
+		assert.Equal(t, model.StatusPending, row.State)
+		assert.Zero(t, row.AgentID)
+		assert.Equal(t, 1, row.Attempts)
+		assert.Equal(t, []model.StatusValue{model.StatusPending, model.StatusPending}, stepStates(row))
+		assert.Equal(t, strconv.FormatInt(wf.ID, 10), e.poll(2))
+	})
+
+	t.Run("eviction retry cap stores exact failure message", func(t *testing.T) {
+		e := newRequeueEnv(t, time.Hour)
+		wf := e.addWorkflow(1, steps(2))
+		e.start(wf, 1, maxEvictionRequeues, model.StatusSuccess, model.StatusRunning)
+
+		require.NoError(t, e.rpc.Done(agentCtx(t, 1), strconv.FormatInt(wf.ID, 10), rpc.WorkflowState{
+			Started: 100, Finished: 200, Canceled: true, Evicted: true,
+		}))
+
+		row := e.workflow(wf.ID)
+		assert.Equal(t, model.StatusKilled, row.State)
+		assert.Equal(t, maxEvictionRequeues, row.Attempts)
+		assert.Equal(t, "step pod lost to a confirmed Azure Spot preemption; retry cap reached", row.Error)
+		assert.False(t, e.queued(wf.ID))
+	})
+
+	t.Run("agent shutdown takes precedence over eviction cap", func(t *testing.T) {
+		e := newRequeueEnv(t, time.Hour)
+		wf := e.addWorkflow(1, steps(2))
+		e.start(wf, 1, maxAgentLossRequeues, model.StatusSuccess, model.StatusRunning)
+
+		require.NoError(t, e.rpc.Done(agentCtx(t, 1), strconv.FormatInt(wf.ID, 10), rpc.WorkflowState{
+			Started: 100, Finished: 200, Canceled: true, AgentShutdown: true, Evicted: true,
+		}))
+
+		row := e.workflow(wf.ID)
+		assert.Equal(t, model.StatusKilled, row.State)
+		assert.Equal(t, maxAgentLossRequeues, row.Attempts)
+		assert.NotEqual(t, "step pod lost to a confirmed Azure Spot preemption; retry cap reached", row.Error)
+		assert.False(t, e.queued(wf.ID))
+	})
+}
+
 func TestDoneAgentShutdownRequeue(t *testing.T) {
 	t.Run("running step requeues and resets", func(t *testing.T) {
 		e := newRequeueEnv(t, time.Hour)

@@ -35,11 +35,16 @@ import (
 // maxAgentLossRequeues caps how often one workflow is requeued after losing its agent.
 const maxAgentLossRequeues = 2
 
+// maxEvictionRequeues caps requeues after a confirmed Spot preemption; it shares Workflow.Attempts.
+const maxEvictionRequeues = 1
+
 // canRequeueAfterAgentLoss reports whether a workflow whose agent went away may run again.
 func canRequeueAfterAgentLoss(workflow *model.Workflow, currentPipeline *model.Pipeline) bool {
-	if workflow.Attempts >= maxAgentLossRequeues {
-		return false
-	}
+	return workflow.Attempts < maxAgentLossRequeues && canRequeueAfterAgentLossWithoutCap(workflow, currentPipeline)
+}
+
+// canRequeueAfterAgentLossWithoutCap holds the requeue guards that do not depend on the attempt count.
+func canRequeueAfterAgentLossWithoutCap(workflow *model.Workflow, currentPipeline *model.Pipeline) bool {
 	if currentPipeline.Status == model.StatusKilled || currentPipeline.Status == model.StatusCanceled {
 		return false
 	}
@@ -64,6 +69,24 @@ func hasUnfinishedStep(steps []*model.Step) bool {
 		}
 	}
 	return false
+}
+
+// reserveAndRequeue reports false when the workflow must be finalized instead.
+func (s *RPC) reserveAndRequeue(c context.Context, workflow *model.Workflow, currentPipeline *model.Pipeline, repo *model.Repo, agentID int64, strWorkflowID string, state rpc.WorkflowState) (bool, error) {
+	if err := s.scheduler.Reserve(c, strWorkflowID, agentID, false); errors.Is(err, queue.ErrNotFound) {
+		log.Debug().Err(err).Str("workflow_id", strWorkflowID).Msg("done: workflow left the queue before requeue")
+		return false, nil
+	} else if err != nil {
+		log.Error().Err(err).Str("workflow_id", strWorkflowID).Msg("done: cannot reserve workflow, finalizing it")
+		return false, nil
+	}
+
+	handled, err := s.requeueReserved(c, workflow, currentPipeline, repo, agentID, state)
+	if handled {
+		return true, err
+	}
+	log.Warn().Err(err).Str("workflow_id", strWorkflowID).Msg("done: cannot requeue workflow, finalizing it")
+	return false, nil
 }
 
 // requeueReserved resets a reserved workflow and puts it back in the queue.
