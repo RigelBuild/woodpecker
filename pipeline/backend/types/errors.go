@@ -14,6 +14,28 @@
 
 package types
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var ErrNoCliContextFound = errors.New("no CliContext in context found")
+
+// ErrStepPodLost marks a step pod that disappeared before it completed.
+var ErrStepPodLost = errors.New("step pod lost")
+
+// PodLossError describes a step pod lost to an unexpected deletion or disruption.
+type PodLossError struct {
+	Pod, Node string
+	Reason    string
+	Confirmed bool
+	Evidence  string
+}
+
+func (e *PodLossError) Error() string {
+	return fmt.Sprintf("%s: pod %s on node %s: %s", ErrStepPodLost.Error(), e.Pod, e.Node, e.Reason)
+}
+
+func (e *PodLossError) Unwrap() error {
+	return ErrStepPodLost
+}

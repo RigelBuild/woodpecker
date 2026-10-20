@@ -19,6 +19,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -222,6 +224,52 @@ func TestRunDestroyWorkflowCalledOnSetupError(t *testing.T) {
 	_ = r.Run(t.Context())
 
 	assert.Equal(t, int32(1), destroyed.Load())
+}
+
+func TestRunTeardownContextIsVisibleToWaitStepAndDestroyWorkflow(t *testing.T) {
+	for _, deferredDestroy := range []bool{false, true} {
+		ctx := t.Context()
+		cancel := func() {}
+		if deferredDestroy {
+			var cancelCause context.CancelCauseFunc
+			ctx, cancelCause = context.WithCancelCause(ctx)
+			cancel = func() { cancelCause(nil) }
+		}
+		engine := mocks.NewMockBackend(t)
+		var waitCtx context.Context
+		engine.On("SetupWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Run(func(args mock.Arguments) {
+				waitCtx, _ = args.Get(0).(context.Context)
+				if deferredDestroy {
+					assert.False(t, backend_types.InTeardown(waitCtx))
+					cancel()
+					return
+				}
+				assert.False(t, backend_types.InTeardown(waitCtx))
+			}).Return(&backend_types.State{Exited: true}, nil)
+		engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).
+			Run(func(args mock.Arguments) {
+				destroyCtx, ok := args.Get(0).(context.Context)
+				assert.True(t, ok)
+				// The context comes from the backend call argument, not a local context derivation.
+				assert.True(t, backend_types.InTeardown(context.WithoutCancel(destroyCtx))) //nolint:contextcheck // test assertion inspects the backend-supplied context
+				require.NotNil(t, waitCtx)
+				assert.True(t, backend_types.InTeardown(waitCtx))
+			}).Return(nil)
+		conf := &backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{{Name: "step", UUID: "step-uuid", Type: backend_types.StepTypeCommands, OnSuccess: true, Environment: map[string]string{}}}}}}
+		r := New(conf, engine, WithContext(ctx), WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		if deferredDestroy {
+			err := r.Run(t.Context())
+			assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+		} else {
+			assert.NoError(t, r.Run(t.Context()))
+		}
+		cancel()
+	}
 }
 
 func TestTraceWorkflowSetupError(t *testing.T) {

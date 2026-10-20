@@ -28,6 +28,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	kube_core_v1 "k8s.io/api/core/v1"
+	kube_errors "k8s.io/apimachinery/pkg/api/errors"
+	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/dummy"
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
@@ -432,6 +436,45 @@ func TestCompleteStep(t *testing.T) {
 		assert.Equal(t, pipeline_errors.ErrCancel, ws.Error,
 			"re-check should set ErrCancel when r.ctx is already canceled")
 	})
+}
+
+func TestCompleteStepPodLossCleansSecretsAndFails(t *testing.T) {
+	client := fake.NewClientset()
+	engine := mocks.NewMockBackend(t)
+	step := dummyStep("lost")
+	podName := "wp-" + step.UUID
+	loss := &backend_types.PodLossError{Pod: podName, Reason: "NotFound", Evidence: "node unknown"}
+	step.SecretMapping = map[string]string{"token": "value"}
+	step.AuthConfig.Username = "registry-user"
+	step.AuthConfig.Password = "registry-password"
+	engine.On("StartStep", mock.Anything, step, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, step, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, step, mock.Anything).Return(nil, loss)
+	engine.On("DestroyStep", mock.Anything, step, mock.Anything).
+		Run(func(args mock.Arguments) {
+			ctx, ok := args.Get(0).(context.Context)
+			require.True(t, ok)
+			for _, name := range []string{podName, podName + "-step-secret"} {
+				assert.NoError(t, client.CoreV1().Secrets("test-ns").Delete(ctx, name, kube_meta_v1.DeleteOptions{}))
+			}
+		}).Return(nil).Once()
+	tracer := newTestTracer(t)
+	r := New(&backend_types.Config{}, engine, WithTracer(tracer), WithLogger(newTestLogger(t)))
+	for _, name := range []string{podName, podName + "-step-secret"} {
+		_, err := client.CoreV1().Secrets("test-ns").Create(t.Context(), &kube_core_v1.Secret{Name: name, Namespace: "test-ns"}, kube_meta_v1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	err := r.executeStep(t.Context(), step)
+	assert.ErrorIs(t, err, backend_types.ErrStepPodLost)
+	engine.AssertCalled(t, "DestroyStep", mock.Anything, step, mock.Anything)
+	for _, name := range []string{podName, podName + "-step-secret"} {
+		_, err := client.CoreV1().Secrets("test-ns").Get(t.Context(), name, kube_meta_v1.GetOptions{})
+		assert.True(t, kube_errors.IsNotFound(err), "secret %s should be deleted", name)
+	}
+	calls := getTracerStates(tracer)
+	require.Len(t, calls, 2)
+	assert.Equal(t, 1, calls[1].CurrStepState.ExitCode)
+	assert.ErrorIs(t, calls[1].CurrStepState.Error, backend_types.ErrStepPodLost)
 }
 
 // The executeStep uses dummy for the full step lifecycle.

@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/oklog/ulid/v2"
 	"github.com/rs/zerolog"
@@ -47,6 +48,8 @@ type Runtime struct {
 	logger logging.Logger
 
 	uploadWait sync.WaitGroup
+	// teardown is set first in destroyWorkflowFunc; WaitStep reads it from ctx.
+	teardown atomic.Bool
 
 	taskUUID    string
 	description map[string]string

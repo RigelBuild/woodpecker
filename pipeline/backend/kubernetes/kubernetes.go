@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v7"
@@ -50,12 +51,123 @@ const (
 	// TODO: 5 seconds is against best practice, k3s didn't work otherwise
 	defaultResyncDuration = 5 * time.Second
 	maxRetryDuration      = 1 * time.Minute
+	preemptEventReason    = "PreemptScheduled"                              // T1a's capture pins this reason.
+	preemptEventSource    = "custom-spot-eviction-condition-plugin-monitor" // T1a's capture pins this source.
 )
 
 type kube struct {
 	client kubernetes.Interface
 	config *config
 	goos   string
+	nodes  sync.Map
+}
+
+func (e *kube) recordNode(pod *kube_core_v1.Pod) {
+	if pod.Spec.NodeName != "" {
+		e.nodes.Store(pod.Name, pod.Spec.NodeName)
+	}
+}
+
+func podLost(last *kube_core_v1.Pod, gone bool) (reason string, lost bool) {
+	if terminatedSuccessfully(last) {
+		return "", false
+	}
+	if last != nil {
+		for _, condition := range last.Status.Conditions {
+			if condition.Type == kube_core_v1.DisruptionTarget && condition.Status == kube_core_v1.ConditionTrue {
+				return condition.Reason, true
+			}
+		}
+	}
+	if gone {
+		return "NotFound", true
+	}
+	return "", false
+}
+
+func terminatedSuccessfully(pod *kube_core_v1.Pod) bool {
+	if pod == nil || len(pod.Status.ContainerStatuses) == 0 {
+		return false
+	}
+	container := pod.Status.ContainerStatuses[0]
+	return container.State.Terminated != nil && container.State.Terminated.ExitCode == 0
+}
+
+func (e *kube) preemptionEvidence(ctx context.Context, node string, at time.Time) (evidence string, ok bool, err error) {
+	if node == "" {
+		return "node unknown", false, nil
+	}
+	selector := "involvedObject.kind=Node,involvedObject.name=" + node
+	events, err := e.client.CoreV1().Events("default").List(ctx, kube_meta_v1.ListOptions{FieldSelector: selector})
+	if err != nil {
+		return err.Error(), false, err
+	}
+	for _, event := range events.Items {
+		eventAt := event.EventTime.Time
+		if eventAt.IsZero() {
+			eventAt = event.LastTimestamp.Time
+		}
+		if eventAt.IsZero() {
+			eventAt = event.FirstTimestamp.Time
+		}
+		if event.Reason != preemptEventReason || (event.Source.Component != preemptEventSource && event.ReportingController != preemptEventSource) || !eventAt.After(at.Add(-10*time.Minute)) || eventAt.After(at) {
+			continue
+		}
+		return event.Reason, true, nil
+	}
+	return "no matching PreemptScheduled event", false, nil
+}
+
+func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID string) error {
+	node, _ := e.nodes.Load(podName)
+	nodeName, _ := node.(string)
+	evidence, confirmed, err := e.preemptionEvidence(ctx, nodeName, time.Now())
+	if err != nil {
+		evidence = err.Error()
+	}
+	loss := &types.PodLossError{Pod: podName, Node: nodeName, Reason: reason, Confirmed: confirmed, Evidence: evidence}
+	log.Error().Str("workflow_id", taskUUID).Str("step", step).Str("pod", podName).Str("node", nodeName).Str("reason", reason).Bool("confirmed", confirmed).Str("evidence", evidence).Msg("step pod lost")
+	return loss
+}
+
+func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) error {
+	up := make(chan struct{})
+	var upOnce sync.Once
+	podUp := func(obj any) {
+		pod, ok := obj.(*kube_core_v1.Pod)
+		if !ok {
+			log.Error().Msgf("could not parse pod: %v", obj)
+			return
+		}
+		if pod.Name != podName {
+			return
+		}
+		e.recordNode(pod)
+		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
+			upOnce.Do(func() { close(up) })
+		}
+		switch pod.Status.Phase {
+		case kube_core_v1.PodRunning, kube_core_v1.PodSucceeded, kube_core_v1.PodFailed:
+			upOnce.Do(func() { close(up) })
+		}
+	}
+
+	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(e.config.GetNamespace(step.OrgID)))
+	if _, err := si.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    podUp,
+		UpdateFunc: func(_, newPod any) { podUp(newPod) },
+	}); err != nil {
+		return err
+	}
+	stop := make(chan struct{})
+	si.Start(stop)
+	defer close(stop)
+	select {
+	case <-up:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type config struct {
@@ -295,38 +407,35 @@ func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string)
 	return err
 }
 
-// WaitStep waits for the pipeline step to complete and returns
-// the completion results.
 func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
 	podName, err := stepToPodName(step)
 	if err != nil {
 		return nil, err
 	}
-
 	log.Trace().Str("taskUUID", taskUUID).Msgf("waiting for pod: %s", podName)
 
+	var last atomic.Pointer[kube_core_v1.Pod]
 	finished := make(chan struct{})
 	var finishedOnce sync.Once
-
 	podChanged := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
 		if !ok {
 			log.Error().Msgf("could not parse pod: %v", obj)
 			return
 		}
-
-		if pod.Name == podName {
-			if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
-				finishedOnce.Do(func() { close(finished) })
-			}
-
-			switch pod.Status.Phase {
-			case kube_core_v1.PodSucceeded, kube_core_v1.PodFailed, kube_core_v1.PodUnknown:
-				finishedOnce.Do(func() { close(finished) })
-			}
+		if pod.Name != podName {
+			return
+		}
+		last.Store(pod.DeepCopy())
+		e.recordNode(pod)
+		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
+			finishedOnce.Do(func() { close(finished) })
+		}
+		switch pod.Status.Phase {
+		case kube_core_v1.PodSucceeded, kube_core_v1.PodFailed, kube_core_v1.PodUnknown:
+			finishedOnce.Do(func() { close(finished) })
 		}
 	}
-
 	podDeleted := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
 		if !ok {
@@ -340,37 +449,43 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			}
 		}
 		if pod.Name == podName {
+			podChanged(pod)
 			finishedOnce.Do(func() { close(finished) })
 		}
 	}
 
-	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(e.config.GetNamespace(step.OrgID)))
+	namespace := e.config.GetNamespace(step.OrgID)
+	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(namespace))
 	podInformer := si.Core().V1().Pods().Informer()
-	if _, err := podInformer.AddEventHandler(
-		cache.ResourceEventHandlerFuncs{
-			// A pod already terminal at the initial List only produces an Add event.
-			AddFunc:    podChanged,
-			UpdateFunc: func(_, newPod any) { podChanged(newPod) },
-			DeleteFunc: podDeleted,
-		},
-	); err != nil {
+	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    podChanged,
+		UpdateFunc: func(_, newPod any) { podChanged(newPod) },
+		DeleteFunc: podDeleted,
+	}); err != nil {
 		return nil, err
 	}
-
 	stop := make(chan struct{})
 	si.Start(stop)
 	defer close(stop)
-
-	// Wait for the informer's initial list before the check below. A pod deleted
-	// before that list never enters the cache, so its deletion is never delivered.
 	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
 		return nil, ctx.Err()
 	}
 
-	// If the pod was deleted before the informer synced, no events will
-	// ever arrive. Check explicitly so we don't hang forever.
-	if _, err := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(ctx, podName, kube_meta_v1.GetOptions{}); kube_errors.IsNotFound(err) {
-		return &types.State{ExitCode: 0, Exited: true}, nil
+	if pod, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{}); err != nil {
+		if kube_errors.IsNotFound(err) {
+			if types.InTeardown(ctx) {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			reason, lost := podLost(last.Load(), true)
+			if !lost {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID)
+		}
+		return nil, err
+	} else {
+		last.Store(pod.DeepCopy())
+		e.recordNode(pod)
 	}
 
 	select {
@@ -379,36 +494,36 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 		return nil, ctx.Err()
 	}
 
-	// After the informer signals completion, kubelet may not have finalized
-	// containerStatuses yet (phase=Succeeded before state.terminated is set).
-	// Retry with backoff to allow kubelet to catch up.
-	pod, err := backoff.Retry(
-		ctx,
-		func() (*kube_core_v1.Pod, error) {
-			p, err := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(ctx, podName, kube_meta_v1.GetOptions{})
-			if err != nil {
-				if kube_errors.IsNotFound(err) {
-					return nil, backoff.Permanent(err)
-				}
-				return nil, err
+	pod, err := backoff.Retry(ctx, func() (*kube_core_v1.Pod, error) {
+		p, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{})
+		if err != nil {
+			if kube_errors.IsNotFound(err) {
+				return nil, backoff.Permanent(err)
 			}
-			if len(p.Status.ContainerStatuses) == 0 {
-				return nil, fmt.Errorf("no container statuses found for pod %s", podName)
-			}
-			if p.Status.ContainerStatuses[0].State.Terminated == nil {
-				return nil, fmt.Errorf("container %s/%s terminated state not yet finalized", podName, p.Status.ContainerStatuses[0].Name)
-			}
-			return p, nil
-		},
-		backoff.WithBackOff(backoff.NewExponentialBackOff()),
-		backoff.WithMaxElapsedTime(maxRetryDuration),
-		backoff.WithNotify(func(err error, delay time.Duration) {
-			log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("waiting for container terminated state, retrying with backoff")
-		}),
-	)
+			return nil, err
+		}
+		e.recordNode(p)
+		last.Store(p.DeepCopy())
+		if len(p.Status.ContainerStatuses) == 0 {
+			return nil, fmt.Errorf("no container statuses found for pod %s", podName)
+		}
+		if p.Status.ContainerStatuses[0].State.Terminated == nil {
+			return nil, fmt.Errorf("container %s/%s terminated state not yet finalized", podName, p.Status.ContainerStatuses[0].Name)
+		}
+		return p, nil
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(maxRetryDuration), backoff.WithNotify(func(err error, delay time.Duration) {
+		log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("waiting for container terminated state, retrying with backoff")
+	}))
 	if err != nil {
 		if kube_errors.IsNotFound(backoff.AsRetryError(err).LastErr) {
-			return &types.State{ExitCode: 0, Exited: true}, nil
+			if types.InTeardown(ctx) {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			reason, lost := podLost(last.Load(), true)
+			if !lost {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID)
 		}
 		return nil, err
 	}
@@ -416,16 +531,13 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
 		return nil, fmt.Errorf("could not pull image for pod %s", podName)
 	}
-
-	cs := pod.Status.ContainerStatuses[0]
-
-	bs := &types.State{
-		ExitCode:  int(cs.State.Terminated.ExitCode),
-		Exited:    true,
-		OOMKilled: false,
+	if !types.InTeardown(ctx) {
+		if reason, lost := podLost(pod, false); lost {
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID)
+		}
 	}
-
-	return bs, nil
+	cs := pod.Status.ContainerStatuses[0]
+	return &types.State{ExitCode: int(cs.State.Terminated.ExitCode), Exited: true, OOMKilled: false}, nil
 }
 
 // TailStep tails the pipeline step logs.
@@ -434,83 +546,35 @@ func (e *kube) TailStep(ctx context.Context, step *types.Step, taskUUID string) 
 	if err != nil {
 		return nil, err
 	}
-
 	log.Trace().Str("taskUUID", taskUUID).Msgf("tail logs of pod: %s", podName)
-
-	up := make(chan struct{})
-	var upOnce sync.Once
-
-	podUpdated := func(_, newPod any) {
-		pod, ok := newPod.(*kube_core_v1.Pod)
-		if !ok {
-			log.Error().Msgf("could not parse pod: %v", newPod)
-			return
-		}
-
-		if pod.Name == podName {
-			if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
-				upOnce.Do(func() { close(up) })
-			}
-			switch pod.Status.Phase {
-			case kube_core_v1.PodRunning, kube_core_v1.PodSucceeded, kube_core_v1.PodFailed:
-				upOnce.Do(func() { close(up) })
-			}
-		}
-	}
-
-	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(e.config.GetNamespace(step.OrgID)))
-	if _, err := si.Core().V1().Pods().Informer().AddEventHandler(
-		cache.ResourceEventHandlerFuncs{
-			UpdateFunc: podUpdated,
-		},
-	); err != nil {
+	if err := e.waitPodUp(ctx, step, podName); err != nil {
 		return nil, err
 	}
+	return e.tailLogs(ctx, step, podName)
+}
 
-	stop := make(chan struct{})
-	si.Start(stop)
-	defer close(stop)
-
-	select {
-	case <-up:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	opts := &kube_core_v1.PodLogOptions{
-		Follow:    true,
-		Container: podName,
-	}
-
-	logs, err := backoff.Retry(
-		ctx,
-		func() (io.ReadCloser, error) {
-			return e.client.CoreV1().RESTClient().Get().
-				Namespace(e.config.GetNamespace(step.OrgID)).
-				Name(podName).
-				Resource("pods").
-				SubResource("log").
-				VersionedParams(opts, scheme.ParameterCodec).
-				Stream(ctx)
-		},
-		backoff.WithBackOff(backoff.NewExponentialBackOff()),
-		backoff.WithMaxElapsedTime(maxRetryDuration),
-		backoff.WithNotify(func(err error, delay time.Duration) {
-			log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("failed to open pod log stream, retrying with backoff")
-		}),
-	)
+func (e *kube) tailLogs(ctx context.Context, step *types.Step, podName string) (io.ReadCloser, error) {
+	opts := &kube_core_v1.PodLogOptions{Follow: true, Container: podName}
+	logs, err := backoff.Retry(ctx, func() (io.ReadCloser, error) {
+		return e.client.CoreV1().RESTClient().Get().
+			Namespace(e.config.GetNamespace(step.OrgID)).
+			Name(podName).
+			Resource("pods").
+			SubResource("log").
+			VersionedParams(opts, scheme.ParameterCodec).
+			Stream(ctx)
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(maxRetryDuration), backoff.WithNotify(func(err error, delay time.Duration) {
+		log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("failed to open pod log stream, retrying with backoff")
+	}))
 	if err != nil {
 		return nil, err
 	}
 	rc, wc := io.Pipe()
-
 	go func() {
 		defer logs.Close()
 		defer wc.Close()
-
-		_, err = io.Copy(wc, logs)
-		if err != nil {
-			return
+		if _, err := io.Copy(wc, logs); err != nil {
+			log.Debug().Err(err).Str("pod", podName).Msg("pod log stream ended")
 		}
 	}()
 	return rc, nil
@@ -537,6 +601,11 @@ func (e *kube) DestroyStep(ctx context.Context, step *types.Step, taskUUID strin
 	if err != nil {
 		errs = append(errs, err)
 	}
+	if podName, nameErr := stepToPodName(step); nameErr == nil {
+		e.nodes.Delete(podName)
+	} else {
+		errs = append(errs, nameErr)
+	}
 	return errors.Join(errs...)
 }
 
@@ -546,6 +615,9 @@ func (e *kube) DestroyWorkflow(ctx context.Context, conf *types.Config, taskUUID
 
 	for _, stage := range conf.Stages {
 		for _, step := range stage.Steps {
+			if podName, err := stepToPodName(step); err == nil {
+				e.nodes.Delete(podName)
+			}
 			err := stopPod(ctx, e, step, e.config.newDefaultDeleteOptions())
 			if err != nil {
 				return err
