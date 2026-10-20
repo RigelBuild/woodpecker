@@ -179,7 +179,11 @@ func (r *Runtime) completeStep(runnerCtx context.Context, step *backend_types.St
 		if errors.Is(err, backend_types.ErrStepPodLost) {
 			cleanupErr := r.engine.DestroyStep(runnerCtx, step, r.taskUUID)
 			lossErr := errors.Join(err, cleanupErr)
-			return &backend_types.State{Exited: true, ExitCode: 1, Error: lossErr}, lossErr
+			if r.canceled() || r.cancelFallout(err) {
+				state := &backend_types.State{Exited: true, ExitCode: 1, Error: r.cancelErr(err, step), Started: startTime}
+				return state, errors.Join(pipeline_errors.ErrCancel, cleanupErr)
+			}
+			return &backend_types.State{Exited: true, ExitCode: 1, Error: lossErr, Started: startTime}, lossErr
 		}
 		if !r.cancelFallout(err) {
 			return nil, err

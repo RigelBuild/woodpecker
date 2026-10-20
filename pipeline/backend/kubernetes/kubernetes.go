@@ -51,8 +51,10 @@ const (
 	// TODO: 5 seconds is against best practice, k3s didn't work otherwise
 	defaultResyncDuration = 5 * time.Second
 	maxRetryDuration      = 1 * time.Minute
-	preemptEventReason    = "PreemptScheduled"                              // T1a's capture pins this reason.
-	preemptEventSource    = "custom-spot-eviction-condition-plugin-monitor" // T1a's capture pins this source.
+	// NPD spot-eviction plugin Event that reports an Azure Preempt notice.
+	preemptEventReason = "PreemptScheduled"
+	// Source identifier used by the NPD spot-eviction plugin Event.
+	preemptEventSource = "custom-spot-eviction-condition-plugin-monitor"
 )
 
 type kube struct {
@@ -110,7 +112,10 @@ func (e *kube) preemptionEvidence(ctx context.Context, node string, at time.Time
 		if eventAt.IsZero() {
 			eventAt = event.FirstTimestamp.Time
 		}
-		if event.Reason != preemptEventReason || (event.Source.Component != preemptEventSource && event.ReportingController != preemptEventSource) || !eventAt.After(at.Add(-10*time.Minute)) || eventAt.After(at) {
+		matchesReason := event.Reason == preemptEventReason
+		matchesSource := event.Source.Component == preemptEventSource || event.ReportingController == preemptEventSource
+		withinLossWindow := eventAt.After(at.Add(-10*time.Minute)) && !eventAt.After(at)
+		if !matchesReason || !matchesSource || !withinLossWindow {
 			continue
 		}
 		return event.Reason, true, nil
@@ -118,10 +123,21 @@ func (e *kube) preemptionEvidence(ctx context.Context, node string, at time.Time
 	return "no matching PreemptScheduled event", false, nil
 }
 
-func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID string) error {
+func lossTime(last *kube_core_v1.Pod) time.Time {
+	if last != nil {
+		for _, condition := range last.Status.Conditions {
+			if condition.Type == kube_core_v1.DisruptionTarget && condition.Status == kube_core_v1.ConditionTrue && !condition.LastTransitionTime.IsZero() {
+				return condition.LastTransitionTime.Time
+			}
+		}
+	}
+	return time.Now()
+}
+
+func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID string, lossAt time.Time) error {
 	node, _ := e.nodes.Load(podName)
 	nodeName, _ := node.(string)
-	evidence, confirmed, err := e.preemptionEvidence(ctx, nodeName, time.Now())
+	evidence, confirmed, err := e.preemptionEvidence(ctx, nodeName, lossAt)
 	if err != nil {
 		evidence = err.Error()
 	}
@@ -435,6 +451,9 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 		case kube_core_v1.PodSucceeded, kube_core_v1.PodFailed, kube_core_v1.PodUnknown:
 			finishedOnce.Do(func() { close(finished) })
 		}
+		if _, lost := podLost(pod, false); lost {
+			finishedOnce.Do(func() { close(finished) })
+		}
 	}
 	podDeleted := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
@@ -476,11 +495,16 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if types.InTeardown(ctx) {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			reason, lost := podLost(last.Load(), true)
+			lossAt := time.Now()
+			newest := last.Load()
+			reason, lost := podLost(newest, true)
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID)
+			if newest != nil {
+				lossAt = lossTime(newest)
+			}
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossAt)
 		}
 		return nil, err
 	} else {
@@ -493,37 +517,62 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-
-	pod, err := backoff.Retry(ctx, func() (*kube_core_v1.Pod, error) {
-		p, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{})
-		if err != nil {
-			if kube_errors.IsNotFound(err) {
-				return nil, backoff.Permanent(err)
+	if !types.InTeardown(ctx) {
+		if newest := last.Load(); newest != nil {
+			if reason, lost := podLost(newest, false); lost {
+				return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
 			}
-			return nil, err
 		}
-		e.recordNode(p)
-		last.Store(p.DeepCopy())
-		if len(p.Status.ContainerStatuses) == 0 {
-			return nil, fmt.Errorf("no container statuses found for pod %s", podName)
-		}
-		if p.Status.ContainerStatuses[0].State.Terminated == nil {
-			return nil, fmt.Errorf("container %s/%s terminated state not yet finalized", podName, p.Status.ContainerStatuses[0].Name)
-		}
-		return p, nil
-	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(maxRetryDuration), backoff.WithNotify(func(err error, delay time.Duration) {
-		log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("waiting for container terminated state, retrying with backoff")
-	}))
+	}
+
+	pod, err := backoff.Retry(
+		ctx,
+		func() (*kube_core_v1.Pod, error) {
+			p, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{})
+			if err != nil {
+				if kube_errors.IsNotFound(err) {
+					return nil, backoff.Permanent(err)
+				}
+				return nil, err
+			}
+			e.recordNode(p)
+			last.Store(p.DeepCopy())
+			if len(p.Status.ContainerStatuses) == 0 {
+				return nil, fmt.Errorf("no container statuses found for pod %s", podName)
+			}
+			if p.Status.ContainerStatuses[0].State.Terminated == nil {
+				return nil, fmt.Errorf("container %s/%s terminated state not yet finalized", podName, p.Status.ContainerStatuses[0].Name)
+			}
+			return p, nil
+		},
+		backoff.WithBackOff(backoff.NewExponentialBackOff()),
+		backoff.WithMaxElapsedTime(maxRetryDuration),
+		backoff.WithNotify(func(err error, delay time.Duration) {
+			log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("waiting for container terminated state, retrying with backoff")
+		}),
+	)
 	if err != nil {
-		if kube_errors.IsNotFound(backoff.AsRetryError(err).LastErr) {
+		lastErr := backoff.AsRetryError(err).LastErr
+		if kube_errors.IsNotFound(lastErr) {
 			if types.InTeardown(ctx) {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			reason, lost := podLost(last.Load(), true)
+			lossAt := time.Now()
+			newest := last.Load()
+			reason, lost := podLost(newest, true)
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID)
+			if newest != nil {
+				lossAt = lossTime(newest)
+			}
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossAt)
+		}
+		if !types.InTeardown(ctx) {
+			newest := last.Load()
+			if reason, lost := podLost(newest, false); lost {
+				return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+			}
 		}
 		return nil, err
 	}
@@ -533,7 +582,7 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	}
 	if !types.InTeardown(ctx) {
 		if reason, lost := podLost(pod, false); lost {
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID)
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(pod))
 		}
 	}
 	cs := pod.Status.ContainerStatuses[0]
@@ -555,17 +604,23 @@ func (e *kube) TailStep(ctx context.Context, step *types.Step, taskUUID string) 
 
 func (e *kube) tailLogs(ctx context.Context, step *types.Step, podName string) (io.ReadCloser, error) {
 	opts := &kube_core_v1.PodLogOptions{Follow: true, Container: podName}
-	logs, err := backoff.Retry(ctx, func() (io.ReadCloser, error) {
-		return e.client.CoreV1().RESTClient().Get().
-			Namespace(e.config.GetNamespace(step.OrgID)).
-			Name(podName).
-			Resource("pods").
-			SubResource("log").
-			VersionedParams(opts, scheme.ParameterCodec).
-			Stream(ctx)
-	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxElapsedTime(maxRetryDuration), backoff.WithNotify(func(err error, delay time.Duration) {
-		log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("failed to open pod log stream, retrying with backoff")
-	}))
+	logs, err := backoff.Retry(
+		ctx,
+		func() (io.ReadCloser, error) {
+			return e.client.CoreV1().RESTClient().Get().
+				Namespace(e.config.GetNamespace(step.OrgID)).
+				Name(podName).
+				Resource("pods").
+				SubResource("log").
+				VersionedParams(opts, scheme.ParameterCodec).
+				Stream(ctx)
+		},
+		backoff.WithBackOff(backoff.NewExponentialBackOff()),
+		backoff.WithMaxElapsedTime(maxRetryDuration),
+		backoff.WithNotify(func(err error, delay time.Duration) {
+			log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("failed to open pod log stream, retrying with backoff")
+		}),
+	)
 	if err != nil {
 		return nil, err
 	}
