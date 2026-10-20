@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
 )
@@ -908,6 +909,26 @@ func TestFifoConcurrency(t *testing.T) {
 		beta := &model.Task{ID: "1", Created: 100, Name: "beta", BlockedCount: 3}
 		assert.True(t, taskOrderLess(alpha, beta))
 		assert.False(t, taskOrderLess(beta, alpha))
+
+		// Non-PR events (push, tag, manual, deployment, cron) outrank PR events, even when created later.
+		ev := func(e model.WebhookEvent) map[string]string {
+			return map[string]string{pipeline.LabelEvent: string(e)}
+		}
+		prs := []*model.Task{
+			{ID: "1", Created: 100, Labels: ev(model.EventPull)},
+			{ID: "2", Created: 100, Labels: ev(model.EventPullMetadata)},
+			{ID: "3", Created: 100, Labels: ev(model.EventPullClosed)},
+		}
+		for _, e := range []model.WebhookEvent{model.EventPush, model.EventTag, model.EventManual, model.EventDeploy, model.EventCron} {
+			later := &model.Task{ID: "9", Created: 900, Labels: ev(e)}
+			for _, low := range prs {
+				assert.True(t, taskOrderLess(later, low), "%s before %s", e, low.Labels[pipeline.LabelEvent])
+				assert.False(t, taskOrderLess(low, later), "%s after %s", low.Labels[pipeline.LabelEvent], e)
+			}
+		}
+		// Within a tier, Created still decides.
+		assert.True(t, taskOrderLess(prs[0], &model.Task{ID: "4", Created: 200, Labels: ev(model.EventPullMetadata)}))
+		assert.True(t, taskOrderLess(&model.Task{ID: "5", Created: 50, Labels: ev(model.EventCron)}, &model.Task{ID: "6", Created: 60, Labels: ev(model.EventPush)}))
 	})
 }
 
@@ -2012,6 +2033,32 @@ func TestFifoMultiDispatchTickOrder(t *testing.T) {
 	for _, id := range dispatched {
 		assert.NoError(t, q.Done(ctx, id, model.StatusSuccess))
 	}
+}
+
+func TestFifoBranchEventsDispatchBeforePullRequests(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	// A PR backlog created first must not hold back a later main push (CD).
+	ev := func(e model.WebhookEvent) map[string]string {
+		return map[string]string{pipeline.LabelEvent: string(e)}
+	}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{
+		{ID: "pr", Created: 100, Labels: ev(model.EventPull)},
+		{ID: "meta", Created: 150, Labels: ev(model.EventPullMetadata)},
+	}))
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{
+		{ID: "push", Created: 300, Labels: ev(model.EventPush)},
+	}))
+
+	order := make([]string, 0, 3)
+	for range 3 {
+		task, err := q.Poll(ctx, 1, filterFnTrue)
+		require.NoError(t, err)
+		order = append(order, task.ID)
+		require.NoError(t, q.Done(ctx, task.ID, model.StatusSuccess))
+	}
+	assert.Equal(t, []string{"push", "pr", "meta"}, order)
 }
 
 func TestFifoPendingInsertOrder(t *testing.T) {

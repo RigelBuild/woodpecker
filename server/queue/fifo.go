@@ -25,6 +25,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
 )
@@ -569,9 +570,14 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 	return running+ahead < task.ConcurrencyLimit
 }
 
-// taskOrderLess orders by pipeline Created time, then by tasks blocked (most first),
-// then by workflow name. The task ID is intentionally not used.
+// taskOrderLess orders non-PR events (branch pushes, tags, manual, deploy, cron)
+// ahead of PR events, so CD is not queued behind a PR backlog; then by pipeline
+// Created time, tasks blocked (most first), and workflow name. The task ID is
+// intentionally not used. The key is immutable once queued, as pushPending requires.
 func taskOrderLess(a, b *model.Task) bool {
+	if aPR, bPR := isPullTask(a), isPullTask(b); aPR != bPR {
+		return bPR
+	}
 	if a.Created != b.Created {
 		return a.Created < b.Created
 	}
@@ -579,6 +585,14 @@ func taskOrderLess(a, b *model.Task) bool {
 		return a.BlockedCount > b.BlockedCount
 	}
 	return a.Name < b.Name
+}
+
+func isPullTask(task *model.Task) bool {
+	switch model.WebhookEvent(task.Labels[pipeline.LabelEvent]) {
+	case model.EventPull, model.EventPullMetadata, model.EventPullClosed:
+		return true
+	}
+	return false
 }
 
 func (q *fifo) resubmitExpiredPipelines() {
