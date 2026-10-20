@@ -292,6 +292,22 @@ func TestDoneEvictedRequeue(t *testing.T) {
 		assert.Equal(t, maxEvictionRequeues+1, row.Attempts)
 		assert.True(t, e.queued(wf.ID))
 	})
+
+	t.Run("eviction at the cap after every blocking step finished stays green", func(t *testing.T) {
+		e := newRequeueEnv(t, time.Hour)
+		s := steps(2)
+		s[1].Detached = true
+		wf := e.addWorkflow(1, s)
+		e.start(wf, 1, maxEvictionRequeues, model.StatusSuccess, model.StatusRunning)
+
+		require.NoError(t, e.rpc.Done(agentCtx(t, 1), strconv.FormatInt(wf.ID, 10), rpc.WorkflowState{
+			Started: 100, Finished: 200, Canceled: true, Evicted: true,
+		}))
+
+		row := e.workflow(wf.ID)
+		assert.Equal(t, model.StatusSuccess, row.State)
+		assert.Empty(t, row.Error)
+	})
 }
 
 func TestDoneAgentShutdownRequeue(t *testing.T) {
