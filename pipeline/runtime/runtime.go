@@ -42,7 +42,8 @@ type Runtime struct {
 	// ctx is the context for the current workflow execution.
 	// All normal (non-cleanup) step operations must use this context.
 	// Cleanup operations should use the runnerCtx passed to Run().
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelCauseFunc
 
 	tracer tracing.Tracer
 	logger logging.Logger

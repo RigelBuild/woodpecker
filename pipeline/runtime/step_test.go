@@ -425,6 +425,7 @@ func TestCompleteStep(t *testing.T) {
 		state, err := r.completeStep(t.Context(), dummyStep("lost"), func() {}, startTime)
 
 		assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+		assert.ErrorIs(t, err, backend_types.ErrStepPodLost)
 		require.NotNil(t, state)
 		assert.Equal(t, startTime, state.Started)
 		assert.Equal(t, pipeline_errors.ErrCancel, state.Error)

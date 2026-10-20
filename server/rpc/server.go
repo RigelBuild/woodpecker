@@ -138,6 +138,7 @@ func workflowStateFromProto(state *proto.WorkflowState) rpc.WorkflowState {
 		Error:         state.GetError(),
 		Canceled:      state.GetCanceled(),
 		AgentShutdown: state.GetAgentShutdown(),
+		Evicted:       state.GetEvicted(),
 	}
 }
 

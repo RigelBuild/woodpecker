@@ -59,6 +59,7 @@ message WorkflowState {
   string error = 3;
   bool   canceled = 4;
   bool   agent_shutdown = 5;
+  bool   evicted = 6;
 }
 
 message LogEntry {

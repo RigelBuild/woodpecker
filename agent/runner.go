@@ -184,6 +184,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 		workflow.Config,
 		r.backend,
 		pipeline_runtime.WithContext(workflowCtx),
+		pipeline_runtime.WithCancelCause(cancelWorkflowCtx),
 		pipeline_runtime.WithTaskUUID(fmt.Sprint(workflow.ID)),
 		pipeline_runtime.WithLogger(r.createLogger(logger, workflow)),
 		pipeline_runtime.WithTracer(r.createTracer(ctxMeta, logger, workflow)),
@@ -206,7 +207,10 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 			state.Error = err.Error()
 		}
 	}
-	state.AgentShutdown = state.Canceled && errors.Is(context.Cause(workflowCtx), pipeline_errors.ErrAgentShutdown)
+	cause := context.Cause(workflowCtx)
+	state.Evicted = state.Canceled && errors.Is(cause, pipeline_errors.ErrEvicted)
+	state.AgentShutdown = state.Canceled && (errors.Is(cause, pipeline_errors.ErrAgentShutdown) ||
+		state.Evicted && errors.Is(context.Cause(runnerCtx), pipeline_errors.ErrAgentShutdown))
 
 	logger.Debug().
 		Str("error", state.Error).
