@@ -506,11 +506,12 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 	shouldRequeue := false
 	if state.AgentShutdown {
 		shouldRequeue = canRequeueAfterAgentLoss(workflow, currentPipeline)
-	} else if state.Evicted {
+	} else if state.Evicted && canRequeueAfterAgentLossWithoutCap(workflow, currentPipeline) {
+		// Only the cap can block here; the message names it.
 		if workflow.Attempts >= maxEvictionRequeues {
 			state.Error = "step pod lost to a confirmed Azure Spot preemption; retry cap reached"
 		} else {
-			shouldRequeue = canRequeueAfterAgentLossWithoutCap(workflow, currentPipeline)
+			shouldRequeue = true
 		}
 	}
 

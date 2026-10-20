@@ -281,6 +281,29 @@ func TestDestroyWorkflowDeletesStepSecretAfterFailedStart(t *testing.T) {
 	assert.True(t, kube_errors.IsNotFound(err), "step secret should be deleted, got %v", err)
 }
 
+// The runtime calls DestroyStep on every pod loss; it is the only path that deletes these secrets.
+func TestDestroyStepDeletesStepAndRegistrySecrets(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("pod-loss-secret-04")
+	step.Image = "registry.example.test/org/image:latest"
+	step.AuthConfig = types.Auth{Username: "user", Password: "pass"}
+	step.Environment = map[string]string{"CI_NETRC_PASSWORD": "clone-token"}
+	require.NoError(t, startRegistrySecret(t.Context(), engine, step))
+	require.NoError(t, startStepSecret(t.Context(), engine, step))
+	registryName, err := registrySecretName(step)
+	require.NoError(t, err)
+	stepName, err := stepSecretName(step)
+	require.NoError(t, err)
+
+	require.NoError(t, engine.DestroyStep(t.Context(), step, "task-4"))
+
+	for _, name := range []string{registryName, stepName} {
+		_, err := client.CoreV1().Secrets("test-ns").Get(t.Context(), name, kube_meta_v1.GetOptions{})
+		assert.True(t, kube_errors.IsNotFound(err), "secret %s should be deleted, got %v", name, err)
+	}
+}
+
 func TestWaitStepReturnsOnAlreadyDeletedPod(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
