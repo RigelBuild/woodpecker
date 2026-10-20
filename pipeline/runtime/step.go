@@ -176,6 +176,11 @@ func (r *Runtime) completeStep(runnerCtx context.Context, step *backend_types.St
 
 	waitState, err := r.engine.WaitStep(r.ctx, step, r.taskUUID) //nolint:contextcheck
 	if err != nil {
+		if errors.Is(err, backend_types.ErrStepPodLost) {
+			cleanupErr := r.engine.DestroyStep(runnerCtx, step, r.taskUUID)
+			lossErr := errors.Join(err, cleanupErr)
+			return &backend_types.State{Exited: true, ExitCode: 1, Error: lossErr}, lossErr
+		}
 		if !r.cancelFallout(err) {
 			return nil, err
 		}
