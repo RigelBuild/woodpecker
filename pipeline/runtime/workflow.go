@@ -33,6 +33,7 @@ import (
 // workflow on exit. The runnerCtx must outlive workflow cancellation so that cleanup
 // can still reach the backend (e.g. stopping Docker containers).
 func (r *Runtime) Run(runnerCtx context.Context) error {
+	r.ctx = backend_types.WithTeardown(r.ctx, &r.teardown)
 	if err := r.validateConfig(); err != nil {
 		return err
 	}
@@ -41,11 +42,13 @@ func (r *Runtime) Run(runnerCtx context.Context) error {
 	r.logStages()
 
 	destroyWorkflowFunc := sync.OnceFunc(func() {
+		r.teardown.Store(true)
 		ctx := runnerCtx //nolint:contextcheck
 		if ctx.Err() != nil {
 			// runnerCtx itself is done — fall back to a short-lived shutdown context.
 			ctx = GetShutdownCtx()
 		}
+		ctx = backend_types.WithTeardown(ctx, &r.teardown)
 		if err := r.engine.DestroyWorkflow(ctx, r.spec, r.taskUUID); err != nil {
 			logger.Error().Err(err).Msg("could not destroy workflow")
 		}

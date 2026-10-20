@@ -16,9 +16,12 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 	kube_core_v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kube_errors "k8s.io/apimachinery/pkg/api/errors"
 	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kube_runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -275,7 +278,7 @@ func TestDestroyWorkflowDeletesStepSecretAfterFailedStart(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = client.CoreV1().Secrets("test-ns").Get(t.Context(), name, kube_meta_v1.GetOptions{})
-	assert.True(t, errors.IsNotFound(err), "step secret should be deleted, got %v", err)
+	assert.True(t, kube_errors.IsNotFound(err), "step secret should be deleted, got %v", err)
 }
 
 func TestWaitStepReturnsOnAlreadyDeletedPod(t *testing.T) {
@@ -286,8 +289,11 @@ func TestWaitStepReturnsOnAlreadyDeletedPod(t *testing.T) {
 
 	podName := createPod(t, client, step, namespace)
 
-	// Delete before WaitStep starts
-	err := client.CoreV1().Pods(namespace).Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{})
+	var teardown atomic.Bool
+	teardown.Store(true)
+	teardownCtx := types.WithTeardown(t.Context(), &teardown)
+	// Delete before WaitStep starts.
+	err := client.CoreV1().Pods(namespace).Delete(teardownCtx, podName, kube_meta_v1.DeleteOptions{})
 	require.NoError(t, err)
 
 	type result struct {
@@ -296,7 +302,7 @@ func TestWaitStepReturnsOnAlreadyDeletedPod(t *testing.T) {
 	}
 	ch := make(chan result, 1)
 	go func() {
-		s, err := engine.WaitStep(t.Context(), step, "task-1")
+		s, err := engine.WaitStep(teardownCtx, step, "task-1")
 		ch <- result{s, err}
 	}()
 
@@ -333,7 +339,9 @@ func TestWaitStepReturnsOnPodDeletedBeforeInformerSync(t *testing.T) {
 		return false, nil, nil
 	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	var teardown atomic.Bool
+	teardown.Store(true)
+	ctx, cancel := context.WithTimeout(types.WithTeardown(t.Context(), &teardown), 3*time.Second)
 	defer cancel()
 
 	state, err := engine.WaitStep(ctx, step, "task-1")
@@ -375,6 +383,384 @@ func TestWaitStepReturnsOnAlreadyTerminatedPod(t *testing.T) {
 	require.NotNil(t, state)
 	assert.True(t, state.Exited)
 	assert.Equal(t, 1, state.ExitCode)
+}
+
+func TestWaitStepDetectsPodLoss(t *testing.T) {
+	tests := []struct {
+		name                   string
+		phase                  kube_core_v1.PodPhase
+		exitCode               int32
+		condition              bool
+		conditionReason        string
+		conditionTransitionAge time.Duration
+		eventOffset            time.Duration
+		eventsListError        bool
+		deleteDuringList       bool
+		deleteAtGet            bool
+		withNode               bool
+		withEvent              bool
+		eventAge               time.Duration
+		wantLost               bool
+		wantConfirmed          bool
+		wantExitCode           int
+		wantEvidence           string
+		wantReason             string
+	}{
+		{name: "pod with DisruptionTarget and Preempt event deleted by guard Get", phase: kube_core_v1.PodFailed, exitCode: 143, condition: true, deleteAtGet: true, withNode: true, withEvent: true, wantLost: true, wantConfirmed: true, wantEvidence: preemptEventReason, wantReason: "DeletionByPodGC"},
+		{name: "failed pod without evidence", phase: kube_core_v1.PodFailed, exitCode: 143, condition: true, conditionReason: "EvictionByEvictionAPI", withNode: true, wantLost: true, wantEvidence: "no matching PreemptScheduled event", wantReason: "EvictionByEvictionAPI"},
+		{name: "disrupted pod after successful termination", phase: kube_core_v1.PodFailed, exitCode: 0, condition: true, wantExitCode: 0},
+		{name: "pod deleted in initial informer list after tail recorded node", phase: kube_core_v1.PodRunning, deleteDuringList: true, withNode: true, withEvent: true, condition: true, wantLost: true, wantConfirmed: true, wantEvidence: preemptEventReason, wantReason: "NotFound"},
+		{name: "succeeded pod", phase: kube_core_v1.PodSucceeded, exitCode: 0, wantExitCode: 0},
+		{name: "old preempt event", phase: kube_core_v1.PodFailed, exitCode: 143, condition: true, deleteAtGet: true, withNode: true, withEvent: true, eventAge: 11 * time.Minute, wantLost: true, wantEvidence: "no matching PreemptScheduled event", wantReason: "DeletionByPodGC"},
+		{name: "deleted pod with no node recorded", phase: kube_core_v1.PodRunning, deleteDuringList: true, wantLost: true, wantEvidence: "node unknown", wantReason: "NotFound"},
+		{name: "event after DisruptionTarget transition is excluded", phase: kube_core_v1.PodFailed, exitCode: 143, condition: true, conditionTransitionAge: time.Minute, eventOffset: 30 * time.Second, deleteAtGet: true, withNode: true, withEvent: true, wantLost: true, wantEvidence: "no matching PreemptScheduled event", wantReason: "DeletionByPodGC"},
+		{name: "event nine minutes before DisruptionTarget transition is included", phase: kube_core_v1.PodFailed, exitCode: 143, condition: true, conditionTransitionAge: 20 * time.Minute, eventOffset: -9 * time.Minute, deleteAtGet: true, withNode: true, withEvent: true, wantLost: true, wantConfirmed: true, wantEvidence: preemptEventReason, wantReason: "DeletionByPodGC"},
+		{name: "event list error is returned as unconfirmed evidence", phase: kube_core_v1.PodFailed, exitCode: 143, condition: true, deleteAtGet: true, withNode: true, eventsListError: true, wantLost: true, wantEvidence: "events API unavailable", wantReason: "DeletionByPodGC"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := fake.NewClientset()
+			engine := makeEngine(client)
+			step := makeStep("pod-loss-" + strings.ReplaceAll(test.name, " ", "-"))
+			podName, err := stepToPodName(step)
+			require.NoError(t, err)
+			node := "node-1"
+			if !test.withNode {
+				node = ""
+			}
+			conditionTransition := time.Now().Add(-test.conditionTransitionAge)
+			condition := []kube_core_v1.PodCondition(nil)
+			if test.condition {
+				reason := test.conditionReason
+				if reason == "" {
+					reason = "DeletionByPodGC"
+				}
+				condition = []kube_core_v1.PodCondition{{Type: kube_core_v1.DisruptionTarget, Status: kube_core_v1.ConditionTrue, Reason: reason, LastTransitionTime: kube_meta_v1.NewTime(conditionTransition)}}
+			}
+			pod := &kube_core_v1.Pod{
+				Name:      podName,
+				Namespace: "test-ns",
+				Spec:      kube_core_v1.PodSpec{NodeName: node},
+				Status: kube_core_v1.PodStatus{
+					Phase:             test.phase,
+					Conditions:        condition,
+					ContainerStatuses: []kube_core_v1.ContainerStatus{{Name: podName, State: kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: test.exitCode}}}},
+				},
+			}
+			_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
+			require.NoError(t, err)
+			if test.withNode {
+				engine.recordNode(pod)
+			}
+			if test.withEvent {
+				eventAt := time.Now().Add(-test.eventAge)
+				if test.eventOffset != 0 {
+					eventAt = conditionTransition.Add(test.eventOffset)
+				} else if test.condition && test.eventAge == 0 {
+					eventAt = conditionTransition.Add(-time.Second)
+				}
+				_, err = client.CoreV1().Events("default").Create(t.Context(), &kube_core_v1.Event{Name: "preempt", Namespace: "default", InvolvedObject: kube_core_v1.ObjectReference{Kind: "Node", Name: "node-1"}, Reason: preemptEventReason, Source: kube_core_v1.EventSource{Component: preemptEventSource}, EventTime: kube_meta_v1.NewMicroTime(eventAt)}, kube_meta_v1.CreateOptions{})
+				require.NoError(t, err)
+			}
+			if test.eventsListError {
+				client.PrependReactor("list", "events", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+					return true, nil, errors.New("events API unavailable")
+				})
+			}
+			if test.deleteAtGet {
+				client.PrependReactor("get", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
+					if err := client.Tracker().Delete(action.GetResource(), "test-ns", podName); err != nil {
+						return true, nil, err
+					}
+					return false, nil, nil
+				})
+			}
+			if test.deleteDuringList {
+				client.PrependReactor("list", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
+					if err := client.Tracker().Update(action.GetResource(), pod, "test-ns"); err != nil {
+						return true, nil, err
+					}
+					if err := client.Tracker().Delete(action.GetResource(), "test-ns", podName); err != nil {
+						return true, nil, err
+					}
+					return false, nil, nil
+				})
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			state, err := engine.WaitStep(ctx, step, "task-1")
+			if test.wantLost {
+				var loss *types.PodLossError
+				require.ErrorAs(t, err, &loss)
+				assert.Equal(t, node, loss.Node)
+				assert.Equal(t, test.wantReason, loss.Reason)
+				assert.Equal(t, test.wantConfirmed, loss.Confirmed)
+				assert.Equal(t, test.wantEvidence, loss.Evidence)
+				assert.Nil(t, state)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			assert.Equal(t, test.wantExitCode, state.ExitCode)
+		})
+	}
+}
+
+func TestWaitStepReturnsOnDisruptionTargetUpdate(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("disruption-update")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	pod := &kube_core_v1.Pod{
+		Name:      podName,
+		Namespace: "test-ns",
+		Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
+		Status: kube_core_v1.PodStatus{
+			Phase: kube_core_v1.PodRunning,
+			ContainerStatuses: []kube_core_v1.ContainerStatus{{
+				Name:  podName,
+				State: kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}},
+			}},
+		},
+	}
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	disrupted := func(state kube_core_v1.ContainerState) *kube_core_v1.Pod {
+		return &kube_core_v1.Pod{
+			Name:      podName,
+			Namespace: "test-ns",
+			Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
+			Status: kube_core_v1.PodStatus{
+				Phase: kube_core_v1.PodRunning,
+				Conditions: []kube_core_v1.PodCondition{{
+					Type:               kube_core_v1.DisruptionTarget,
+					Status:             kube_core_v1.ConditionTrue,
+					Reason:             "DeletionByPodGC",
+					LastTransitionTime: kube_meta_v1.Now(),
+				}},
+				ContainerStatuses: []kube_core_v1.ContainerStatus{{Name: podName, State: state}},
+			},
+		}
+	}
+	// The guard Get runs after the informer's initial List, so an update after it is an Update event.
+	guarded := make(chan struct{})
+	var guardOnce sync.Once
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		guardOnce.Do(func() { close(guarded) })
+		return false, nil, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	type outcome struct {
+		state *types.State
+		err   error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		state, err := engine.WaitStep(ctx, step, "task-1")
+		result <- outcome{state, err}
+	}()
+	<-guarded
+	pods := kube_core_v1.SchemeGroupVersion.WithResource("pods")
+	require.NoError(t, client.Tracker().Update(pods, disrupted(kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}}), "test-ns"))
+	// The container still exits 0 inside the drain's grace window: the step stays green.
+	require.NoError(t, client.Tracker().Update(pods, disrupted(kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}}), "test-ns"))
+	select {
+	case got := <-result:
+		require.NoError(t, got.err)
+		assert.Equal(t, 0, got.state.ExitCode)
+	case <-ctx.Done():
+		t.Fatal("WaitStep did not return after the DisruptionTarget update")
+	}
+}
+
+// A disruption whose container exits non-zero is a loss once the final Get sees the terminated state.
+func TestWaitStepReturnsLossOnDisruptionTargetUpdate(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("disruption-update-lost")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	running := &kube_core_v1.Pod{
+		Name:      podName,
+		Namespace: "test-ns",
+		Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
+		Status:    kube_core_v1.PodStatus{Phase: kube_core_v1.PodRunning},
+	}
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), running, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	guarded := make(chan struct{})
+	var guardOnce sync.Once
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		guardOnce.Do(func() { close(guarded) })
+		return false, nil, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.WaitStep(ctx, step, "task-1")
+		result <- err
+	}()
+	<-guarded
+	evicted := running.DeepCopy()
+	evicted.Status.Conditions = []kube_core_v1.PodCondition{{
+		Type: kube_core_v1.DisruptionTarget, Status: kube_core_v1.ConditionTrue,
+		Reason: "EvictionByEvictionAPI", LastTransitionTime: kube_meta_v1.Now(),
+	}}
+	evicted.Status.ContainerStatuses = []kube_core_v1.ContainerStatus{{
+		Name: podName, State: kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 143}},
+	}}
+	require.NoError(t, client.Tracker().Update(kube_core_v1.SchemeGroupVersion.WithResource("pods"), evicted, "test-ns"))
+	select {
+	case err := <-result:
+		var loss *types.PodLossError
+		require.ErrorAs(t, err, &loss)
+		assert.Equal(t, "EvictionByEvictionAPI", loss.Reason)
+	case <-ctx.Done():
+		t.Fatal("WaitStep did not return after the DisruptionTarget update")
+	}
+}
+
+func TestWaitStepUsesInformerExitZeroOnFinalNotFound(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("final-not-found-exit-zero")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	pod := &kube_core_v1.Pod{
+		Name:      podName,
+		Namespace: "test-ns",
+		Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
+		Status: kube_core_v1.PodStatus{
+			Phase: kube_core_v1.PodFailed,
+			Conditions: []kube_core_v1.PodCondition{{
+				Type:               kube_core_v1.DisruptionTarget,
+				Status:             kube_core_v1.ConditionTrue,
+				Reason:             "DeletionByPodGC",
+				LastTransitionTime: kube_meta_v1.Now(),
+			}},
+			ContainerStatuses: []kube_core_v1.ContainerStatus{{
+				Name: podName,
+				State: kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{
+					ExitCode: 0,
+				}},
+			}},
+		},
+	}
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	client.PrependReactor("get", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
+		if err := client.Tracker().Delete(action.GetResource(), "test-ns", podName); err != nil {
+			return true, nil, err
+		}
+		return true, nil, kube_errors.NewNotFound(action.GetResource().GroupResource(), podName)
+	})
+	state, err := engine.WaitStep(t.Context(), step, "task-1")
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, 0, state.ExitCode)
+}
+
+func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("pod-running-initial")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	pod := &kube_core_v1.Pod{
+		Name:      podName,
+		Namespace: "test-ns",
+		Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
+		Status:    kube_core_v1.PodStatus{Phase: kube_core_v1.PodRunning},
+	}
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, engine.waitPodUp(ctx, step, podName))
+	value, ok := engine.nodes.Load(podName)
+	require.True(t, ok)
+	assert.Equal(t, "node-1", value)
+
+	_, err = client.CoreV1().Events("default").Create(t.Context(), &kube_core_v1.Event{
+		Name:           "preempt",
+		Namespace:      "default",
+		InvolvedObject: kube_core_v1.ObjectReference{Kind: "Node", Name: "node-1"},
+		Reason:         preemptEventReason, Source: kube_core_v1.EventSource{Component: preemptEventSource},
+		EventTime: kube_meta_v1.NewMicroTime(time.Now()),
+	}, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	deleted := false
+	client.PrependReactor("list", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
+		if deleted {
+			return false, nil, nil
+		}
+		deleted = true
+		if err := client.Tracker().Delete(action.GetResource(), "test-ns", podName); err != nil {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
+	var teardown atomic.Bool
+	ctx, cancel = context.WithTimeout(types.WithTeardown(t.Context(), &teardown), 3*time.Second)
+	defer cancel()
+	state, err := engine.WaitStep(ctx, step, "task-1")
+	var loss *types.PodLossError
+	require.ErrorAs(t, err, &loss)
+	assert.Nil(t, state)
+	assert.Equal(t, "node-1", loss.Node)
+	assert.True(t, loss.Confirmed)
+}
+
+// TestDestroyWorkflowDeletesServicePodDuringTeardown keeps missing pods green during cleanup.
+func TestDestroyWorkflowDeletesServicePodDuringTeardown(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("service-teardown")
+	step.Type = types.StepTypeService
+	step.OrgID = 1
+	serviceName, err := stepToPodName(step)
+	require.NoError(t, err)
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), &kube_core_v1.Pod{
+		Name:      serviceName,
+		Namespace: "test-ns",
+		Status:    kube_core_v1.PodStatus{Phase: kube_core_v1.PodRunning},
+	}, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = client.CoreV1().Services("test-ns").Create(t.Context(), &kube_core_v1.Service{Name: "wp-hsvc-task", Namespace: "test-ns"}, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	volumeName, err := volumeName("task")
+	require.NoError(t, err)
+	_, err = client.CoreV1().PersistentVolumeClaims("test-ns").Create(t.Context(), &kube_core_v1.PersistentVolumeClaim{Name: volumeName, Namespace: "test-ns"}, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	conf := &types.Config{Volume: "task", Stages: []*types.Stage{{Steps: []*types.Step{step}}}}
+	var teardown atomic.Bool
+	ctx := types.WithTeardown(t.Context(), &teardown)
+	teardown.Store(true)
+	require.NoError(t, engine.DestroyWorkflow(ctx, conf, "task"))
+	state, err := engine.WaitStep(ctx, step, "task")
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, 0, state.ExitCode)
+}
+
+func TestWaitStepTreatsNotFoundAsGreenDuringTeardown(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("teardown-not-found")
+	podName := createPod(t, client, step, "test-ns")
+	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+	var teardown atomic.Bool
+	teardown.Store(true)
+	ctx, cancel := context.WithTimeout(types.WithTeardown(t.Context(), &teardown), 3*time.Second)
+	defer cancel()
+	state, err := engine.WaitStep(ctx, step, "task-1")
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, 0, state.ExitCode)
 }
 
 func TestWaitStepNoGoroutineLeak(t *testing.T) {
@@ -426,8 +812,11 @@ func TestStartPodRetriesResourceQuotaConflict(t *testing.T) {
 	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
 		creates++
 		if creates == 1 {
-			return true, nil, errors.NewConflict(
-				kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+			return true, nil, kube_errors.NewConflict(
+				kube_core_v1.Resource("resourcequotas"),
+				"spend-cap",
+				errors.New("the object has been modified"),
+			)
 		}
 		return false, nil, nil
 	})
@@ -446,12 +835,15 @@ func TestStartPodFailsAfterPersistentConflict(t *testing.T) {
 	creates := 0
 	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
 		creates++
-		return true, nil, errors.NewConflict(
-			kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+		return true, nil, kube_errors.NewConflict(
+			kube_core_v1.Resource("resourcequotas"),
+			"spend-cap",
+			errors.New("the object has been modified"),
+		)
 	})
 
 	_, err := startPod(t.Context(), engine, step, BackendOptions{}, "task-409")
-	assert.True(t, errors.IsConflict(err), "want conflict, got %v", err)
+	assert.True(t, kube_errors.IsConflict(err), "want conflict, got %v", err)
 	assert.Greater(t, creates, 1)
 	assert.LessOrEqual(t, creates, 5)
 }
@@ -463,10 +855,10 @@ func TestStartPodDoesNotRetryOtherErrors(t *testing.T) {
 	creates := 0
 	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
 		creates++
-		return true, nil, errors.NewForbidden(kube_core_v1.Resource("pods"), "x", fmt.Errorf("exceeded quota"))
+		return true, nil, kube_errors.NewForbidden(kube_core_v1.Resource("pods"), "x", fmt.Errorf("exceeded quota"))
 	})
 
 	_, err := startPod(t.Context(), engine, step, BackendOptions{}, "task-403")
-	assert.True(t, errors.IsForbidden(err))
+	assert.True(t, kube_errors.IsForbidden(err))
 	assert.Equal(t, 1, creates)
 }

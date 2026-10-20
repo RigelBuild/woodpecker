@@ -14,6 +14,24 @@
 
 package types
 
+import (
+	"context"
+	"sync/atomic"
+)
+
+type teardownContextKey struct{}
+
+// WithTeardown returns a context that reports teardown while flag is set.
+func WithTeardown(ctx context.Context, flag *atomic.Bool) context.Context {
+	return context.WithValue(ctx, teardownContextKey{}, flag)
+}
+
+// InTeardown reports whether ctx carries a set teardown flag.
+func InTeardown(ctx context.Context) bool {
+	flag, ok := ctx.Value(teardownContextKey{}).(*atomic.Bool)
+	return ok && flag != nil && flag.Load()
+}
+
 // Config defines the runtime configuration of a workflow.
 type Config struct {
 	Stages  []*Stage  `json:"pipeline"` // workflow stages
