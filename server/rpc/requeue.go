@@ -72,11 +72,21 @@ func hasUnfinishedStep(steps []*model.Step) bool {
 }
 
 // reserveAndRequeue reports false when the workflow must be finalized instead.
-func (s *RPC) reserveAndRequeue(c context.Context, workflow *model.Workflow, currentPipeline *model.Pipeline, repo *model.Repo, agentID int64, strWorkflowID string, state rpc.WorkflowState) (bool, error) {
-	if err := s.scheduler.Reserve(c, strWorkflowID, agentID, false); errors.Is(err, queue.ErrNotFound) {
+func (s *RPC) reserveAndRequeue(
+	c context.Context,
+	workflow *model.Workflow,
+	currentPipeline *model.Pipeline,
+	repo *model.Repo,
+	agentID int64,
+	strWorkflowID string,
+	state rpc.WorkflowState,
+) (bool, error) {
+	err := s.scheduler.Reserve(c, strWorkflowID, agentID, false)
+	if errors.Is(err, queue.ErrNotFound) {
 		log.Debug().Err(err).Str("workflow_id", strWorkflowID).Msg("done: workflow left the queue before requeue")
 		return false, nil
-	} else if err != nil {
+	}
+	if err != nil {
 		log.Error().Err(err).Str("workflow_id", strWorkflowID).Msg("done: cannot reserve workflow, finalizing it")
 		return false, nil
 	}
