@@ -83,7 +83,9 @@ func startVolume(ctx context.Context, engine *kube, name, namespace string) (*ku
 	}
 
 	log.Trace().Msgf("creating volume: %s", pvc.Name)
-	return engine.client.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, kube_meta_v1.CreateOptions{})
+	return createRetryOnConflict(ctx, func() (*kube_core_v1.PersistentVolumeClaim, error) {
+		return engine.client.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, kube_meta_v1.CreateOptions{})
+	})
 }
 
 func stopVolume(ctx context.Context, engine *kube, name, namespace string, deleteOpts kube_meta_v1.DeleteOptions) error {

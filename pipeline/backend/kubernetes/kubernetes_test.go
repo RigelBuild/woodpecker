@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -427,7 +428,8 @@ func TestStartPodRetriesResourceQuotaConflict(t *testing.T) {
 		creates++
 		if creates == 1 {
 			return true, nil, errors.NewConflict(
-				kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+				kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"),
+			)
 		}
 		return false, nil, nil
 	})
@@ -439,21 +441,95 @@ func TestStartPodRetriesResourceQuotaConflict(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func quotaConflict() error {
+	return errors.NewConflict(
+		kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"),
+	)
+}
+
 func TestStartPodFailsAfterPersistentConflict(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := fake.NewClientset()
+		engine := makeEngine(client)
+		creates := 0
+		client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+			creates++
+			return true, nil, quotaConflict()
+		})
+
+		_, err := startPod(t.Context(), engine, makeStep("quota-409-02"), BackendOptions{}, "task-409")
+		assert.True(t, errors.IsConflict(err), "want conflict, got %v", err)
+		assert.Equal(t, quotaConflictBackoff.Steps, creates)
+	})
+}
+
+func TestStartPodStopsRetryingWhenCanceled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := fake.NewClientset()
+		engine := makeEngine(client)
+		ctx, cancel := context.WithCancelCause(t.Context())
+		creates := 0
+		client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+			creates++
+			cancel(nil)
+			return true, nil, quotaConflict()
+		})
+
+		_, err := startPod(ctx, engine, makeStep("quota-409-04"), BackendOptions{}, "task-409")
+		assert.True(t, errors.IsConflict(err), "want conflict, got %v", err)
+		assert.Equal(t, 1, creates)
+	})
+}
+
+func TestStartSecretsRetryResourceQuotaConflict(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
-	step := makeStep("quota-409-02")
 	creates := 0
-	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+	client.PrependReactor("create", "secrets", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
 		creates++
-		return true, nil, errors.NewConflict(
-			kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+		if creates%2 == 1 {
+			return true, nil, quotaConflict()
+		}
+		return false, nil, nil
 	})
+	step := makeStep("quota-409-05")
+	step.Image = "ghcr.io/example/image:1"
+	step.AuthConfig.Username, step.AuthConfig.Password = "user", "pass"
+	step.SecretMapping = map[string]string{"TOKEN": "value"}
 
-	_, err := startPod(t.Context(), engine, step, BackendOptions{}, "task-409")
-	assert.True(t, errors.IsConflict(err), "want conflict, got %v", err)
-	assert.Greater(t, creates, 1)
-	assert.LessOrEqual(t, creates, 5)
+	require.NoError(t, startRegistrySecret(t.Context(), engine, step))
+	require.NoError(t, startStepSecret(t.Context(), engine, step))
+	assert.Equal(t, 4, creates)
+	secrets, err := client.CoreV1().Secrets("test-ns").List(t.Context(), kube_meta_v1.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, secrets.Items, 2)
+}
+
+func TestSetupWorkflowRetriesResourceQuotaConflict(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	engine.config.VolumeSize = "1Gi"
+	creates := map[string]int{}
+	for _, resource := range []string{"persistentvolumeclaims", "services"} {
+		client.PrependReactor("create", resource, func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+			creates[resource]++
+			if creates[resource] == 1 {
+				return true, nil, errors.NewConflict(
+					kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"),
+				)
+			}
+			return false, nil, nil
+		})
+	}
+	conf := &types.Config{
+		Volume: "wp-vol:/woodpecker",
+		Stages: []*types.Stage{{Steps: []*types.Step{makeStep("quota-409-03")}}},
+	}
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, "task-409"))
+	assert.Equal(t, map[string]int{"persistentvolumeclaims": 2, "services": 2}, creates)
+	_, err := client.CoreV1().PersistentVolumeClaims("test-ns").Get(t.Context(), "wp-vol", kube_meta_v1.GetOptions{})
+	require.NoError(t, err)
 }
 
 func TestStartPodDoesNotRetryOtherErrors(t *testing.T) {

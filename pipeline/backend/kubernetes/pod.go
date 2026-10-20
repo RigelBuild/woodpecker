@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/common"
@@ -786,15 +785,9 @@ func startPod(ctx context.Context, engine *kube, step *types.Step, options Backe
 	}
 
 	log.Trace().Msgf("creating pod: %s", pod.Name)
-	// Concurrent creates race on the namespace ResourceQuota's usage update; the apiserver
-	// answers 409 and the create is safe to repeat. Bounded by DefaultBackoff (4 attempts).
-	var created *kube_core_v1.Pod
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		var createErr error
-		created, createErr = engine.client.CoreV1().Pods(engineConfig.GetNamespace(step.OrgID)).Create(ctx, pod, kube_meta_v1.CreateOptions{})
-		return createErr
+	return createRetryOnConflict(ctx, func() (*kube_core_v1.Pod, error) {
+		return engine.client.CoreV1().Pods(engineConfig.GetNamespace(step.OrgID)).Create(ctx, pod, kube_meta_v1.CreateOptions{})
 	})
-	return created, err
 }
 
 func stopPod(ctx context.Context, engine *kube, step *types.Step, deleteOpts kube_meta_v1.DeleteOptions) error {
