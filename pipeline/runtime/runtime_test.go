@@ -236,6 +236,34 @@ func TestWorkflowConfirmedPodLossCancelsWithEvictedCause(t *testing.T) {
 	engine.AssertNumberOfCalls(t, "DestroyStep", 1)
 }
 
+// Without WithCancelCause the workflow cannot be canceled, so a confirmed loss must not report a cancel.
+func TestWorkflowConfirmedPodLossWithoutCancelFuncFails(t *testing.T) {
+	engine := mocks.NewMockBackend(t)
+	step := cmdStep("lost")
+	loss := &backend_types.PodLossError{Pod: "lost", Node: "spot", Confirmed: true}
+	engine.On("SetupWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("StartStep", mock.Anything, step, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, step, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, step, mock.Anything).Return(nil, loss)
+	engine.On("DestroyStep", mock.Anything, step, mock.Anything).Return(nil).Once()
+	tracer := newTestTracer(t)
+	r := New(
+		&backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{step}}}},
+		engine,
+		WithTracer(tracer),
+		WithLogger(newTestLogger(t)),
+	)
+
+	err := r.Run(t.Context())
+
+	assert.ErrorIs(t, err, backend_types.ErrStepPodLost)
+	assert.NotErrorIs(t, err, pipeline_errors.ErrCancel)
+	lost := findLastTraceByName(getTracerStates(tracer), "lost")
+	require.NotNil(t, lost)
+	assert.NotErrorIs(t, lost.CurrStepState.Error, pipeline_errors.ErrCancel)
+}
+
 func TestWorkflowNormalTeardownWithServiceAndDetachedStepsSucceeds(t *testing.T) {
 	r := New(
 		&backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{

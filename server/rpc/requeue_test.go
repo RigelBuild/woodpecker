@@ -277,6 +277,21 @@ func TestDoneEvictedRequeue(t *testing.T) {
 		assert.NotEqual(t, "step pod lost to a confirmed Azure Spot preemption; retry cap reached", row.Error)
 		assert.False(t, e.queued(wf.ID))
 	})
+
+	t.Run("agent shutdown with eviction past the eviction cap uses the agent-loss cap", func(t *testing.T) {
+		e := newRequeueEnv(t, time.Hour)
+		wf := e.addWorkflow(1, steps(2))
+		e.start(wf, 1, maxEvictionRequeues, model.StatusSuccess, model.StatusRunning)
+
+		require.NoError(t, e.rpc.Done(agentCtx(t, 1), strconv.FormatInt(wf.ID, 10), rpc.WorkflowState{
+			Started: 100, Finished: 200, Canceled: true, AgentShutdown: true, Evicted: true,
+		}))
+
+		row := e.workflow(wf.ID)
+		assert.Equal(t, model.StatusPending, row.State)
+		assert.Equal(t, maxEvictionRequeues+1, row.Attempts)
+		assert.True(t, e.queued(wf.ID))
+	})
 }
 
 func TestDoneAgentShutdownRequeue(t *testing.T) {
@@ -360,6 +375,25 @@ func TestDoneAgentShutdownRequeue(t *testing.T) {
 			detached: true,
 			steps:    []model.StatusValue{model.StatusSuccess, model.StatusRunning},
 			want:     model.StatusSuccess,
+		},
+		{
+			name:     "evicted, canceled pipeline",
+			state:    rpc.WorkflowState{Started: 100, Finished: 200, Canceled: true, Evicted: true},
+			pipeline: model.StatusKilled,
+			steps:    []model.StatusValue{model.StatusSuccess, model.StatusRunning},
+			want:     model.StatusKilled,
+		},
+		{
+			name:  "evicted, failed step with a running on_failure step",
+			state: rpc.WorkflowState{Started: 100, Finished: 200, Canceled: true, Evicted: true},
+			steps: []model.StatusValue{model.StatusFailure, model.StatusRunning},
+			want:  model.StatusKilled,
+		},
+		{
+			name:  "evicted, all steps finished green",
+			state: rpc.WorkflowState{Started: 100, Finished: 200, Canceled: true, Evicted: true},
+			steps: []model.StatusValue{model.StatusSuccess, model.StatusSuccess},
+			want:  model.StatusSuccess,
 		},
 	}
 	for _, tc := range noRequeue {

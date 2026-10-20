@@ -178,13 +178,14 @@ func (r *Runtime) completeStep(runnerCtx context.Context, step *backend_types.St
 	if err != nil {
 		if errors.Is(err, backend_types.ErrStepPodLost) {
 			var podLoss *backend_types.PodLossError
-			confirmed := errors.As(err, &podLoss) && podLoss.Confirmed
+			// Without a cancel func (the CLI) a confirmed loss stays a plain failure.
+			evicted := errors.As(err, &podLoss) && podLoss.Confirmed && r.cancel != nil
 			cleanupErr := r.engine.DestroyStep(runnerCtx, step, r.taskUUID)
 			lossErr := errors.Join(err, cleanupErr)
-			if confirmed && r.cancel != nil {
+			if evicted {
 				r.cancel(pipeline_errors.ErrEvicted)
 			}
-			if confirmed || r.canceled() {
+			if evicted || r.canceled() {
 				state := &backend_types.State{Exited: true, ExitCode: 1, Error: pipeline_errors.ErrCancel, Started: startTime}
 				return state, errors.Join(pipeline_errors.ErrCancel, lossErr)
 			}

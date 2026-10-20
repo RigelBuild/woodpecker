@@ -525,7 +525,7 @@ func (s *RPC) Done(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 	}
 
 	// A re-run would repeat side effects, so finished steps decide the result.
-	if state.AgentShutdown && !hasUnfinishedStep(workflow.Children) {
+	if (state.AgentShutdown || state.Evicted) && !hasUnfinishedStep(workflow.Children) {
 		state.Canceled = false
 	}
 
