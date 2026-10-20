@@ -43,6 +43,7 @@ type (
 		Error         string `json:"error"`
 		Canceled      bool   `json:"canceled"`
 		AgentShutdown bool   `json:"agent_shutdown"`
+		Evicted       bool   `json:"evicted"`
 	}
 
 	// Workflow defines the workflow execution details.

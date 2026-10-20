@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/dummy"
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types/mocks"
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/state"
@@ -196,6 +199,89 @@ func TestWorkflowCloneBuildDeploy(t *testing.T) {
 		assert.Equal(t, 0, last.CurrStepState.ExitCode, "%s should exit with code 0", name)
 		assert.False(t, last.CurrStepState.OOMKilled, "%s should not be OOM killed", name)
 	}
+}
+
+func TestWorkflowConfirmedPodLossCancelsWithEvictedCause(t *testing.T) {
+	engine := mocks.NewMockBackend(t)
+	step := cmdStep("lost")
+	loss := &backend_types.PodLossError{Pod: "lost", Node: "spot", Confirmed: true}
+	engine.On("SetupWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("StartStep", mock.Anything, step, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, step, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, step, mock.Anything).Return(nil, loss)
+	engine.On("DestroyStep", mock.Anything, step, mock.Anything).Return(nil).Once()
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	tracer := newTestTracer(t)
+	r := New(
+		&backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{step}}}},
+		engine,
+		WithContext(ctx),
+		WithCancelCause(cancel),
+		WithTracer(tracer),
+		WithLogger(newTestLogger(t)),
+	)
+
+	err := r.Run(t.Context())
+
+	assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+	assert.ErrorIs(t, context.Cause(ctx), pipeline_errors.ErrEvicted)
+	traces := getTracerStates(tracer)
+	lost := findLastTraceByName(traces, "lost")
+	require.NotNil(t, lost)
+	assert.ErrorIs(t, lost.CurrStepState.Error, pipeline_errors.ErrCancel)
+	assert.Equal(t, 1, lost.CurrStepState.ExitCode)
+	engine.AssertNumberOfCalls(t, "DestroyStep", 1)
+}
+
+func TestWorkflowNormalTeardownWithServiceAndDetachedStepsSucceeds(t *testing.T) {
+	r := New(
+		&backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{
+			cmdStep("service", withUnboundedService()),
+			cmdStep("detached", withUnboundedDetached()),
+			cmdStep("build"),
+		}}}},
+		dummy.New(),
+		WithTracer(newTestTracer(t)),
+		WithLogger(newTestLogger(t)),
+	)
+
+	require.NoError(t, r.Run(t.Context()))
+}
+
+func TestWorkflowUnconfirmedPodLossDoesNotSetEvictedCause(t *testing.T) {
+	engine := mocks.NewMockBackend(t)
+	step := cmdStep("lost")
+	loss := &backend_types.PodLossError{Pod: "lost", Reason: "NotFound"}
+	engine.On("SetupWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("StartStep", mock.Anything, step, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, step, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, step, mock.Anything).Return(nil, loss)
+	engine.On("DestroyStep", mock.Anything, step, mock.Anything).Return(nil).Once()
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	tracer := newTestTracer(t)
+	r := New(
+		&backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{step}}}},
+		engine,
+		WithContext(ctx),
+		WithCancelCause(cancel),
+		WithTracer(tracer),
+		WithLogger(newTestLogger(t)),
+	)
+
+	assert.ErrorIs(t, r.Run(t.Context()), backend_types.ErrStepPodLost)
+	assert.NoError(t, context.Cause(ctx))
+	assert.ErrorIs(t, r.Err(), backend_types.ErrStepPodLost)
+	assert.NotErrorIs(t, r.Err(), pipeline_errors.ErrCancel)
+	lost := findLastTraceByName(getTracerStates(tracer), "lost")
+	require.NotNil(t, lost)
+	assert.ErrorIs(t, lost.CurrStepState.Error, backend_types.ErrStepPodLost)
+	assert.NotErrorIs(t, lost.CurrStepState.Error, pipeline_errors.ErrCancel)
 }
 
 func TestWorkflowWithServiceStep(t *testing.T) {
