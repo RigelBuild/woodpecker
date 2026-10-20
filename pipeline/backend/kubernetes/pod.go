@@ -785,7 +785,7 @@ func startPod(ctx context.Context, engine *kube, step *types.Step, options Backe
 	}
 
 	log.Trace().Msgf("creating pod: %s", pod.Name)
-	return createRetryOnConflict(func() (*kube_core_v1.Pod, error) {
+	return createRetryOnConflict(ctx, func() (*kube_core_v1.Pod, error) {
 		return engine.client.CoreV1().Pods(engineConfig.GetNamespace(step.OrgID)).Create(ctx, pod, kube_meta_v1.CreateOptions{})
 	})
 }

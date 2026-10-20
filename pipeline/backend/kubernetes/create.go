@@ -15,10 +15,11 @@
 package kubernetes
 
 import (
+	"context"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/retry"
 )
 
 // Concurrent creates race on the namespace ResourceQuota's usage update; the apiserver
@@ -32,12 +33,23 @@ var quotaConflictBackoff = wait.Backoff{
 }
 
 // createRetryOnConflict runs create, repeating it only while it returns a conflict.
-func createRetryOnConflict[T any](create func() (T, error)) (T, error) {
+// It stops waiting when ctx is canceled and then returns the last conflict.
+func createRetryOnConflict[T any](ctx context.Context, create func() (T, error)) (T, error) {
 	var created T
-	err := retry.RetryOnConflict(quotaConflictBackoff, func() error {
-		var createErr error
-		created, createErr = create()
-		return createErr
+	var lastErr error
+	err := wait.ExponentialBackoffWithContext(ctx, quotaConflictBackoff, func(context.Context) (bool, error) {
+		created, lastErr = create()
+		switch {
+		case lastErr == nil:
+			return true, nil
+		case errors.IsConflict(lastErr):
+			return false, nil
+		default:
+			return false, lastErr
+		}
 	})
+	if wait.Interrupted(err) && lastErr != nil {
+		err = lastErr
+	}
 	return created, err
 }
