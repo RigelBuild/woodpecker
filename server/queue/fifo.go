@@ -535,10 +535,11 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 
 	group := task.ConcurrencyGroup
 
-	// count tasks of the same group that already occupy a running slot.
+	// count tasks of the same group that already occupy a running slot. A dead
+	// task handed out only to be skipped never runs, so it holds no slot.
 	running := 0
 	for _, e := range q.running {
-		if e.item.ConcurrencyGroup == group {
+		if e.item.ConcurrencyGroup == group && !isDeadTask(e.item) {
 			running++
 		}
 	}

@@ -773,6 +773,54 @@ func TestFifoConcurrency(t *testing.T) {
 		}
 	})
 
+	t.Run("handed-out dead dependent does not hold a running slot", func(t *testing.T) {
+		// Pipeline 1's B is dead (its dependency A failed) and has been handed
+		// out to be skipped, but not yet marked done. It must not count as the
+		// group's running task, so pipeline 2's A2 can start.
+		taskA := &model.Task{ID: "1100", PipelineID: 1, Created: 100, ConcurrencyGroup: "repo:fleet2", ConcurrencyLimit: 1}
+		taskB := &model.Task{
+			ID:               "1101",
+			PipelineID:       1,
+			Created:          100,
+			Name:             "redeploy",
+			ConcurrencyGroup: "repo:fleet2",
+			ConcurrencyLimit: 1,
+			Dependencies:     []string{"1100"},
+			DepStatus:        make(map[string]model.StatusValue),
+		}
+		taskA2 := &model.Task{ID: "1102", PipelineID: 2, Created: 200, ConcurrencyGroup: "repo:fleet2", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{taskA, taskB, taskA2}))
+		waitForProcess()
+
+		onlyA := func(task *model.Task) (bool, int) { return task.ID == "1100", 1 }
+		gotA, err := q.Poll(ctx, 1, onlyA)
+		assert.NoError(t, err)
+		assert.Equal(t, "1100", gotA.ID)
+		assert.NoError(t, q.Done(ctx, gotA.ID, model.StatusFailure))
+		waitForProcess()
+
+		onlyB := func(task *model.Task) (bool, int) { return task.ID == "1101", 1 }
+		gotB, err := q.Poll(ctx, 2, onlyB)
+		assert.NoError(t, err)
+		assert.Equal(t, "1101", gotB.ID)
+		waitForProcess()
+
+		pollCtx, pollCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		gotA2, err := q.Poll(pollCtx, 3, filterFnTrue)
+		pollCancel()
+		assert.NoError(t, err, "a handed-out dead dependent must not hold the running slot")
+
+		assert.NoError(t, q.Done(ctx, gotB.ID, model.StatusSkipped))
+		if err == nil {
+			assert.Equal(t, "1102", gotA2.ID)
+			assert.NoError(t, q.Done(ctx, gotA2.ID, model.StatusSuccess))
+		} else {
+			assert.NoError(t, q.ErrorAtOnce(ctx, []string{"1102"}, fmt.Errorf("test cleanup")))
+		}
+		waitForProcess()
+	})
+
 	t.Run("preserves instantiation order over readiness", func(t *testing.T) {
 		// Pipeline 1's deploy (taskA) waits on its own slow check (dep), while
 		// pipeline 2's deploy (taskB) is immediately ready. taskB must still
