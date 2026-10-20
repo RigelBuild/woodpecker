@@ -427,7 +427,8 @@ func TestStartPodRetriesResourceQuotaConflict(t *testing.T) {
 		creates++
 		if creates == 1 {
 			return true, nil, errors.NewConflict(
-				kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+				kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"),
+			)
 		}
 		return false, nil, nil
 	})
@@ -447,7 +448,8 @@ func TestStartPodFailsAfterPersistentConflict(t *testing.T) {
 	client.PrependReactor("create", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
 		creates++
 		return true, nil, errors.NewConflict(
-			kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"))
+			kube_core_v1.Resource("resourcequotas"), "spend-cap", fmt.Errorf("the object has been modified"),
+		)
 	})
 
 	_, err := startPod(t.Context(), engine, step, BackendOptions{}, "task-409")
