@@ -255,7 +255,15 @@ func (e *kube) SetupWorkflow(ctx context.Context, conf *types.Config, taskUUID s
 	dropLocalPathsInsideWorkspace(conf)
 
 	log.Trace().Str("taskUUID", taskUUID).Msgf("Creating workflow volume")
-	_, err := startVolume(ctx, e, conf.Volume, namespace)
+	err := startVolume(ctx, e, conf.Volume, namespace)
+	if kube_errors.IsAlreadyExists(err) {
+		// The server requeued this workflow after losing its agent; that attempt's objects remain.
+		log.Warn().Str("taskUUID", taskUUID).Msg("removing objects left by an earlier attempt of this workflow")
+		if err := e.recreateAfterLostAttempt(ctx, conf, namespace, taskUUID); err != nil {
+			return fmt.Errorf("replace objects left by an earlier attempt: %w", err)
+		}
+		err = nil
+	}
 	if err != nil {
 		return err
 	}

@@ -75,17 +75,18 @@ func volumeMountPath(name string) string {
 	return s[0]
 }
 
-func startVolume(ctx context.Context, engine *kube, name, namespace string) (*kube_core_v1.PersistentVolumeClaim, error) {
+func startVolume(ctx context.Context, engine *kube, name, namespace string) error {
 	engineConfig := engine.getConfig()
 	pvc, err := mkPersistentVolumeClaim(engineConfig, name, namespace)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	log.Trace().Msgf("creating volume: %s", pvc.Name)
-	return createRetryOnConflict(ctx, func() (*kube_core_v1.PersistentVolumeClaim, error) {
+	_, err = createRetryOnConflict(ctx, func() (*kube_core_v1.PersistentVolumeClaim, error) {
 		return engine.client.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, kube_meta_v1.CreateOptions{})
 	})
+	return err
 }
 
 func stopVolume(ctx context.Context, engine *kube, name, namespace string, deleteOpts kube_meta_v1.DeleteOptions) error {
