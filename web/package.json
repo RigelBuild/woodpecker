@@ -23,7 +23,7 @@
     "@mdi/js": "^7.4.47",
     "@vueuse/core": "^15.0.0",
     "ansi_up": "^6.0.6",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.17",
     "fuse.js": "^7.3.0",
     "js-base64": "^3.7.8",
     "marked": "^18.0.0",
