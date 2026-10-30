@@ -151,9 +151,11 @@ func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID stri
 	return loss
 }
 
-func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) error {
+// waitPodUp reports gone when the pod is deleted before it starts, so WaitStep classifies the loss.
+func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) (gone bool, err error) {
 	up := make(chan struct{})
 	var upOnce sync.Once
+	var deleted atomic.Bool
 	podUp := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
 		if !ok {
@@ -172,22 +174,51 @@ func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) 
 			upOnce.Do(func() { close(up) })
 		}
 	}
+	podDeleted := func(obj any) {
+		pod, ok := obj.(*kube_core_v1.Pod)
+		if !ok {
+			tombstone, isTombstone := obj.(cache.DeletedFinalStateUnknown)
+			if !isTombstone {
+				return
+			}
+			if pod, ok = tombstone.Obj.(*kube_core_v1.Pod); !ok {
+				return
+			}
+		}
+		if pod.Name == podName {
+			deleted.Store(true)
+			upOnce.Do(func() { close(up) })
+		}
+	}
 
-	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(e.config.GetNamespace(step.OrgID)))
-	if _, err := si.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	namespace := e.config.GetNamespace(step.OrgID)
+	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(namespace))
+	podInformer := si.Core().V1().Pods().Informer()
+	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    podUp,
 		UpdateFunc: func(_, newPod any) { podUp(newPod) },
+		DeleteFunc: podDeleted,
 	}); err != nil {
-		return err
+		return false, err
 	}
 	stop := make(chan struct{})
 	si.Start(stop)
 	defer close(stop)
+	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
+		return false, ctx.Err()
+	}
+	// A pod deleted before the initial List never produces an event.
+	if _, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{}); err != nil {
+		if kube_errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
 	select {
 	case <-up:
-		return nil
+		return deleted.Load(), nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 }
 
@@ -585,8 +616,12 @@ func (e *kube) TailStep(ctx context.Context, step *types.Step, taskUUID string) 
 		return nil, err
 	}
 	log.Trace().Str("taskUUID", taskUUID).Msgf("tail logs of pod: %s", podName)
-	if err := e.waitPodUp(ctx, step, podName); err != nil {
+	gone, err := e.waitPodUp(ctx, step, podName)
+	if err != nil {
 		return nil, err
+	}
+	if gone {
+		return io.NopCloser(strings.NewReader("")), nil
 	}
 	return e.tailLogs(ctx, step, podName)
 }

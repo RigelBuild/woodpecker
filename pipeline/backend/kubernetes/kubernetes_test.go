@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"sync"
@@ -33,6 +34,7 @@ import (
 	kube_errors "k8s.io/apimachinery/pkg/api/errors"
 	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kube_runtime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
 	kube_testing "k8s.io/client-go/testing"
 
@@ -681,7 +683,9 @@ func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, engine.waitPodUp(ctx, step, podName))
+	gone, err := engine.waitPodUp(ctx, step, podName)
+	require.NoError(t, err)
+	require.False(t, gone)
 	value, ok := engine.nodes.Load(podName)
 	require.True(t, ok)
 	assert.Equal(t, "node-1", value)
@@ -714,6 +718,65 @@ func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
 	assert.Nil(t, state)
 	assert.Equal(t, "node-1", loss.Node)
 	assert.True(t, loss.Confirmed)
+}
+
+// A Spot pod can vanish while Pending; TailStep must return so WaitStep reports the loss.
+func TestTailStepReturnsWhenPendingPodIsDeleted(t *testing.T) {
+	for _, beforeSync := range []bool{true, false} {
+		t.Run(fmt.Sprintf("beforeSync=%v", beforeSync), func(t *testing.T) {
+			client := fake.NewClientset()
+			engine := makeEngine(client)
+			step := makeStep(fmt.Sprintf("pending-lost-%v", beforeSync))
+			podName := createPod(t, client, step, "test-ns")
+			// Delete after the informer's watch is registered, so the event is delivered.
+			watching := make(chan struct{})
+			var deleteOnce, watchOnce sync.Once
+			client.PrependReactor("list", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
+				if beforeSync {
+					deleteOnce.Do(func() {
+						if err := client.Tracker().Delete(action.GetResource(), "test-ns", podName); err != nil {
+							t.Errorf("delete in list: %v", err)
+						}
+					})
+				}
+				return false, nil, nil
+			})
+			client.PrependWatchReactor("pods", func(action kube_testing.Action) (bool, watch.Interface, error) {
+				w, err := client.Tracker().Watch(action.GetResource(), action.GetNamespace())
+				watchOnce.Do(func() { close(watching) })
+				return true, w, err
+			})
+
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				rc, err := engine.TailStep(ctx, step, "task-1")
+				if rc != nil {
+					_, readErr := io.ReadAll(rc)
+					err = errors.Join(err, readErr, rc.Close())
+				}
+				done <- err
+			}()
+			if !beforeSync {
+				<-watching
+				require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+			}
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-ctx.Done():
+				t.Fatal("TailStep blocked on a pod deleted before it ran")
+			}
+
+			var teardown atomic.Bool
+			state, err := engine.WaitStep(types.WithTeardown(ctx, &teardown), step, "task-1")
+			var loss *types.PodLossError
+			require.ErrorAs(t, err, &loss)
+			assert.Nil(t, state)
+			assert.Equal(t, "NotFound", loss.Reason)
+		})
+	}
 }
 
 // TestDestroyWorkflowDeletesServicePodDuringTeardown keeps missing pods green during cleanup.
