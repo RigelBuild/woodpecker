@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
@@ -491,4 +492,119 @@ func TestPipelineDispatchClaim(t *testing.T) {
 	stored, err = store.GetPipeline(1)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusPending, stored.Status)
+}
+
+func dispatchFlagStore(t *testing.T) (*storage, func()) {
+	return newTestStore(t, new(model.Pipeline), new(model.PipelineDispatchReport))
+}
+
+func seedCreatedPipeline(t *testing.T, s *storage, updated int64) *model.Pipeline {
+	t.Helper()
+	p := &model.Pipeline{
+		ID: 1, RepoID: 7, Number: 3, Status: model.StatusCreated, Updated: updated,
+		Commit: "abc123", Event: model.EventPull,
+	}
+	_, err := s.engine.NoAutoTime().Insert(p)
+	require.NoError(t, err)
+	return p
+}
+
+func orphanErrors() []*pipeline_errors.PipelineError {
+	return []*pipeline_errors.PipelineError{{Type: pipeline_errors.PipelineErrorTypeGeneric, Message: "orphan"}}
+}
+
+func countReports(t *testing.T, s *storage) int64 {
+	t.Helper()
+	n, err := s.engine.Count(new(model.PipelineDispatchReport))
+	require.NoError(t, err)
+	return n
+}
+
+func TestPipelineDispatchFlag(t *testing.T) {
+	const claimedAt = int64(5000)
+
+	t.Run("matching row is flagged with a report", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s, claimedAt)
+		p.Errors = orphanErrors()
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.True(t, ok)
+
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusError, stored.Status)
+		assert.Equal(t, orphanErrors(), stored.Errors)
+		assert.EqualValues(t, claimedAt, stored.Started)
+		assert.EqualValues(t, claimedAt, stored.Finished)
+		assert.EqualValues(t, claimedAt, stored.Updated)
+
+		reports := make([]*model.PipelineDispatchReport, 0)
+		require.NoError(t, s.engine.Find(&reports))
+		require.Len(t, reports, 1)
+		r := reports[0]
+		assert.EqualValues(t, p.ID, r.PipelineID)
+		assert.EqualValues(t, p.RepoID, r.RepoID)
+		assert.EqualValues(t, claimedAt, r.FlaggedAt)
+		assert.EqualValues(t, claimedAt, r.NextAttempt)
+		assert.Empty(t, r.Delivered)
+		require.NotNil(t, r.Snapshot)
+		assert.Equal(t, "abc123", r.Snapshot.Commit)
+		assert.Equal(t, model.EventPull, r.Snapshot.Event)
+		assert.EqualValues(t, 3, r.Snapshot.Number)
+	})
+
+	t.Run("interleaved creator write wins", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s, claimedAt)
+		creator := *p
+		creator.Status = model.StatusPending
+		require.NoError(t, s.UpdatePipeline(&creator))
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusPending, stored.Status)
+		assert.Zero(t, stored.Finished)
+		assert.Zero(t, countReports(t, s))
+	})
+
+	t.Run("stale claim and second flag lose", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s, claimedAt)
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt-1)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Zero(t, countReports(t, s))
+
+		ok, err = s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.True(t, ok)
+		ok, err = s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.EqualValues(t, 1, countReports(t, s))
+	})
+
+	t.Run("report insert error rolls back the flag", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s, claimedAt)
+		_, err := s.engine.Insert(&model.PipelineDispatchReport{PipelineID: p.ID, RepoID: p.RepoID})
+		require.NoError(t, err)
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		assert.Error(t, err)
+		assert.False(t, ok)
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusCreated, stored.Status)
+	})
 }
