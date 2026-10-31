@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
@@ -48,4 +49,16 @@ func NewTestStore(t *testing.T) store.Store {
 
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+// DispatchReportsForTest returns every dispatch report row of a store created
+// by NewTestStore, including rows that are not due.
+func DispatchReportsForTest(t *testing.T, s store.Store) []*model.PipelineDispatchReport {
+	t.Helper()
+
+	st, ok := s.(*storage)
+	require.True(t, ok, "store must come from NewTestStore")
+	reports := make([]*model.PipelineDispatchReport, 0)
+	require.NoError(t, st.engine.Asc("id").Find(&reports))
+	return reports
 }

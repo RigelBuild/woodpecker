@@ -40,6 +40,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	cron_scheduler "go.woodpecker-ci.org/woodpecker/v3/server/cron"
 	"go.woodpecker-ci.org/woodpecker/v3/server/metric"
+	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/server/router"
 	"go.woodpecker-ci.org/woodpecker/v3/server/router/middleware"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -136,6 +137,16 @@ func run(ctx context.Context, c *cli.Command) error {
 			return err
 		}
 		log.Info().Msg("cron service stopped")
+		return nil
+	})
+
+	serviceWaitingGroup.Go(func() error {
+		log.Info().Msg("starting dispatch liveness sweeper ...")
+		if err := pipeline.RunDispatchLivenessSweeper(ctx, _store); err != nil {
+			go stopServerFunc(err)
+			return err
+		}
+		log.Info().Msg("dispatch liveness sweeper stopped")
 		return nil
 	})
 

@@ -1083,6 +1083,14 @@ Supported variables:
 - `owner`: the repo's owner
 - `repo`: the repo's name
 
+:::info Pipeline-level dispatch status
+If a pipeline stays in the `created` state for more than 10 minutes, its enqueue was lost (for example, the server stopped while creating it). The server then marks it as `error` and posts one extra status with the workflow name `pipeline/dispatch`. With the default format, its context is `ci/woodpecker/<event>/pipeline/dispatch`. Restart the pipeline to run it.
+
+This status mirrors the pipeline's current status. While the pipeline is still marked as orphaned, it mirrors the newest later pipeline with the same commit and event, if one exists. It updates until that status is terminal. A `canceled` or `skipped` pipeline, and a pipeline that was deleted, show `success`. After a terminal status, the server posts it once more after a 10-minute settle window, then stops.
+
+Keep `{{ .workflow }}` in a custom format. Without it, this status shares its context with the pipeline's workflows.
+:::
+
 ---
 
 ### CONFIG_EXTENSION_ENDPOINT
