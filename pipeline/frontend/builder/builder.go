@@ -36,6 +36,10 @@ import (
 	yaml_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/types"
 )
 
+// DispatchStatusWorkflowName is the status context name the server uses for a
+// pipeline-level dispatch status. A workflow may not take it as its `name:`.
+const DispatchStatusWorkflowName = "pipeline/dispatch"
+
 // PipelineBuilder Takes the yaml configs and some metadata and returns the internal data model to execute a pipeline.
 type PipelineBuilder struct {
 	Yamls               []*YamlFile
@@ -185,6 +189,15 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 	}}))
 	if pipeline_errors.HasBlockingErrors(errorsAndWarnings) {
 		return nil, errorsAndWarnings
+	}
+
+	// The server reports pipeline-level dispatch failures under this name. A
+	// workflow taking it would share and overwrite that status context.
+	if parsed.Name == DispatchStatusWorkflowName {
+		return nil, multierr.Append(errorsAndWarnings, &pipeline_errors.PipelineError{
+			Message: fmt.Sprintf("workflow name %q is reserved", DispatchStatusWorkflowName),
+			Type:    pipeline_errors.PipelineErrorTypeCompiler,
+		})
 	}
 
 	// An explicit top-level `name` lets a workflow set its display name

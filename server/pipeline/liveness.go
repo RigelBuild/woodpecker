@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/builder"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -54,9 +55,9 @@ const (
 	reportRetryBase     = time.Minute
 	reportRetryMax      = time.Hour
 	reportRetryMaxShift = 6
-	// The pipeline-level status uses the reserved workflow name
-	// dispatchStatusWorkflowName. It contains a slash, which no real workflow name can.
-	dispatchStatusWorkflowName = "pipeline/dispatch"
+	// The pipeline-level status uses the workflow name the builder reserves,
+	// so no real workflow can share its status context.
+	dispatchStatusWorkflowName = builder.DispatchStatusWorkflowName
 )
 
 // orphanMessage is the pipeline error stored on a flagged orphan.
