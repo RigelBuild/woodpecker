@@ -672,9 +672,9 @@ func TestDispatchLivenessLoop(t *testing.T) {
 		assert.Nil(t, h.report(t))
 	})
 
-	t.Run("sweeper returns nil on a cancelled context", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
+	t.Run("sweeper returns nil on a canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancel(nil)
 		assert.NoError(t, RunDispatchLivenessSweeper(ctx, datastore.NewTestStore(t)))
 	})
 }
@@ -819,7 +819,7 @@ func TestDispatchDeliveryPostDeadline(t *testing.T) {
 		assert.False(t, deadline.After(h.clock.Add(reportLease)))
 	})
 
-	t.Run("cancelled with the tick", func(t *testing.T) {
+	t.Run("canceled with the tick", func(t *testing.T) {
 		h := newLivenessHarness(t)
 		require.NoError(t, flagOrphanedPipeline(h.store, h.pipeline, h.clock.Unix()))
 		entered := make(chan struct{})
@@ -831,14 +831,14 @@ func TestDispatchDeliveryPostDeadline(t *testing.T) {
 			return ctx.Err()
 		})
 
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithCancelCause(t.Context())
 		done := make(chan struct{})
 		go func() {
 			h.delivery.runDispatchDeliveryTick(ctx)
 			close(done)
 		}()
 		<-entered
-		cancel()
+		cancel(nil)
 		<-done
 		assert.ErrorIs(t, <-postErr, context.Canceled)
 

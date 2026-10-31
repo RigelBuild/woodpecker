@@ -103,6 +103,7 @@ func TestModelRepoRoundTrip(t *testing.T) {
 		assert.Equal(t, "octocat/hello", got.FullName)
 	})
 }
+
 func TestArgumentsStatusDeadlineRoundTrip(t *testing.T) {
 	const deadline int64 = 1_782_000_123_456_789_000
 
