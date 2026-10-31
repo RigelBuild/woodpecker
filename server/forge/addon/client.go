@@ -204,18 +204,34 @@ func (g *RPC) Dir(_ context.Context, u *model.User, r *model.Repo, b *model.Pipe
 	return resp, json.Unmarshal(jsonResp, &resp)
 }
 
-func (g *RPC) Status(_ context.Context, u *model.User, r *model.Repo, b *model.Pipeline, p *model.Workflow) error {
-	args, err := json.Marshal(&argumentsStatus{
+func (g *RPC) Status(ctx context.Context, u *model.User, r *model.Repo, b *model.Pipeline, p *model.Workflow) error {
+	a := argumentsStatus{
 		U: modelUserFromModel(u),
 		R: modelRepoFromModel(r),
 		B: b,
 		P: p,
-	})
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		a.Deadline = deadline.UnixNano()
+	}
+	args, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var jsonResp []byte
-	return g.client.Call("Plugin.Status", args, &jsonResp)
+	call := g.client.Go("Plugin.Status", args, &jsonResp, make(chan *rpc.Call, 1))
+	select {
+	case result := <-call.Done:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return result.Error
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (g *RPC) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {

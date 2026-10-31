@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/hashicorp/go-plugin"
 
@@ -130,7 +131,13 @@ func (s *RPCServer) Status(args []byte, resp *[]byte) error {
 		return err
 	}
 	*resp = []byte{}
-	return s.Impl.Status(mkCtx(), a.U.asModel(), a.R.asModel(), a.B, a.P)
+	ctx := mkCtx()
+	if a.Deadline != 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, time.Unix(0, a.Deadline))
+		defer cancel()
+	}
+	return s.Impl.Status(ctx, a.U.asModel(), a.R.asModel(), a.B, a.P)
 }
 
 func (s *RPCServer) Netrc(args []byte, resp *[]byte) error {

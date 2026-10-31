@@ -24,6 +24,8 @@ WOODPECKER_ADDON_FORGE=/path/to/your/addon/forge/file
 
 In case you run Woodpecker as container, you probably want to mount the addon binary to `/opt/addons/`.
 
+Forge `Status` calls are bounded by the caller's deadline when the addon is built with a version of the addon library that supports deadline propagation. Rebuild addons against that version to ensure a blocked `Status` call ends when its deadline expires.
+
 #### List of addon forges
 
 - [Radicle](https://radicle.xyz/): Open source, peer-to-peer code collaboration stack built on Git. Radicle addon for Woodpecker CI can be found at [this repo](https://explorer.radicle.gr/nodes/seed.radicle.gr/rad:z39Cf1XzrvCLRZZJRUZnx9D1fj5ws).

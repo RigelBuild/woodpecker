@@ -103,3 +103,17 @@ func TestModelRepoRoundTrip(t *testing.T) {
 		assert.Equal(t, "octocat/hello", got.FullName)
 	})
 }
+func TestArgumentsStatusDeadlineRoundTrip(t *testing.T) {
+	const deadline int64 = 1_782_000_123_456_789_000
+
+	data, err := json.Marshal(argumentsStatus{Deadline: deadline})
+	require.NoError(t, err)
+
+	var got argumentsStatus
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, deadline, got.Deadline)
+
+	data, err = json.Marshal(argumentsStatus{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"deadline"`)
+}
