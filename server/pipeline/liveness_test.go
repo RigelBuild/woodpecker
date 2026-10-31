@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -679,6 +680,54 @@ func TestDispatchLivenessLoop(t *testing.T) {
 	})
 }
 
+// updateFailsAfterPost fails the first DispatchReportUpdate after armed is
+// set, so the forge accepts a post whose result is never recorded.
+type updateFailsAfterPost struct {
+	store.Store
+	armed atomic.Bool
+}
+
+func (s *updateFailsAfterPost) DispatchReportUpdate(report *model.PipelineDispatchReport) error {
+	if s.armed.CompareAndSwap(true, false) {
+		return errInjected
+	}
+	return s.Store.DispatchReportUpdate(report)
+}
+
+func TestDispatchDeliveryUnrecordedPostThenDelete(t *testing.T) {
+	h := newLivenessHarness(t)
+	failing := &updateFailsAfterPost{Store: h.store}
+	h.delivery = h.newDelivery(failing)
+	h.setOnStatus(func(_ context.Context, _ *model.Pipeline, w *model.Workflow) error {
+		if w.State == model.StatusError {
+			failing.armed.Store(true)
+		}
+		return nil
+	})
+
+	// The red is posted, but recording it fails.
+	h.tick(t)
+	require.Equal(t, []model.StatusValue{model.StatusError}, h.takeStates())
+	r := h.report(t)
+	require.NotNil(t, r)
+	assert.Empty(t, r.Delivered)
+
+	// The pipeline is deleted before the lease expires and the row is due again.
+	require.NoError(t, h.store.DeletePipeline(h.pipeline))
+	h.clock = time.Unix(r.NextAttempt, 0)
+	h.tick(t)
+
+	posts := h.takePosts()
+	require.Len(t, posts, 1)
+	assert.Equal(t, model.StatusSuccess, posts[0].workflow.State)
+	assert.Equal(t, model.StatusSuccess, posts[0].pipeline.Status)
+	assert.Equal(t, h.pipeline.Commit, posts[0].pipeline.Commit)
+	r = h.report(t)
+	require.NotNil(t, r)
+	assert.Equal(t, model.StatusSuccess, r.Delivered)
+	assert.EqualValues(t, h.clock.Add(reportSettle).Unix(), r.RetireAfter)
+}
+
 func TestDispatchDeliveryDeleteAfterPossibleRed(t *testing.T) {
 	t.Run("posts success from the snapshot", func(t *testing.T) {
 		h := newLivenessHarness(t)
@@ -842,8 +891,12 @@ func TestDispatchDeliveryPostDeadline(t *testing.T) {
 		<-done
 		assert.ErrorIs(t, <-postErr, context.Canceled)
 
+		// The attempt was recorded before the post; the cancellation itself
+		// writes nothing, so the row keeps its lease as next_attempt.
 		r := h.report(t)
 		assert.Empty(t, r.Delivered)
-		assert.Zero(t, r.Attempts)
+		assert.Equal(t, 1, r.Attempts)
+		assert.Empty(t, r.LastError)
+		assert.EqualValues(t, h.clock.Add(reportLease).Unix(), r.NextAttempt)
 	})
 }
