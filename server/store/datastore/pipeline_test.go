@@ -449,3 +449,73 @@ func TestCreatePipelineRetriesSQLiteLocks(t *testing.T) {
 		})
 	}
 }
+
+func TestOrphanedDispatchPipelines(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	const olderThan = int64(1000)
+	// Seed timestamps with auto-time disabled so updated keeps the given value.
+	_, err := store.engine.NoAutoTime().Insert([]*model.Pipeline{
+		{ID: 1, RepoID: 1, Number: 1, Status: model.StatusCreated, Updated: olderThan + 5}, // too young
+		{ID: 2, RepoID: 1, Number: 2, Status: model.StatusCreated, Updated: olderThan - 5}, // orphan
+		{ID: 3, RepoID: 1, Number: 3, Status: model.StatusBlocked, Updated: olderThan - 5}, // awaiting approval
+		{ID: 4, RepoID: 1, Number: 4, Status: model.StatusPending, Updated: olderThan - 5}, // created arm only
+		{ID: 5, RepoID: 1, Number: 5, Status: model.StatusCreated, Updated: olderThan - 1}, // orphan
+	})
+	require.NoError(t, err)
+
+	orphans, err := store.OrphanedDispatchPipelines(olderThan, 10)
+	require.NoError(t, err)
+	ids := make([]int64, 0, len(orphans))
+	for _, p := range orphans {
+		ids = append(ids, p.ID)
+	}
+	assert.Equal(t, []int64{2, 5}, ids)
+
+	orphans, err = store.OrphanedDispatchPipelines(olderThan, 1)
+	require.NoError(t, err)
+	require.Len(t, orphans, 1)
+	assert.EqualValues(t, 2, orphans[0].ID)
+}
+
+func TestPipelineDispatchClaim(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	_, err := store.engine.NoAutoTime().Insert(&model.Pipeline{
+		ID: 1, RepoID: 1, Number: 1, Status: model.StatusCreated, Updated: 100,
+	})
+	require.NoError(t, err)
+
+	seen, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	stale := *seen
+
+	const now = int64(5000)
+	ok, err := store.PipelineDispatchClaim(seen, now)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	stored, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	assert.EqualValues(t, now, stored.Updated)
+	assert.Equal(t, model.StatusCreated, stored.Status)
+
+	// A second claim with the stale updated value loses.
+	ok, err = store.PipelineDispatchClaim(&stale, now+1)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	// A claim after an interleaved creator write loses.
+	fresh, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	creator := *fresh
+	creator.Status = model.StatusPending
+	require.NoError(t, store.UpdatePipeline(&creator))
+	ok, err = store.PipelineDispatchClaim(fresh, now+2)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	stored, err = store.GetPipeline(1)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, stored.Status)
+}

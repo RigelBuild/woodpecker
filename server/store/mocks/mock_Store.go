@@ -4296,6 +4296,74 @@ func (_c *MockStore_OrgUpdate_Call) RunAndReturn(run func(org *model.Org) error)
 	return _c
 }
 
+// OrphanedDispatchPipelines provides a mock function for the type MockStore
+func (_mock *MockStore) OrphanedDispatchPipelines(olderThan int64, limit int) ([]*model.Pipeline, error) {
+	ret := _mock.Called(olderThan, limit)
+
+	if len(ret) == 0 {
+		panic("no return value specified for OrphanedDispatchPipelines")
+	}
+
+	var r0 []*model.Pipeline
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(int64, int) ([]*model.Pipeline, error)); ok {
+		return returnFunc(olderThan, limit)
+	}
+	if returnFunc, ok := ret.Get(0).(func(int64, int) []*model.Pipeline); ok {
+		r0 = returnFunc(olderThan, limit)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*model.Pipeline)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(int64, int) error); ok {
+		r1 = returnFunc(olderThan, limit)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_OrphanedDispatchPipelines_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OrphanedDispatchPipelines'
+type MockStore_OrphanedDispatchPipelines_Call struct {
+	*mock.Call
+}
+
+// OrphanedDispatchPipelines is a helper method to define mock.On call
+//   - olderThan int64
+//   - limit int
+func (_e *MockStore_Expecter) OrphanedDispatchPipelines(olderThan any, limit any) *MockStore_OrphanedDispatchPipelines_Call {
+	return &MockStore_OrphanedDispatchPipelines_Call{Call: _e.mock.On("OrphanedDispatchPipelines", olderThan, limit)}
+}
+
+func (_c *MockStore_OrphanedDispatchPipelines_Call) Run(run func(olderThan int64, limit int)) *MockStore_OrphanedDispatchPipelines_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 int64
+		if args[0] != nil {
+			arg0 = args[0].(int64)
+		}
+		var arg1 int
+		if args[1] != nil {
+			arg1 = args[1].(int)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_OrphanedDispatchPipelines_Call) Return(pipelines []*model.Pipeline, err error) *MockStore_OrphanedDispatchPipelines_Call {
+	_c.Call.Return(pipelines, err)
+	return _c
+}
+
+func (_c *MockStore_OrphanedDispatchPipelines_Call) RunAndReturn(run func(olderThan int64, limit int) ([]*model.Pipeline, error)) *MockStore_OrphanedDispatchPipelines_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // PermFind provides a mock function for the type MockStore
 func (_mock *MockStore) PermFind(user *model.User, repo *model.Repo) (*model.Perm, error) {
 	ret := _mock.Called(user, repo)
@@ -4563,6 +4631,72 @@ func (_c *MockStore_PipelineConfigCreate_Call) Return(err error) *MockStore_Pipe
 }
 
 func (_c *MockStore_PipelineConfigCreate_Call) RunAndReturn(run func(pipelineConfig *model.PipelineConfig) error) *MockStore_PipelineConfigCreate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// PipelineDispatchClaim provides a mock function for the type MockStore
+func (_mock *MockStore) PipelineDispatchClaim(pipeline *model.Pipeline, now int64) (bool, error) {
+	ret := _mock.Called(pipeline, now)
+
+	if len(ret) == 0 {
+		panic("no return value specified for PipelineDispatchClaim")
+	}
+
+	var r0 bool
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(*model.Pipeline, int64) (bool, error)); ok {
+		return returnFunc(pipeline, now)
+	}
+	if returnFunc, ok := ret.Get(0).(func(*model.Pipeline, int64) bool); ok {
+		r0 = returnFunc(pipeline, now)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	if returnFunc, ok := ret.Get(1).(func(*model.Pipeline, int64) error); ok {
+		r1 = returnFunc(pipeline, now)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_PipelineDispatchClaim_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'PipelineDispatchClaim'
+type MockStore_PipelineDispatchClaim_Call struct {
+	*mock.Call
+}
+
+// PipelineDispatchClaim is a helper method to define mock.On call
+//   - pipeline *model.Pipeline
+//   - now int64
+func (_e *MockStore_Expecter) PipelineDispatchClaim(pipeline any, now any) *MockStore_PipelineDispatchClaim_Call {
+	return &MockStore_PipelineDispatchClaim_Call{Call: _e.mock.On("PipelineDispatchClaim", pipeline, now)}
+}
+
+func (_c *MockStore_PipelineDispatchClaim_Call) Run(run func(pipeline *model.Pipeline, now int64)) *MockStore_PipelineDispatchClaim_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.Pipeline
+		if args[0] != nil {
+			arg0 = args[0].(*model.Pipeline)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_PipelineDispatchClaim_Call) Return(b bool, err error) *MockStore_PipelineDispatchClaim_Call {
+	_c.Call.Return(b, err)
+	return _c
+}
+
+func (_c *MockStore_PipelineDispatchClaim_Call) RunAndReturn(run func(pipeline *model.Pipeline, now int64) (bool, error)) *MockStore_PipelineDispatchClaim_Call {
 	_c.Call.Return(run)
 	return _c
 }
