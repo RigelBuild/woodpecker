@@ -19,6 +19,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
+	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types/mocks"
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
@@ -45,6 +48,47 @@ func TestRunReportsAgentShutdown(t *testing.T) {
 	require.NoError(t, runner.Run(root))
 	assert.True(t, done.Canceled)
 	assert.True(t, done.AgentShutdown)
+}
+
+func TestRunReportsAgentShutdownAlongsideEviction(t *testing.T) {
+	root, cancelRoot := context.WithCancelCause(t.Context())
+	defer cancelRoot(nil)
+	workflow := dummyWorkflow()
+	var done rpc.WorkflowState
+	peer := shutdownPeer(t, &done, workflow, false, nil)
+	engine := mocks.NewMockBackend(t)
+	engine.On("SetupWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) { cancelRoot(pipeline_errors.ErrAgentShutdown) }).Return(nil)
+	engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, &backend_types.PodLossError{Confirmed: true})
+	engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	runner := NewRunner(peer, rpc.Filter{}, "test-agent", 1, &State{Metadata: map[string]Info{}}, engine)
+	require.NoError(t, runner.Run(root))
+	assert.True(t, done.Canceled)
+	assert.True(t, done.Evicted)
+	assert.True(t, done.AgentShutdown)
+}
+
+func TestRunDoesNotReportUnconfirmedPodLossAsEviction(t *testing.T) {
+	var done rpc.WorkflowState
+	peer := shutdownPeer(t, &done, dummyWorkflow(), false, nil)
+	engine := mocks.NewMockBackend(t)
+	engine.On("SetupWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, &backend_types.PodLossError{})
+	engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	runner := NewRunner(peer, rpc.Filter{}, "test-agent", 1, &State{Metadata: map[string]Info{}}, engine)
+
+	require.NoError(t, runner.Run(t.Context()))
+	assert.False(t, done.Canceled)
+	assert.False(t, done.Evicted)
+	assert.NotEmpty(t, done.Error)
 }
 
 func TestRunPreservesEarlierCancellationCause(t *testing.T) {

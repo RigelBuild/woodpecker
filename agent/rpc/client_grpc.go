@@ -303,6 +303,7 @@ func (c *client) Done(ctx context.Context, workflowID string, state rpc.Workflow
 			Error:         state.Error,
 			Canceled:      state.Canceled,
 			AgentShutdown: state.AgentShutdown,
+			Evicted:       state.Evicted,
 		},
 	}
 

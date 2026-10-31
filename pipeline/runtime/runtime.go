@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/oklog/ulid/v2"
 	"github.com/rs/zerolog"
@@ -41,12 +42,15 @@ type Runtime struct {
 	// ctx is the context for the current workflow execution.
 	// All normal (non-cleanup) step operations must use this context.
 	// Cleanup operations should use the runnerCtx passed to Run().
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelCauseFunc
 
 	tracer tracing.Tracer
 	logger logging.Logger
 
 	uploadWait sync.WaitGroup
+	// teardown is set first in destroyWorkflowFunc; WaitStep reads it from ctx.
+	teardown atomic.Bool
 
 	taskUUID    string
 	description map[string]string

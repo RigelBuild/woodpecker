@@ -47,8 +47,9 @@ func ctxWithAgentID(id int64) context.Context {
 }
 
 func TestWorkflowStateFromProtoPreservesAgentShutdown(t *testing.T) {
-	state := workflowStateFromProto(&proto.WorkflowState{AgentShutdown: true})
+	state := workflowStateFromProto(&proto.WorkflowState{AgentShutdown: true, Evicted: true})
 	require.True(t, state.AgentShutdown)
+	require.True(t, state.Evicted)
 }
 
 func TestNewWoodpeckerServer(t *testing.T) {

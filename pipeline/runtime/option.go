@@ -45,6 +45,13 @@ func WithContext(ctx context.Context) Option {
 	}
 }
 
+// WithCancelCause sets the function used to cancel the workflow with a cause.
+func WithCancelCause(cancel context.CancelCauseFunc) Option {
+	return func(r *Runtime) {
+		r.cancel = cancel
+	}
+}
+
 // WithDescription sets the descriptive key-value pairs attached to every log line.
 func WithDescription(desc map[string]string) Option {
 	return func(r *Runtime) {

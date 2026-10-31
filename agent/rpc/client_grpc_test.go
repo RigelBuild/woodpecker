@@ -64,10 +64,11 @@ func TestClientDoneSendsAgentShutdown(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := NewGrpcClient(t.Context(), conn, SetConnectionRetryTimeout(time.Second))
-	require.NoError(t, client.Done(t.Context(), "workflow-id", rpc.WorkflowState{AgentShutdown: true}))
+	require.NoError(t, client.Done(t.Context(), "workflow-id", rpc.WorkflowState{AgentShutdown: true, Evicted: true}))
 	select {
 	case req := <-capture.requests:
 		assert.True(t, req.GetState().GetAgentShutdown())
+		assert.True(t, req.GetState().GetEvicted())
 	case <-time.After(time.Second):
 		t.Fatal("Done request was not received")
 	}
