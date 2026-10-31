@@ -158,6 +158,11 @@ func newDispatchDelivery(_store store.Store) *dispatchDelivery {
 // retry records a failed delivery attempt and reschedules the report with backoff.
 func (d *dispatchDelivery) retry(report *model.PipelineDispatchReport, cause error) error {
 	report.Attempts++
+	return d.reschedule(report, cause)
+}
+
+// reschedule reschedules a report whose attempt was already counted, with backoff.
+func (d *dispatchDelivery) reschedule(report *model.PipelineDispatchReport, cause error) error {
 	backoff := min(reportRetryBase<<min(report.Attempts-1, reportRetryMaxShift), reportRetryMax)
 	report.NextAttempt = d.clock().Add(backoff).Unix()
 	report.LastError = cause.Error()
@@ -257,6 +262,19 @@ func (d *dispatchDelivery) deliverDispatchReport(ctx context.Context, report *mo
 	postCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
+	// Record the attempt before posting. If the forge accepts the post but the
+	// result is never recorded, attempts > 0 still tells a later delivery that
+	// a red may have landed, so a deleted pipeline gets its success post.
+	report.Attempts++
+	if err := d.store.DispatchReportUpdate(report); err != nil {
+		if errors.Is(err, types.ErrRecordNotExist) {
+			log.Info().Int64("report", report.ID).Int64("pipeline", report.PipelineID).
+				Msg("dispatch liveness: report lease lost")
+			return nil
+		}
+		return fmt.Errorf("record post attempt: %w", err)
+	}
+
 	d.mu.Lock()
 	d.inFlight[report.ID] = struct{}{}
 	d.mu.Unlock()
@@ -274,18 +292,18 @@ func (d *dispatchDelivery) deliverDispatchReport(ctx context.Context, report *mo
 	case err := <-result:
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				// The tick was canceled; no write, the lease expires.
+				// The tick was canceled; no further write, the lease expires.
 				return ctxErr
 			}
-			return d.retry(report, fmt.Errorf("post status: %w", err))
+			return d.reschedule(report, fmt.Errorf("post status: %w", err))
 		}
 	case <-postCtx.Done():
 		// postCtx derives from ctx, so a canceled tick also lands here.
 		if err := ctx.Err(); err != nil {
-			// No write: the lease expires and the row becomes due again.
+			// No further write: the lease expires and the row becomes due again.
 			return err
 		}
-		return d.retry(report, errPostTimeout)
+		return d.reschedule(report, errPostTimeout)
 	}
 
 	switch {
