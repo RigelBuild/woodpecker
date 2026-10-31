@@ -150,6 +150,39 @@ func (s storage) GetPipelineCount() (int64, error) {
 	return s.engine.Count(new(model.Pipeline))
 }
 
+// OrphanedDispatchPipelines returns up to limit pipelines still in the
+// created state whose last write is older than olderThan (unix seconds).
+// Such a pipeline was persisted but its enqueue never happened.
+func (s storage) OrphanedDispatchPipelines(olderThan int64, limit int) ([]*model.Pipeline, error) {
+	pipelines := make([]*model.Pipeline, 0, limit)
+	return pipelines, s.engine.
+		Where(builder.Lt{"updated": olderThan}.
+			And(builder.Eq{"status": model.StatusCreated})).
+		Asc("id").
+		Limit(limit).
+		Find(&pipelines)
+}
+
+// PipelineDispatchClaim claims an orphaned pipeline for the dispatch-liveness
+// sweeper by setting updated to now, only while the row still has the id,
+// updated and status seen on the passed pipeline. It reports whether the
+// claim was won. Auto-time is disabled so the stored value is exactly now.
+func (s storage) PipelineDispatchClaim(pipeline *model.Pipeline, now int64) (bool, error) {
+	cols, err := s.engine.ID(pipeline.ID).
+		Where(builder.Eq{"updated": pipeline.Updated, "status": pipeline.Status}).
+		NoAutoTime().
+		Cols("updated").
+		Update(&model.Pipeline{Updated: now})
+	if err != nil {
+		return false, err
+	}
+	if cols == 0 {
+		return false, nil
+	}
+	pipeline.Updated = now
+	return true, nil
+}
+
 // CreatePipeline creates a new pipeline with retry logic for unique constraint errors.
 func (s storage) CreatePipeline(pipeline *model.Pipeline, stepList ...*model.Step) error {
 	// Maximum number of retries

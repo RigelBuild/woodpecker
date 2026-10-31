@@ -94,6 +94,11 @@ type Store interface {
 	UpdatePipelineIfStatus(*model.Pipeline, model.StatusValue) error
 	// DeletePipeline deletes a pipeline.
 	DeletePipeline(*model.Pipeline) error
+	// OrphanedDispatchPipelines gets created pipelines last written before olderThan.
+	OrphanedDispatchPipelines(olderThan int64, limit int) ([]*model.Pipeline, error)
+	// PipelineDispatchClaim claims an orphaned pipeline by moving updated to now
+	// while id, updated and status still match the passed pipeline.
+	PipelineDispatchClaim(pipeline *model.Pipeline, now int64) (bool, error)
 
 	// Feeds
 	UserFeed(*model.User) ([]*model.Feed, error)
