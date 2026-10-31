@@ -15,6 +15,7 @@
 package datastore
 
 import (
+	"fmt"
 	"time"
 
 	"xorm.io/builder"
@@ -176,6 +177,51 @@ func (s storage) PipelineDispatchClaim(pipeline *model.Pipeline, now int64) (boo
 		return false, nil
 	}
 	pipeline.Updated = now
+	return true, nil
+}
+
+// PipelineDispatchFlag marks a claimed orphan as error and inserts its
+// dispatch report in one transaction. The update only applies while the row
+// is still created with updated equal to claimedAt; otherwise nothing is
+// written and false is returned. Auto-time is disabled so updated stays at
+// claimedAt, which is the report's flagged_at.
+func (s storage) PipelineDispatchFlag(pipeline *model.Pipeline, claimedAt int64) (bool, error) {
+	sess := s.engine.NewSession()
+	defer sess.Close()
+	if err := sess.Begin(); err != nil {
+		return false, wrapUpdate(0, err)
+	}
+
+	cols, err := sess.ID(pipeline.ID).
+		Where(builder.Eq{"status": model.StatusCreated, "updated": claimedAt}).
+		NoAutoTime().
+		Cols("status", "errors", "started", "finished").
+		Update(&model.Pipeline{
+			Status:   model.StatusError,
+			Errors:   pipeline.Errors,
+			Started:  claimedAt,
+			Finished: claimedAt,
+		})
+	if err != nil {
+		return false, wrapUpdate(cols, err)
+	}
+	if cols == 0 {
+		return false, wrapUpdate(0, sess.Rollback())
+	}
+
+	if err := wrapInsert(sess.Insert(&model.PipelineDispatchReport{
+		PipelineID:  pipeline.ID,
+		RepoID:      pipeline.RepoID,
+		FlaggedAt:   claimedAt,
+		NextAttempt: claimedAt,
+		Snapshot:    pipeline,
+	})); err != nil {
+		return false, fmt.Errorf("insert dispatch report for pipeline %d: %w", pipeline.ID, err)
+	}
+
+	if err := sess.Commit(); err != nil {
+		return false, wrapUpdate(0, err)
+	}
 	return true, nil
 }
 

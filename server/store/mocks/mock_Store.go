@@ -1429,6 +1429,242 @@ func (_c *MockStore_DeleteUser_Call) RunAndReturn(run func(user *model.User) err
 	return _c
 }
 
+// DispatchReportClaim provides a mock function for the type MockStore
+func (_mock *MockStore) DispatchReportClaim(report *model.PipelineDispatchReport, leaseUntil int64) (bool, error) {
+	ret := _mock.Called(report, leaseUntil)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DispatchReportClaim")
+	}
+
+	var r0 bool
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(*model.PipelineDispatchReport, int64) (bool, error)); ok {
+		return returnFunc(report, leaseUntil)
+	}
+	if returnFunc, ok := ret.Get(0).(func(*model.PipelineDispatchReport, int64) bool); ok {
+		r0 = returnFunc(report, leaseUntil)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	if returnFunc, ok := ret.Get(1).(func(*model.PipelineDispatchReport, int64) error); ok {
+		r1 = returnFunc(report, leaseUntil)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DispatchReportClaim_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DispatchReportClaim'
+type MockStore_DispatchReportClaim_Call struct {
+	*mock.Call
+}
+
+// DispatchReportClaim is a helper method to define mock.On call
+//   - report *model.PipelineDispatchReport
+//   - leaseUntil int64
+func (_e *MockStore_Expecter) DispatchReportClaim(report any, leaseUntil any) *MockStore_DispatchReportClaim_Call {
+	return &MockStore_DispatchReportClaim_Call{Call: _e.mock.On("DispatchReportClaim", report, leaseUntil)}
+}
+
+func (_c *MockStore_DispatchReportClaim_Call) Run(run func(report *model.PipelineDispatchReport, leaseUntil int64)) *MockStore_DispatchReportClaim_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.PipelineDispatchReport
+		if args[0] != nil {
+			arg0 = args[0].(*model.PipelineDispatchReport)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DispatchReportClaim_Call) Return(b bool, err error) *MockStore_DispatchReportClaim_Call {
+	_c.Call.Return(b, err)
+	return _c
+}
+
+func (_c *MockStore_DispatchReportClaim_Call) RunAndReturn(run func(report *model.PipelineDispatchReport, leaseUntil int64) (bool, error)) *MockStore_DispatchReportClaim_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DispatchReportDelete provides a mock function for the type MockStore
+func (_mock *MockStore) DispatchReportDelete(report *model.PipelineDispatchReport) error {
+	ret := _mock.Called(report)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DispatchReportDelete")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(*model.PipelineDispatchReport) error); ok {
+		r0 = returnFunc(report)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_DispatchReportDelete_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DispatchReportDelete'
+type MockStore_DispatchReportDelete_Call struct {
+	*mock.Call
+}
+
+// DispatchReportDelete is a helper method to define mock.On call
+//   - report *model.PipelineDispatchReport
+func (_e *MockStore_Expecter) DispatchReportDelete(report any) *MockStore_DispatchReportDelete_Call {
+	return &MockStore_DispatchReportDelete_Call{Call: _e.mock.On("DispatchReportDelete", report)}
+}
+
+func (_c *MockStore_DispatchReportDelete_Call) Run(run func(report *model.PipelineDispatchReport)) *MockStore_DispatchReportDelete_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.PipelineDispatchReport
+		if args[0] != nil {
+			arg0 = args[0].(*model.PipelineDispatchReport)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DispatchReportDelete_Call) Return(err error) *MockStore_DispatchReportDelete_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_DispatchReportDelete_Call) RunAndReturn(run func(report *model.PipelineDispatchReport) error) *MockStore_DispatchReportDelete_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DispatchReportUpdate provides a mock function for the type MockStore
+func (_mock *MockStore) DispatchReportUpdate(report *model.PipelineDispatchReport) error {
+	ret := _mock.Called(report)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DispatchReportUpdate")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(*model.PipelineDispatchReport) error); ok {
+		r0 = returnFunc(report)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_DispatchReportUpdate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DispatchReportUpdate'
+type MockStore_DispatchReportUpdate_Call struct {
+	*mock.Call
+}
+
+// DispatchReportUpdate is a helper method to define mock.On call
+//   - report *model.PipelineDispatchReport
+func (_e *MockStore_Expecter) DispatchReportUpdate(report any) *MockStore_DispatchReportUpdate_Call {
+	return &MockStore_DispatchReportUpdate_Call{Call: _e.mock.On("DispatchReportUpdate", report)}
+}
+
+func (_c *MockStore_DispatchReportUpdate_Call) Run(run func(report *model.PipelineDispatchReport)) *MockStore_DispatchReportUpdate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.PipelineDispatchReport
+		if args[0] != nil {
+			arg0 = args[0].(*model.PipelineDispatchReport)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DispatchReportUpdate_Call) Return(err error) *MockStore_DispatchReportUpdate_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_DispatchReportUpdate_Call) RunAndReturn(run func(report *model.PipelineDispatchReport) error) *MockStore_DispatchReportUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DispatchReportsDue provides a mock function for the type MockStore
+func (_mock *MockStore) DispatchReportsDue(now int64, limit int) ([]*model.PipelineDispatchReport, error) {
+	ret := _mock.Called(now, limit)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DispatchReportsDue")
+	}
+
+	var r0 []*model.PipelineDispatchReport
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(int64, int) ([]*model.PipelineDispatchReport, error)); ok {
+		return returnFunc(now, limit)
+	}
+	if returnFunc, ok := ret.Get(0).(func(int64, int) []*model.PipelineDispatchReport); ok {
+		r0 = returnFunc(now, limit)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*model.PipelineDispatchReport)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(int64, int) error); ok {
+		r1 = returnFunc(now, limit)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DispatchReportsDue_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DispatchReportsDue'
+type MockStore_DispatchReportsDue_Call struct {
+	*mock.Call
+}
+
+// DispatchReportsDue is a helper method to define mock.On call
+//   - now int64
+//   - limit int
+func (_e *MockStore_Expecter) DispatchReportsDue(now any, limit any) *MockStore_DispatchReportsDue_Call {
+	return &MockStore_DispatchReportsDue_Call{Call: _e.mock.On("DispatchReportsDue", now, limit)}
+}
+
+func (_c *MockStore_DispatchReportsDue_Call) Run(run func(now int64, limit int)) *MockStore_DispatchReportsDue_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 int64
+		if args[0] != nil {
+			arg0 = args[0].(int64)
+		}
+		var arg1 int
+		if args[1] != nil {
+			arg1 = args[1].(int)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DispatchReportsDue_Call) Return(pipelineDispatchReports []*model.PipelineDispatchReport, err error) *MockStore_DispatchReportsDue_Call {
+	_c.Call.Return(pipelineDispatchReports, err)
+	return _c
+}
+
+func (_c *MockStore_DispatchReportsDue_Call) RunAndReturn(run func(now int64, limit int) ([]*model.PipelineDispatchReport, error)) *MockStore_DispatchReportsDue_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ForgeCreate provides a mock function for the type MockStore
 func (_mock *MockStore) ForgeCreate(forge *model.Forge) error {
 	ret := _mock.Called(forge)
@@ -4697,6 +4933,134 @@ func (_c *MockStore_PipelineDispatchClaim_Call) Return(b bool, err error) *MockS
 }
 
 func (_c *MockStore_PipelineDispatchClaim_Call) RunAndReturn(run func(pipeline *model.Pipeline, now int64) (bool, error)) *MockStore_PipelineDispatchClaim_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// PipelineDispatchFlag provides a mock function for the type MockStore
+func (_mock *MockStore) PipelineDispatchFlag(pipeline *model.Pipeline, claimedAt int64) (bool, error) {
+	ret := _mock.Called(pipeline, claimedAt)
+
+	if len(ret) == 0 {
+		panic("no return value specified for PipelineDispatchFlag")
+	}
+
+	var r0 bool
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(*model.Pipeline, int64) (bool, error)); ok {
+		return returnFunc(pipeline, claimedAt)
+	}
+	if returnFunc, ok := ret.Get(0).(func(*model.Pipeline, int64) bool); ok {
+		r0 = returnFunc(pipeline, claimedAt)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	if returnFunc, ok := ret.Get(1).(func(*model.Pipeline, int64) error); ok {
+		r1 = returnFunc(pipeline, claimedAt)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_PipelineDispatchFlag_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'PipelineDispatchFlag'
+type MockStore_PipelineDispatchFlag_Call struct {
+	*mock.Call
+}
+
+// PipelineDispatchFlag is a helper method to define mock.On call
+//   - pipeline *model.Pipeline
+//   - claimedAt int64
+func (_e *MockStore_Expecter) PipelineDispatchFlag(pipeline any, claimedAt any) *MockStore_PipelineDispatchFlag_Call {
+	return &MockStore_PipelineDispatchFlag_Call{Call: _e.mock.On("PipelineDispatchFlag", pipeline, claimedAt)}
+}
+
+func (_c *MockStore_PipelineDispatchFlag_Call) Run(run func(pipeline *model.Pipeline, claimedAt int64)) *MockStore_PipelineDispatchFlag_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.Pipeline
+		if args[0] != nil {
+			arg0 = args[0].(*model.Pipeline)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_PipelineDispatchFlag_Call) Return(b bool, err error) *MockStore_PipelineDispatchFlag_Call {
+	_c.Call.Return(b, err)
+	return _c
+}
+
+func (_c *MockStore_PipelineDispatchFlag_Call) RunAndReturn(run func(pipeline *model.Pipeline, claimedAt int64) (bool, error)) *MockStore_PipelineDispatchFlag_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// PipelineDispatchSuccessor provides a mock function for the type MockStore
+func (_mock *MockStore) PipelineDispatchSuccessor(pipeline *model.Pipeline) (*model.Pipeline, error) {
+	ret := _mock.Called(pipeline)
+
+	if len(ret) == 0 {
+		panic("no return value specified for PipelineDispatchSuccessor")
+	}
+
+	var r0 *model.Pipeline
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(*model.Pipeline) (*model.Pipeline, error)); ok {
+		return returnFunc(pipeline)
+	}
+	if returnFunc, ok := ret.Get(0).(func(*model.Pipeline) *model.Pipeline); ok {
+		r0 = returnFunc(pipeline)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*model.Pipeline)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(*model.Pipeline) error); ok {
+		r1 = returnFunc(pipeline)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_PipelineDispatchSuccessor_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'PipelineDispatchSuccessor'
+type MockStore_PipelineDispatchSuccessor_Call struct {
+	*mock.Call
+}
+
+// PipelineDispatchSuccessor is a helper method to define mock.On call
+//   - pipeline *model.Pipeline
+func (_e *MockStore_Expecter) PipelineDispatchSuccessor(pipeline any) *MockStore_PipelineDispatchSuccessor_Call {
+	return &MockStore_PipelineDispatchSuccessor_Call{Call: _e.mock.On("PipelineDispatchSuccessor", pipeline)}
+}
+
+func (_c *MockStore_PipelineDispatchSuccessor_Call) Run(run func(pipeline *model.Pipeline)) *MockStore_PipelineDispatchSuccessor_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *model.Pipeline
+		if args[0] != nil {
+			arg0 = args[0].(*model.Pipeline)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_PipelineDispatchSuccessor_Call) Return(pipeline1 *model.Pipeline, err error) *MockStore_PipelineDispatchSuccessor_Call {
+	_c.Call.Return(pipeline1, err)
+	return _c
+}
+
+func (_c *MockStore_PipelineDispatchSuccessor_Call) RunAndReturn(run func(pipeline *model.Pipeline) (*model.Pipeline, error)) *MockStore_PipelineDispatchSuccessor_Call {
 	_c.Call.Return(run)
 	return _c
 }
