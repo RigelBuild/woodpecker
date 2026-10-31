@@ -33,27 +33,29 @@ import (
 )
 
 const (
-	// sweepInterval is how often the detection and delivery loops run.
+	// The detection and delivery loops run every sweepInterval.
 	sweepInterval = time.Minute
-	// orphanThreshold is how long a pipeline may sit in created before it is flagged.
+	// A pipeline in created for longer than orphanThreshold is flagged.
 	orphanThreshold = 10 * time.Minute
-	// sweepBatch is how many orphans one detection tick flags at most.
+	// One detection tick flags at most sweepBatch orphans.
 	sweepBatch = 10
-	// deliverBatch is how many reports one delivery tick delivers at most.
+	// One delivery tick delivers at most deliverBatch reports.
 	deliverBatch = 10
-	// reportLease is how long a delivery holds a report; it exceeds
+	// A delivery holds a report for reportLease, which exceeds
 	// reportPostTimeout plus the store reads and writes.
 	reportLease = 5 * time.Minute
-	// reportPostTimeout bounds one forge post.
+	// One forge post is bounded by reportPostTimeout.
 	reportPostTimeout = time.Minute
-	// reportSettle is how long a terminal post waits before its re-post; it
-	// exceeds reportLease plus reportPostTimeout.
+	// A terminal post is re-posted after reportSettle, which exceeds
+	// reportLease plus reportPostTimeout.
 	reportSettle = 10 * time.Minute
-	// reportRetryBase and reportRetryMax bound the backoff of a failed delivery.
-	reportRetryBase = time.Minute
-	reportRetryMax  = time.Hour
-	// dispatchStatusWorkflowName is the reserved workflow name of the
-	// pipeline-level status. It contains a slash, which no real workflow name can.
+	// The backoff of a failed delivery starts at reportRetryBase, doubles up to
+	// reportRetryMaxShift times, and is capped at reportRetryMax.
+	reportRetryBase     = time.Minute
+	reportRetryMax      = time.Hour
+	reportRetryMaxShift = 6
+	// The pipeline-level status uses the reserved workflow name
+	// dispatchStatusWorkflowName. It contains a slash, which no real workflow name can.
 	dispatchStatusWorkflowName = "pipeline/dispatch"
 )
 
@@ -156,7 +158,7 @@ func newDispatchDelivery(_store store.Store) *dispatchDelivery {
 // retry records a failed delivery attempt and reschedules the report with backoff.
 func (d *dispatchDelivery) retry(report *model.PipelineDispatchReport, cause error) error {
 	report.Attempts++
-	backoff := min(reportRetryBase<<min(report.Attempts-1, 6), reportRetryMax)
+	backoff := min(reportRetryBase<<min(report.Attempts-1, reportRetryMaxShift), reportRetryMax)
 	report.NextAttempt = d.clock().Add(backoff).Unix()
 	report.LastError = cause.Error()
 	return errors.Join(cause, d.write(report, d.store.DispatchReportUpdate))
@@ -226,7 +228,7 @@ func (d *dispatchDelivery) deliverDispatchReport(ctx context.Context, report *mo
 				desired, hasSuccessor = successor.Status, true
 			}
 		}
-		retiring = isTerminalStatus(desired) && !(held && !hasSuccessor)
+		retiring = isTerminalStatus(desired) && (!held || hasSuccessor)
 	}
 
 	repo, err := d.store.GetRepo(report.RepoID)
@@ -272,13 +274,13 @@ func (d *dispatchDelivery) deliverDispatchReport(ctx context.Context, report *mo
 	case err := <-result:
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				// The tick was cancelled; no write, the lease expires.
+				// The tick was canceled; no write, the lease expires.
 				return ctxErr
 			}
 			return d.retry(report, fmt.Errorf("post status: %w", err))
 		}
 	case <-postCtx.Done():
-		// postCtx derives from ctx, so a cancelled tick also lands here.
+		// postCtx derives from ctx, so a canceled tick also lands here.
 		if err := ctx.Err(); err != nil {
 			// No write: the lease expires and the row becomes due again.
 			return err
@@ -324,7 +326,7 @@ func (d *dispatchDelivery) runDispatchDeliveryTick(ctx context.Context) {
 }
 
 // RunDispatchLivenessSweeper runs the orphan detection loop and the report
-// delivery loop until ctx is cancelled. Delivery runs on its own loop, so a
+// delivery loop until ctx is canceled. Delivery runs on its own loop, so a
 // hung forge call cannot stop detection.
 func RunDispatchLivenessSweeper(ctx context.Context, _store store.Store) error {
 	var g errgroup.Group

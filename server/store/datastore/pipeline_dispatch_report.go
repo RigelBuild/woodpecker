@@ -16,6 +16,7 @@ package datastore
 
 import (
 	"fmt"
+	"strings"
 
 	"xorm.io/builder"
 
@@ -24,9 +25,9 @@ import (
 )
 
 // dispatchReportsDueTemplate selects due reports that have something to
-// deliver. p is the flagged pipeline, s the newest later run on the same
-// repo, commit and event. A held flag (p still error with updated equal to
-// flagged_at) mirrors s, or error when there is no later run.
+// deliver. The alias p is the flagged pipeline, and s is the newest later run
+// on the same repo, commit and event. A held flag (p still error with updated
+// equal to flagged_at) mirrors s, or error when there is no later run.
 const dispatchReportsDueTemplate = `SELECT r.* FROM pipeline_dispatch_reports r
 LEFT JOIN pipelines p ON p.id = r.pipeline_id
 LEFT JOIN pipelines s ON s.id = (
@@ -58,10 +59,7 @@ var dispatchTerminalStatuses = []model.StatusValue{
 // DispatchReportsDue returns up to limit reports due at now whose pipeline
 // state has not been delivered yet, whose pipeline is gone, or that are settling.
 func (s storage) DispatchReportsDue(now int64, limit int) ([]*model.PipelineDispatchReport, error) {
-	placeholders := "?"
-	for range dispatchTerminalStatuses[1:] {
-		placeholders += ", ?"
-	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(dispatchTerminalStatuses)), ", ")
 	query := fmt.Sprintf(dispatchReportsDueTemplate, s.engine.Dialect().Quoter().Quote("commit"), placeholders)
 
 	args := make([]any, 0, 5+2*len(dispatchTerminalStatuses))

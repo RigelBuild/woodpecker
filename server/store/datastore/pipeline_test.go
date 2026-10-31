@@ -525,10 +525,14 @@ func dispatchFlagStore(t *testing.T) (*storage, func()) {
 	return newTestStore(t, new(model.Pipeline), new(model.PipelineDispatchReport))
 }
 
-func seedCreatedPipeline(t *testing.T, s *storage, updated int64) *model.Pipeline {
+// dispatchClaimedAt is the claim time the dispatch flag tests use.
+const dispatchClaimedAt = int64(5000)
+
+// seedCreatedPipeline seeds a created pipeline claimed at dispatchClaimedAt.
+func seedCreatedPipeline(t *testing.T, s *storage) *model.Pipeline {
 	t.Helper()
 	p := &model.Pipeline{
-		ID: 1, RepoID: 7, Number: 3, Status: model.StatusCreated, Updated: updated,
+		ID: 1, RepoID: 7, Number: 3, Status: model.StatusCreated, Updated: dispatchClaimedAt,
 		Commit: "abc123", Event: model.EventPull,
 	}
 	_, err := s.engine.NoAutoTime().Insert(p)
@@ -548,12 +552,12 @@ func countReports(t *testing.T, s *storage) int64 {
 }
 
 func TestPipelineDispatchFlag(t *testing.T) {
-	const claimedAt = int64(5000)
+	const claimedAt = dispatchClaimedAt
 
 	t.Run("matching row is flagged with a report", func(t *testing.T) {
 		s, closer := dispatchFlagStore(t)
 		defer closer()
-		p := seedCreatedPipeline(t, s, claimedAt)
+		p := seedCreatedPipeline(t, s)
 		p.Errors = orphanErrors()
 
 		ok, err := s.PipelineDispatchFlag(p, claimedAt)
@@ -586,7 +590,7 @@ func TestPipelineDispatchFlag(t *testing.T) {
 	t.Run("interleaved creator write wins", func(t *testing.T) {
 		s, closer := dispatchFlagStore(t)
 		defer closer()
-		p := seedCreatedPipeline(t, s, claimedAt)
+		p := seedCreatedPipeline(t, s)
 		creator := *p
 		creator.Status = model.StatusPending
 		require.NoError(t, s.UpdatePipeline(&creator))
@@ -604,7 +608,7 @@ func TestPipelineDispatchFlag(t *testing.T) {
 	t.Run("stale claim and second flag lose", func(t *testing.T) {
 		s, closer := dispatchFlagStore(t)
 		defer closer()
-		p := seedCreatedPipeline(t, s, claimedAt)
+		p := seedCreatedPipeline(t, s)
 
 		ok, err := s.PipelineDispatchFlag(p, claimedAt-1)
 		require.NoError(t, err)
@@ -623,7 +627,7 @@ func TestPipelineDispatchFlag(t *testing.T) {
 	t.Run("report insert error rolls back the flag", func(t *testing.T) {
 		s, closer := dispatchFlagStore(t)
 		defer closer()
-		p := seedCreatedPipeline(t, s, claimedAt)
+		p := seedCreatedPipeline(t, s)
 		_, err := s.engine.Insert(&model.PipelineDispatchReport{PipelineID: p.ID, RepoID: p.RepoID})
 		require.NoError(t, err)
 

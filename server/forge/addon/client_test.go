@@ -135,10 +135,7 @@ func TestRPCStatusDeadline(t *testing.T) {
 		}
 		require.NoError(t, pluginContext.Err())
 
-		remaining := time.Until(pluginDeadline)
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining := max(time.Until(pluginDeadline), 0)
 		select {
 		case err := <-remoteResult:
 			require.ErrorIs(t, err, context.DeadlineExceeded)
