@@ -35,8 +35,8 @@
 
         # Locked against this fork's go.sum / web pnpm-lock. To refresh: set to
         # pkgs.lib.fakeHash, build, and paste the hash nix reports.
-        vendorHash = "sha256-uik9NsKUHegaEmQFtfLHVNkptxX2E0QBPlnk5eI42Dc=";
-        webuiHash = "sha256-5YJspSGiUEQybQPG13AzLPae/Swl9V5e/oWd0yrUk6c=";
+        vendorHash = "sha256-8HTCc2bs/8z5cwQ1VTYI2iz9KFXdYUzBPaQR3IRt8b0=";
+        webuiHash = "sha256-bzvBMLnwuPKetCxRE7MY+pm1LB83N+mNY4ngSXhE4S0=";
 
         # Re-rooted to a content-addressed copy of this fork's own subtree
         # (SEA-1860): `self.outPath` is a subpath into the whole-repo store
