@@ -26,6 +26,7 @@ import (
 func maxWorkflowResources(conf *types.Config) Resources {
 	requests := make(map[string]resource.Quantity)
 	limits := make(map[string]resource.Quantity)
+	hasLimits := make(map[string]bool)
 
 	for _, stage := range conf.Stages {
 		for _, step := range stage.Steps {
@@ -33,51 +34,73 @@ func maxWorkflowResources(conf *types.Config) Resources {
 				continue
 			}
 
-			// StartStep only logs a bad options block, so an unparseable step must not fail setup.
 			options, err := parseBackendOptions(step)
 			if err != nil {
 				log.Warn().Err(err).Str("step", step.Name).Msg("skipping step when sizing the clone")
 				continue
 			}
-			if err := mergeResourceMaxima(requests, options.Resources.Requests, step.Name, "requests"); err != nil {
+			stepRequests := make(map[string]resource.Quantity, len(options.Resources.Requests))
+			stepLimits := make(map[string]resource.Quantity, len(options.Resources.Limits))
+			if err := parseResourceQuantities(stepRequests, options.Resources.Requests, step.Name, "requests"); err != nil {
 				log.Warn().Err(err).Msg("skipping step when sizing the clone")
 				continue
 			}
-			if err := mergeResourceMaxima(limits, options.Resources.Limits, step.Name, "limits"); err != nil {
+			if err := parseResourceQuantities(stepLimits, options.Resources.Limits, step.Name, "limits"); err != nil {
 				log.Warn().Err(err).Msg("skipping step when sizing the clone")
+				continue
+			}
+
+			for name, quantity := range stepRequests {
+				mergeQuantityMax(requests, name, quantity)
+			}
+			for name, quantity := range stepLimits {
+				hasLimits[name] = true
+				mergeQuantityMax(limits, name, quantity)
+				if _, hasRequest := stepRequests[name]; !hasRequest {
+					mergeQuantityMax(requests, name, quantity)
+				}
 			}
 		}
 	}
 
+	// Requests drive scheduling, so every effective request is kept. A limit is set only
+	// where some step limits that resource, raised so it never falls below the request.
 	resources := Resources{}
 	if len(requests) > 0 {
 		resources.Requests = make(map[string]string, len(requests))
-		for name, quantity := range requests {
-			resources.Requests[name] = quantity.String()
+		for name, request := range requests {
+			resources.Requests[name] = request.String()
+			if hasLimits[name] {
+				mergeQuantityMax(limits, name, request)
+			}
 		}
 	}
 	if len(limits) > 0 {
 		resources.Limits = make(map[string]string, len(limits))
-		for name, quantity := range limits {
-			resources.Limits[name] = quantity.String()
+		for name, limit := range limits {
+			resources.Limits[name] = limit.String()
 		}
 	}
 
 	return resources
 }
 
-func mergeResourceMaxima(maxima map[string]resource.Quantity, values map[string]string, stepName, field string) error {
+func parseResourceQuantities(parsed map[string]resource.Quantity, values map[string]string, stepName, field string) error {
 	for name, value := range values {
 		quantity, err := resource.ParseQuantity(value)
 		if err != nil {
 			return fmt.Errorf("resource %s for step %q, quantity %q: %w", field, stepName, value, err)
 		}
-		current, ok := maxima[name]
-		if !ok || quantity.Cmp(current) > 0 {
-			maxima[name] = quantity.DeepCopy()
-		}
+		parsed[name] = quantity
 	}
 	return nil
+}
+
+func mergeQuantityMax(maxima map[string]resource.Quantity, name string, quantity resource.Quantity) {
+	current, ok := maxima[name]
+	if !ok || quantity.Cmp(current) > 0 {
+		maxima[name] = quantity.DeepCopy()
+	}
 }
 
 func (e *kube) setWorkflowResources(taskUUID string, resources Resources) {

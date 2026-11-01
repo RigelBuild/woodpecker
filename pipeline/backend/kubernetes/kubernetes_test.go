@@ -214,7 +214,7 @@ func TestStartStepReservesWorkflowMaxResources(t *testing.T) {
 	clone := makeResourceTestStep("clone-max", "clone", types.StepTypeClone, nil, nil)
 	step3Gi := makeResourceTestStep("step-3gi", "step-3gi", types.StepTypeCommands,
 		map[string]string{"memory": "3Gi", "cpu": "2"},
-		map[string]string{"memory": "3Gi", "cpu": "1"},
+		map[string]string{"memory": "3Gi", "cpu": "2"},
 	)
 	step7Gi := makeResourceTestStep("step-7gi", "step-7gi", types.StepTypePlugin,
 		map[string]string{"memory": "7Gi", "cpu": "500m"},
@@ -231,6 +231,85 @@ func TestStartStepReservesWorkflowMaxResources(t *testing.T) {
 	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceCPU, "2")
 	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceMemory, "7Gi")
 	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceCPU, "2")
+	assertCloneRequestsDoNotExceedLimits(t, kube_core_v1.ResourceRequirements{
+		Requests: pod.Spec.Containers[0].Resources.Requests,
+		Limits:   pod.Spec.Containers[0].Resources.Limits,
+	})
+}
+
+func TestCloneResourcesCombineEffectiveRequestsAndLimits(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-effective-max"
+	clone := makeResourceTestStep("clone-effective-max", "clone", types.StepTypeClone, nil, nil)
+	requestOnly := makeResourceTestStep("step-request-only", "request-only", types.StepTypeCommands,
+		map[string]string{"memory": "8Gi"}, nil)
+	limitOnly := makeResourceTestStep("step-limit-only", "limit-only", types.StepTypeCommands,
+		nil, map[string]string{"memory": "4Gi"})
+	conf := makeResourceTestWorkflow(taskUUID, clone, requestOnly, limitOnly)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	resources := getResourceTestPod(t, client, clone).Spec.Containers[0].Resources
+	assertResourceQuantity(t, resources.Requests, kube_core_v1.ResourceMemory, "8Gi")
+	assertResourceQuantity(t, resources.Limits, kube_core_v1.ResourceMemory, "8Gi")
+	assertCloneRequestsDoNotExceedLimits(t, resources)
+}
+
+func TestCloneResourcesKeepRequestsWithoutLimits(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-request-without-limit"
+	clone := makeResourceTestStep("clone-request-without-limit", "clone", types.StepTypeClone, nil, nil)
+	step := makeResourceTestStep("step-request-without-limit", "cpu-unlimited", types.StepTypeCommands,
+		map[string]string{"cpu": "1", "memory": "7Gi"}, map[string]string{"memory": "7Gi"})
+	conf := makeResourceTestWorkflow(taskUUID, clone, step)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	resources := getResourceTestPod(t, client, clone).Spec.Containers[0].Resources
+	assert.Equal(t, "1", resources.Requests.Cpu().String())
+	assert.Equal(t, "7Gi", resources.Requests.Memory().String())
+	assert.Equal(t, "7Gi", resources.Limits.Memory().String())
+	assert.NotContains(t, resources.Limits, kube_core_v1.ResourceCPU)
+	assertCloneRequestsDoNotExceedLimits(t, resources)
+}
+
+func TestCloneResourcesUseLimitAsEffectiveRequest(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-limit-request"
+	clone := makeResourceTestStep("clone-limit-request", "clone", types.StepTypeClone, nil, nil)
+	limitOnly := makeResourceTestStep("step-limit-six", "limit-only", types.StepTypeCommands,
+		nil, map[string]string{"memory": "6Gi"})
+	requestOnly := makeResourceTestStep("step-request-two", "request-only", types.StepTypeCommands,
+		map[string]string{"memory": "2Gi"}, nil)
+	conf := makeResourceTestWorkflow(taskUUID, clone, limitOnly, requestOnly)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	resources := getResourceTestPod(t, client, clone).Spec.Containers[0].Resources
+	assertResourceQuantity(t, resources.Requests, kube_core_v1.ResourceMemory, "6Gi")
+	assertResourceQuantity(t, resources.Limits, kube_core_v1.ResourceMemory, "6Gi")
+	assertCloneRequestsDoNotExceedLimits(t, resources)
+}
+
+func TestSetupWorkflowSkipsMalformedResourceStepAtomically(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-malformed-resources"
+	clone := makeResourceTestStep("clone-malformed-resources", "clone", types.StepTypeClone, nil, nil)
+	bad := makeResourceTestStep("step-malformed-resources", "bad", types.StepTypeCommands,
+		map[string]string{"memory": "11Gi", "cpu": "9"},
+		map[string]string{"memory": "12Gi", "cpu": "lots"})
+	good := makeResourceTestStep("step-valid-resources", "good", types.StepTypeCommands,
+		map[string]string{"memory": "5Gi"}, map[string]string{"memory": "5Gi"})
+	conf := makeResourceTestWorkflow(taskUUID, clone, bad, good)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	resources := getResourceTestPod(t, client, clone).Spec.Containers[0].Resources
+	assertResourceQuantity(t, resources.Requests, kube_core_v1.ResourceMemory, "5Gi")
+	assertResourceQuantity(t, resources.Limits, kube_core_v1.ResourceMemory, "5Gi")
+	assert.NotContains(t, resources.Requests, kube_core_v1.ResourceCPU)
+	assert.NotContains(t, resources.Limits, kube_core_v1.ResourceCPU)
+	assertCloneRequestsDoNotExceedLimits(t, resources)
 }
 
 func TestStartStepKeepsCloneResourceOverrides(t *testing.T) {
@@ -247,8 +326,11 @@ func TestStartStepKeepsCloneResourceOverrides(t *testing.T) {
 	pod := getResourceTestPod(t, client, clone)
 	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceMemory, "1Gi")
 	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceMemory, "2Gi")
+	assertCloneRequestsDoNotExceedLimits(t, kube_core_v1.ResourceRequirements{
+		Requests: pod.Spec.Containers[0].Resources.Requests,
+		Limits:   pod.Spec.Containers[0].Resources.Limits,
+	})
 }
-
 func TestStartStepLeavesCloneResourcesEmptyWithoutStepResources(t *testing.T) {
 	engine, client := makeResourceTestEngine()
 	taskUUID := "workflow-no-resources"
@@ -309,6 +391,24 @@ func TestStartStepResourceRequirementsDoNotMixConcurrentTasks(t *testing.T) {
 		want string
 		err  error
 	}
+	setupResults := make(chan error, len(workflows))
+	setupStart := make(chan struct{})
+	for _, workflow := range workflows {
+		go func(workflow struct {
+			taskUUID string
+			conf     *types.Config
+			clone    *types.Step
+			want     string
+		}) {
+			<-setupStart
+			setupResults <- engine.SetupWorkflow(t.Context(), workflow.conf, workflow.taskUUID)
+		}(workflow)
+	}
+	close(setupStart)
+	for range workflows {
+		require.NoError(t, <-setupResults)
+	}
+
 	results := make(chan result, len(workflows))
 	start := make(chan struct{})
 	for _, workflow := range workflows {
@@ -319,10 +419,6 @@ func TestStartStepResourceRequirementsDoNotMixConcurrentTasks(t *testing.T) {
 			want     string
 		}) {
 			<-start
-			if err := engine.SetupWorkflow(t.Context(), workflow.conf, workflow.taskUUID); err != nil {
-				results <- result{err: err}
-				return
-			}
 			if err := engine.StartStep(t.Context(), workflow.clone, workflow.taskUUID); err != nil {
 				results <- result{err: err}
 				return
@@ -336,14 +432,15 @@ func TestStartStepResourceRequirementsDoNotMixConcurrentTasks(t *testing.T) {
 			results <- result{pod: pod, want: workflow.want, err: err}
 		}(workflow)
 	}
-
 	close(start)
 	for range workflows {
 		got := <-results
 		require.NoError(t, got.err)
 		require.NotNil(t, got.pod)
-		assertResourceQuantity(t, got.pod.Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceMemory, got.want)
-		assertResourceQuantity(t, got.pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceMemory, got.want)
+		resources := got.pod.Spec.Containers[0].Resources
+		assertResourceQuantity(t, resources.Requests, kube_core_v1.ResourceMemory, got.want)
+		assertResourceQuantity(t, resources.Limits, kube_core_v1.ResourceMemory, got.want)
+		assertCloneRequestsDoNotExceedLimits(t, resources)
 	}
 }
 
@@ -414,6 +511,15 @@ func assertResourceQuantity(t *testing.T, resources kube_core_v1.ResourceList, n
 	got, ok := resources[name]
 	require.True(t, ok, "resource %q is missing", name)
 	assert.Equal(t, 0, got.Cmp(kube_resource.MustParse(want)))
+}
+
+func assertCloneRequestsDoNotExceedLimits(t *testing.T, resources kube_core_v1.ResourceRequirements) {
+	t.Helper()
+	for name, request := range resources.Requests {
+		if limit, ok := resources.Limits[name]; ok {
+			assert.LessOrEqual(t, request.Cmp(limit), 0, "clone request %q exceeds its limit", name)
+		}
+	}
 }
 
 func createPod(
