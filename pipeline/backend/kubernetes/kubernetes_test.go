@@ -292,24 +292,36 @@ func TestCloneResourcesUseLimitAsEffectiveRequest(t *testing.T) {
 }
 
 func TestSetupWorkflowSkipsMalformedResourceStepAtomically(t *testing.T) {
-	engine, client := makeResourceTestEngine()
-	taskUUID := "workflow-malformed-resources"
-	clone := makeResourceTestStep("clone-malformed-resources", "clone", types.StepTypeClone, nil, nil)
-	bad := makeResourceTestStep("step-malformed-resources", "bad", types.StepTypeCommands,
-		map[string]string{"memory": "11Gi", "cpu": "9"},
-		map[string]string{"memory": "12Gi", "cpu": "lots"})
-	good := makeResourceTestStep("step-valid-resources", "good", types.StepTypeCommands,
-		map[string]string{"memory": "5Gi"}, map[string]string{"memory": "5Gi"})
-	conf := makeResourceTestWorkflow(taskUUID, clone, bad, good)
+	cases := map[string]struct{ requests, limits map[string]string }{
+		"bad limit": {
+			requests: map[string]string{"memory": "11Gi", "cpu": "9"},
+			limits:   map[string]string{"memory": "12Gi", "cpu": "lots"},
+		},
+		"bad request": {
+			requests: map[string]string{"memory": "11Gi", "cpu": "lots"},
+			limits:   map[string]string{"memory": "12Gi", "cpu": "9"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			engine, client := makeResourceTestEngine()
+			taskUUID := "workflow-malformed-resources"
+			clone := makeResourceTestStep("clone-malformed-resources", "clone", types.StepTypeClone, nil, nil)
+			bad := makeResourceTestStep("step-malformed-resources", "bad", types.StepTypeCommands, tc.requests, tc.limits)
+			good := makeResourceTestStep("step-valid-resources", "good", types.StepTypeCommands,
+				map[string]string{"memory": "5Gi"}, map[string]string{"memory": "5Gi"})
+			conf := makeResourceTestWorkflow(taskUUID, clone, bad, good)
 
-	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
-	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
-	resources := getResourceTestPod(t, client, clone).Spec.Containers[0].Resources
-	assertResourceQuantity(t, resources.Requests, kube_core_v1.ResourceMemory, "5Gi")
-	assertResourceQuantity(t, resources.Limits, kube_core_v1.ResourceMemory, "5Gi")
-	assert.NotContains(t, resources.Requests, kube_core_v1.ResourceCPU)
-	assert.NotContains(t, resources.Limits, kube_core_v1.ResourceCPU)
-	assertCloneRequestsDoNotExceedLimits(t, resources)
+			require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+			require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+			resources := getResourceTestPod(t, client, clone).Spec.Containers[0].Resources
+			assertResourceQuantity(t, resources.Requests, kube_core_v1.ResourceMemory, "5Gi")
+			assertResourceQuantity(t, resources.Limits, kube_core_v1.ResourceMemory, "5Gi")
+			assert.NotContains(t, resources.Requests, kube_core_v1.ResourceCPU)
+			assert.NotContains(t, resources.Limits, kube_core_v1.ResourceCPU)
+			assertCloneRequestsDoNotExceedLimits(t, resources)
+		})
+	}
 }
 
 func TestStartStepKeepsCloneResourceOverrides(t *testing.T) {
@@ -331,6 +343,7 @@ func TestStartStepKeepsCloneResourceOverrides(t *testing.T) {
 		Limits:   pod.Spec.Containers[0].Resources.Limits,
 	})
 }
+
 func TestStartStepLeavesCloneResourcesEmptyWithoutStepResources(t *testing.T) {
 	engine, client := makeResourceTestEngine()
 	taskUUID := "workflow-no-resources"
