@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
@@ -421,4 +422,193 @@ func TestUpdatePipelineIfStatus(t *testing.T) {
 	stored, err := store.GetPipeline(blocked.ID)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusDeclined, stored.Status)
+}
+
+func TestOrphanedDispatchPipelines(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	const olderThan = int64(1000)
+	// Seed timestamps with auto-time disabled so updated keeps the given value.
+	_, err := store.engine.NoAutoTime().Insert([]*model.Pipeline{
+		{ID: 1, RepoID: 1, Number: 1, Status: model.StatusCreated, Updated: olderThan + 5}, // too young
+		{ID: 2, RepoID: 1, Number: 2, Status: model.StatusCreated, Updated: olderThan - 5}, // orphan
+		{ID: 3, RepoID: 1, Number: 3, Status: model.StatusBlocked, Updated: olderThan - 5}, // awaiting approval
+		{ID: 4, RepoID: 1, Number: 4, Status: model.StatusPending, Updated: olderThan - 5}, // created arm only
+		{ID: 5, RepoID: 1, Number: 5, Status: model.StatusCreated, Updated: olderThan - 1}, // orphan
+	})
+	require.NoError(t, err)
+
+	orphans, err := store.OrphanedDispatchPipelines(olderThan, 10)
+	require.NoError(t, err)
+	ids := make([]int64, 0, len(orphans))
+	for _, p := range orphans {
+		ids = append(ids, p.ID)
+	}
+	assert.Equal(t, []int64{2, 5}, ids)
+
+	orphans, err = store.OrphanedDispatchPipelines(olderThan, 1)
+	require.NoError(t, err)
+	require.Len(t, orphans, 1)
+	assert.EqualValues(t, 2, orphans[0].ID)
+}
+
+func TestPipelineDispatchClaim(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	_, err := store.engine.NoAutoTime().Insert(&model.Pipeline{
+		ID: 1, RepoID: 1, Number: 1, Status: model.StatusCreated, Updated: 100,
+	})
+	require.NoError(t, err)
+
+	seen, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	stale := *seen
+
+	const now = int64(5000)
+	ok, err := store.PipelineDispatchClaim(seen, now)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	stored, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	assert.EqualValues(t, now, stored.Updated)
+	assert.Equal(t, model.StatusCreated, stored.Status)
+
+	// A second claim with the stale updated value loses.
+	ok, err = store.PipelineDispatchClaim(&stale, now+1)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	// A claim after an interleaved creator write loses.
+	fresh, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	creator := *fresh
+	creator.Status = model.StatusPending
+	require.NoError(t, store.UpdatePipeline(&creator))
+	ok, err = store.PipelineDispatchClaim(fresh, now+2)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	stored, err = store.GetPipeline(1)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, stored.Status)
+}
+
+func dispatchFlagStore(t *testing.T) (*storage, func()) {
+	return newTestStore(t, new(model.Pipeline), new(model.PipelineDispatchReport))
+}
+
+// dispatchClaimedAt is the claim time the dispatch flag tests use.
+const dispatchClaimedAt = int64(5000)
+
+// seedCreatedPipeline seeds a created pipeline claimed at dispatchClaimedAt.
+func seedCreatedPipeline(t *testing.T, s *storage) *model.Pipeline {
+	t.Helper()
+	p := &model.Pipeline{
+		ID: 1, RepoID: 7, Number: 3, Status: model.StatusCreated, Updated: dispatchClaimedAt,
+		Commit: "abc123", Event: model.EventPull,
+	}
+	_, err := s.engine.NoAutoTime().Insert(p)
+	require.NoError(t, err)
+	return p
+}
+
+func orphanErrors() []*pipeline_errors.PipelineError {
+	return []*pipeline_errors.PipelineError{{Type: pipeline_errors.PipelineErrorTypeGeneric, Message: "orphan"}}
+}
+
+func countReports(t *testing.T, s *storage) int64 {
+	t.Helper()
+	n, err := s.engine.Count(new(model.PipelineDispatchReport))
+	require.NoError(t, err)
+	return n
+}
+
+func TestPipelineDispatchFlag(t *testing.T) {
+	const claimedAt = dispatchClaimedAt
+
+	t.Run("matching row is flagged with a report", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+		p.Errors = orphanErrors()
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.True(t, ok)
+
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusError, stored.Status)
+		assert.Equal(t, orphanErrors(), stored.Errors)
+		assert.EqualValues(t, claimedAt, stored.Started)
+		assert.EqualValues(t, claimedAt, stored.Finished)
+		assert.EqualValues(t, claimedAt, stored.Updated)
+
+		reports := make([]*model.PipelineDispatchReport, 0)
+		require.NoError(t, s.engine.Find(&reports))
+		require.Len(t, reports, 1)
+		r := reports[0]
+		assert.EqualValues(t, p.ID, r.PipelineID)
+		assert.EqualValues(t, p.RepoID, r.RepoID)
+		assert.EqualValues(t, claimedAt, r.FlaggedAt)
+		assert.EqualValues(t, claimedAt, r.NextAttempt)
+		assert.Empty(t, r.Delivered)
+		require.NotNil(t, r.Snapshot)
+		assert.Equal(t, "abc123", r.Snapshot.Commit)
+		assert.Equal(t, model.EventPull, r.Snapshot.Event)
+		assert.EqualValues(t, 3, r.Snapshot.Number)
+	})
+
+	t.Run("interleaved creator write wins", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+		creator := *p
+		creator.Status = model.StatusPending
+		require.NoError(t, s.UpdatePipeline(&creator))
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusPending, stored.Status)
+		assert.Zero(t, stored.Finished)
+		assert.Zero(t, countReports(t, s))
+	})
+
+	t.Run("stale claim and second flag lose", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt-1)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Zero(t, countReports(t, s))
+
+		ok, err = s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.True(t, ok)
+		ok, err = s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.EqualValues(t, 1, countReports(t, s))
+	})
+
+	t.Run("report insert error rolls back the flag", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+		_, err := s.engine.Insert(&model.PipelineDispatchReport{PipelineID: p.ID, RepoID: p.RepoID})
+		require.NoError(t, err)
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		assert.Error(t, err)
+		assert.False(t, ok)
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusCreated, stored.Status)
+	})
 }

@@ -454,3 +454,55 @@ func TestStatusSkippedNoCommitStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, statusPosted, "skipped workflows must not be reported via commit status")
 }
+
+// TestCheckRunDispatchStatusIdentity pins the check-run identity of the
+// pipeline-level dispatch status. Its synthetic workflow has ID 0, so keying
+// by workflow ID would give two orphans on one commit the same ExternalID and
+// cache key, and the second would rename the first's check-run.
+func TestCheckRunDispatchStatusIdentity(t *testing.T) {
+	setCheckRunStatusContext(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	var externalIDs []string
+	opts := append(
+		checkRunAppTokenMocks(),
+		github_mock.WithRequestMatchHandler(
+			github_mock.GetReposCommitsCheckRunsByOwnerByRepoByRef,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if _, err := w.Write([]byte(`{"total_count":0,"check_runs":[]}`)); err != nil {
+					t.Errorf("write list response: %v", err)
+				}
+			}),
+		),
+		github_mock.WithRequestMatchHandler(
+			github_mock.PostReposCheckRunsByOwnerByRepo,
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var created github.CreateCheckRunOptions
+				if err := json.NewDecoder(r.Body).Decode(&created); err != nil {
+					t.Errorf("decode create request: %v", err)
+				}
+				externalIDs = append(externalIDs, created.GetExternalID())
+				w.WriteHeader(http.StatusCreated)
+				if _, err := w.Write([]byte(`{"id":1}`)); err != nil {
+					t.Errorf("write create response: %v", err)
+				}
+			}),
+		),
+	)
+	gh, err := github.NewClient(github.WithHTTPClient(github_mock.NewMockedHTTPClient(opts...)))
+	require.NoError(t, err)
+	ctx := context.WithValue(t.Context(), githubClientKey, gh)
+
+	c := &client{API: defaultAPI, url: defaultURL, appID: 123, appKey: key}
+	repo := &model.Repo{Owner: "o", Name: "r"}
+	user := &model.User{AccessToken: "x"}
+	dispatch := &model.Workflow{ID: 0, PID: 0, Name: "pipeline/dispatch", State: model.StatusError}
+
+	for _, id := range []int64{41, 42} {
+		pipeline := &model.Pipeline{ID: id, Commit: "abc123", Event: model.EventPull}
+		require.NoError(t, c.Status(ctx, user, repo, pipeline, dispatch))
+	}
+
+	assert.Equal(t, []string{"dispatch-41", "dispatch-42"}, externalIDs)
+}

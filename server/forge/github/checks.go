@@ -75,7 +75,7 @@ func checkRunConclusion(status model.StatusValue) string {
 // under a merge-queue burst. A terminal (completed) check-run is never
 // downgraded by a later out-of-order status.
 func (c *client) createOrUpdateCheckRun(ctx context.Context, gh *github.Client, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow) error {
-	externalID := strconv.FormatInt(workflow.ID, 10)
+	externalID := checkRunExternalID(pipeline, workflow)
 	name := common.GetPipelineStatusContext(repo, pipeline, workflow)
 	detailsURL := common.GetPipelineStatusURL(repo, pipeline, workflow)
 	status := checkRunStatus(workflow.State)
@@ -158,6 +158,16 @@ func (c *client) createOrUpdateCheckRun(ctx context.Context, gh *github.Client, 
 	}
 	c.storeCheckRun(key, checkRunRef{id: run.GetID(), status: status})
 	return nil
+}
+
+// checkRunExternalID keys a check-run by its workflow. The pipeline-level
+// dispatch status has no workflow (ID 0), so it is keyed by pipeline instead;
+// otherwise every dispatch status on a commit would share one check-run.
+func checkRunExternalID(pipeline *model.Pipeline, workflow *model.Workflow) string {
+	if workflow.ID == 0 {
+		return "dispatch-" + strconv.FormatInt(pipeline.ID, 10)
+	}
+	return strconv.FormatInt(workflow.ID, 10)
 }
 
 // findCheckRun returns the check-run this app previously created for the commit

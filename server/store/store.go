@@ -94,6 +94,24 @@ type Store interface {
 	UpdatePipelineIfStatus(*model.Pipeline, model.StatusValue) error
 	// DeletePipeline deletes a pipeline.
 	DeletePipeline(*model.Pipeline) error
+	// OrphanedDispatchPipelines gets created pipelines last written before olderThan.
+	OrphanedDispatchPipelines(olderThan int64, limit int) ([]*model.Pipeline, error)
+	// PipelineDispatchClaim claims an orphaned pipeline by moving updated to now
+	// while id, updated and status still match the passed pipeline.
+	PipelineDispatchClaim(pipeline *model.Pipeline, now int64) (bool, error)
+	// PipelineDispatchFlag marks a claimed orphan as error and inserts its
+	// dispatch report in one transaction, while the row is still created and claimed.
+	PipelineDispatchFlag(pipeline *model.Pipeline, claimedAt int64) (bool, error)
+	// PipelineDispatchSuccessor gets the newest later pipeline on the same repo, commit and event.
+	PipelineDispatchSuccessor(pipeline *model.Pipeline) (*model.Pipeline, error)
+	// DispatchReportsDue gets dispatch reports due at now that have something to deliver.
+	DispatchReportsDue(now int64, limit int) ([]*model.PipelineDispatchReport, error)
+	// DispatchReportClaim leases a dispatch report until leaseUntil and increments its claim.
+	DispatchReportClaim(report *model.PipelineDispatchReport, leaseUntil int64) (bool, error)
+	// DispatchReportUpdate writes a dispatch report held under its claim.
+	DispatchReportUpdate(report *model.PipelineDispatchReport) error
+	// DispatchReportDelete deletes a dispatch report held under its claim.
+	DispatchReportDelete(report *model.PipelineDispatchReport) error
 
 	// Feeds
 	UserFeed(*model.User) ([]*model.Feed, error)

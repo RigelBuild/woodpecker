@@ -522,6 +522,38 @@ steps:
 	}
 }
 
+// TestReservedDispatchWorkflowName pins that a workflow cannot take the name
+// of the server's pipeline-level dispatch status, which would let it share and
+// overwrite that status context.
+func TestReservedDispatchWorkflowName(t *testing.T) {
+	t.Parallel()
+
+	m := &testMetadata{pipelineEvent: "push"}
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{
+			{Name: ".woodpecker/dispatch.yml", Data: []byte(`
+name: pipeline/dispatch
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)},
+		},
+	}
+
+	items, err := b.Build()
+	assert.Empty(t, items)
+	assert.True(t, errors.HasBlockingErrors(err), "the reserved name must block the pipeline")
+	var pipelineErr *errors.PipelineError
+	if assert.ErrorAs(t, err, &pipelineErr) {
+		assert.Equal(t, errors.PipelineErrorTypeCompiler, pipelineErr.Type)
+		assert.Contains(t, pipelineErr.Message, DispatchStatusWorkflowName)
+	}
+}
+
 func TestDuplicateWorkflowNameWarning(t *testing.T) {
 	t.Parallel()
 

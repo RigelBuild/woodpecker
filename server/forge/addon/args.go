@@ -33,10 +33,11 @@ type argumentsFileDir struct {
 }
 
 type argumentsStatus struct {
-	U *modelUser      `json:"u"`
-	R *modelRepo      `json:"r"`
-	B *model.Pipeline `json:"b"`
-	P *model.Workflow `json:"p"`
+	U        *modelUser      `json:"u"`
+	R        *modelRepo      `json:"r"`
+	B        *model.Pipeline `json:"b"`
+	P        *model.Workflow `json:"p"`
+	Deadline int64           `json:"deadline,omitempty"`
 }
 
 type argumentsNetrc struct {
