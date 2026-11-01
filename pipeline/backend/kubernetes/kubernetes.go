@@ -58,10 +58,12 @@ const (
 )
 
 type kube struct {
-	client kubernetes.Interface
-	config *config
-	goos   string
-	nodes  sync.Map
+	client              kubernetes.Interface
+	config              *config
+	goos                string
+	nodes               sync.Map
+	workflowResourcesMu sync.RWMutex
+	workflowResources   map[string]Resources
 }
 
 func (e *kube) recordNode(pod *kube_core_v1.Pod) {
@@ -403,6 +405,7 @@ func (e *kube) getConfig() *config {
 
 // SetupWorkflow sets up the pipeline environment.
 func (e *kube) SetupWorkflow(ctx context.Context, conf *types.Config, taskUUID string) error {
+	e.setWorkflowResources(taskUUID, maxWorkflowResources(conf))
 	log.Trace().Str("taskUUID", taskUUID).Msgf("Setting up Kubernetes primitives")
 
 	namespace := e.config.GetNamespace(conf.Stages[0].Steps[0].OrgID)
@@ -446,6 +449,9 @@ func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string)
 	options, err := parseBackendOptions(step)
 	if err != nil {
 		log.Error().Err(err).Msg("could not parse backend options")
+	}
+	if step.Type == types.StepTypeClone && len(options.Resources.Requests) == 0 && len(options.Resources.Limits) == 0 {
+		options.Resources = e.getWorkflowResources(taskUUID)
 	}
 
 	if needsRegistrySecret(step) {
@@ -698,6 +704,7 @@ func (e *kube) DestroyStep(ctx context.Context, step *types.Step, taskUUID strin
 
 // DestroyWorkflow destroys the pipeline environment.
 func (e *kube) DestroyWorkflow(ctx context.Context, conf *types.Config, taskUUID string) error {
+	e.deleteWorkflowResources(taskUUID)
 	log.Trace().Str("taskUUID", taskUUID).Msg("deleting Kubernetes primitives")
 
 	for _, stage := range conf.Stages {

@@ -32,6 +32,7 @@ import (
 	"github.com/urfave/cli/v3"
 	kube_core_v1 "k8s.io/api/core/v1"
 	kube_errors "k8s.io/apimachinery/pkg/api/errors"
+	kube_resource "k8s.io/apimachinery/pkg/api/resource"
 	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kube_runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -205,6 +206,214 @@ func makeEngine(client *fake.Clientset) *kube {
 			Namespace: "test-ns",
 		},
 	}
+}
+
+func TestStartStepReservesWorkflowMaxResources(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-max"
+	clone := makeResourceTestStep("clone-max", "clone", types.StepTypeClone, nil, nil)
+	step3Gi := makeResourceTestStep("step-3gi", "step-3gi", types.StepTypeCommands,
+		map[string]string{"memory": "3Gi", "cpu": "2"},
+		map[string]string{"memory": "3Gi", "cpu": "1"},
+	)
+	step7Gi := makeResourceTestStep("step-7gi", "step-7gi", types.StepTypePlugin,
+		map[string]string{"memory": "7Gi", "cpu": "500m"},
+		map[string]string{"memory": "7Gi", "cpu": "2"},
+	)
+	service := makeResourceTestStep("service-large", "service", types.StepTypeService,
+		map[string]string{"memory": "99Gi"}, map[string]string{"memory": "99Gi"})
+	conf := makeResourceTestWorkflow(taskUUID, clone, step3Gi, step7Gi, service)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	pod := getResourceTestPod(t, client, clone)
+	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceMemory, "7Gi")
+	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceCPU, "2")
+	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceMemory, "7Gi")
+	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceCPU, "2")
+}
+
+func TestStartStepKeepsCloneResourceOverrides(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-clone-override"
+	clone := makeResourceTestStep("clone-override", "clone", types.StepTypeClone,
+		map[string]string{"memory": "1Gi"}, map[string]string{"memory": "2Gi"})
+	step := makeResourceTestStep("step-large", "step-large", types.StepTypeCommands,
+		map[string]string{"memory": "7Gi"}, map[string]string{"memory": "7Gi"})
+	conf := makeResourceTestWorkflow(taskUUID, clone, step)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	pod := getResourceTestPod(t, client, clone)
+	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceMemory, "1Gi")
+	assertResourceQuantity(t, pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceMemory, "2Gi")
+}
+
+func TestStartStepLeavesCloneResourcesEmptyWithoutStepResources(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-no-resources"
+	clone := makeResourceTestStep("clone-no-resources", "clone", types.StepTypeClone, nil, nil)
+	step := makeResourceTestStep("step-no-resources", "step", types.StepTypeCommands, nil, nil)
+	conf := makeResourceTestWorkflow(taskUUID, clone, step)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	pod := getResourceTestPod(t, client, clone)
+	assert.Empty(t, pod.Spec.Containers[0].Resources.Requests)
+	assert.Empty(t, pod.Spec.Containers[0].Resources.Limits)
+}
+
+func TestSetupWorkflowSkipsStepWithBadQuantity(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-bad-quantity"
+	clone := makeResourceTestStep("clone-bad", "clone", types.StepTypeClone, nil, nil)
+	bad := makeResourceTestStep("step-bad", "bad", types.StepTypeCommands,
+		map[string]string{"memory": "lots"}, nil)
+	good := makeResourceTestStep("step-good", "good", types.StepTypeCommands,
+		map[string]string{"memory": "5Gi"}, map[string]string{"memory": "5Gi"})
+	conf := makeResourceTestWorkflow(taskUUID, clone, bad, good)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	pod := getResourceTestPod(t, client, clone)
+	assert.Equal(t, "5Gi", pod.Spec.Containers[0].Resources.Limits.Memory().String())
+}
+
+func TestStartStepResourceRequirementsDoNotMixConcurrentTasks(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	workflows := []struct {
+		taskUUID string
+		conf     *types.Config
+		clone    *types.Step
+		want     string
+	}{
+		{
+			taskUUID: "workflow-small",
+			clone:    makeResourceTestStep("clone-small", "clone", types.StepTypeClone, nil, nil),
+			want:     "3Gi",
+		},
+		{
+			taskUUID: "workflow-large",
+			clone:    makeResourceTestStep("clone-large", "clone", types.StepTypeClone, nil, nil),
+			want:     "7Gi",
+		},
+	}
+	for i := range workflows {
+		step := makeResourceTestStep("step-"+workflows[i].taskUUID, "step", types.StepTypeCommands,
+			map[string]string{"memory": workflows[i].want}, map[string]string{"memory": workflows[i].want})
+		workflows[i].conf = makeResourceTestWorkflow(workflows[i].taskUUID, workflows[i].clone, step)
+	}
+
+	type result struct {
+		pod  *kube_core_v1.Pod
+		want string
+		err  error
+	}
+	results := make(chan result, len(workflows))
+	start := make(chan struct{})
+	for _, workflow := range workflows {
+		go func(workflow struct {
+			taskUUID string
+			conf     *types.Config
+			clone    *types.Step
+			want     string
+		}) {
+			<-start
+			if err := engine.SetupWorkflow(t.Context(), workflow.conf, workflow.taskUUID); err != nil {
+				results <- result{err: err}
+				return
+			}
+			if err := engine.StartStep(t.Context(), workflow.clone, workflow.taskUUID); err != nil {
+				results <- result{err: err}
+				return
+			}
+			podName, err := stepToPodName(workflow.clone)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			pod, err := client.CoreV1().Pods("test-ns").Get(t.Context(), podName, kube_meta_v1.GetOptions{})
+			results <- result{pod: pod, want: workflow.want, err: err}
+		}(workflow)
+	}
+
+	close(start)
+	for range workflows {
+		got := <-results
+		require.NoError(t, got.err)
+		require.NotNil(t, got.pod)
+		assertResourceQuantity(t, got.pod.Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceMemory, got.want)
+		assertResourceQuantity(t, got.pod.Spec.Containers[0].Resources.Limits, kube_core_v1.ResourceMemory, got.want)
+	}
+}
+
+func TestDestroyWorkflowDropsWorkflowResources(t *testing.T) {
+	engine, client := makeResourceTestEngine()
+	taskUUID := "workflow-destroy-resources"
+	clone := makeResourceTestStep("clone-destroy-resources", "clone", types.StepTypeClone, nil, nil)
+	step := makeResourceTestStep("step-destroy-resources", "step", types.StepTypeCommands,
+		map[string]string{"memory": "7Gi"}, map[string]string{"memory": "7Gi"})
+	conf := makeResourceTestWorkflow(taskUUID, clone, step)
+
+	require.NoError(t, engine.SetupWorkflow(t.Context(), conf, taskUUID))
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	assertResourceQuantity(t, getResourceTestPod(t, client, clone).Spec.Containers[0].Resources.Requests, kube_core_v1.ResourceMemory, "7Gi")
+	require.NoError(t, engine.DestroyWorkflow(t.Context(), conf, taskUUID))
+
+	require.NoError(t, engine.StartStep(t.Context(), clone, taskUUID))
+	pod := getResourceTestPod(t, client, clone)
+	assert.Empty(t, pod.Spec.Containers[0].Resources.Requests)
+	assert.Empty(t, pod.Spec.Containers[0].Resources.Limits)
+}
+
+func makeResourceTestEngine() (*kube, *fake.Clientset) {
+	client := fake.NewClientset()
+	return &kube{
+		client: client,
+		config: &config{
+			Namespace:    "test-ns",
+			StorageClass: "hdd",
+			VolumeSize:   "1Gi",
+		},
+	}, client
+}
+
+func makeResourceTestStep(uuid, name string, stepType types.StepType, requests, limits map[string]string) *types.Step {
+	step := &types.Step{UUID: uuid, Name: name, OrgID: 1, Type: stepType}
+	if requests != nil || limits != nil {
+		step.BackendOptions = map[string]any{
+			"kubernetes": map[string]any{
+				"resources": map[string]any{
+					"requests": requests,
+					"limits":   limits,
+				},
+			},
+		}
+	}
+	return step
+}
+
+func makeResourceTestWorkflow(taskUUID string, steps ...*types.Step) *types.Config {
+	return &types.Config{
+		Volume: "workspace-" + taskUUID,
+		Stages: []*types.Stage{{Steps: steps}},
+	}
+}
+
+func getResourceTestPod(t *testing.T, client *fake.Clientset, step *types.Step) *kube_core_v1.Pod {
+	t.Helper()
+	name, err := stepToPodName(step)
+	require.NoError(t, err)
+	pod, err := client.CoreV1().Pods("test-ns").Get(t.Context(), name, kube_meta_v1.GetOptions{})
+	require.NoError(t, err)
+	return pod
+}
+
+func assertResourceQuantity(t *testing.T, resources kube_core_v1.ResourceList, name kube_core_v1.ResourceName, want string) {
+	t.Helper()
+	got, ok := resources[name]
+	require.True(t, ok, "resource %q is missing", name)
+	assert.Equal(t, 0, got.Cmp(kube_resource.MustParse(want)))
 }
 
 func createPod(
