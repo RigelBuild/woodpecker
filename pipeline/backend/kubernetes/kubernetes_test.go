@@ -32,7 +32,7 @@ import (
 	"github.com/urfave/cli/v3"
 	kube_core_v1 "k8s.io/api/core/v1"
 	kube_errors "k8s.io/apimachinery/pkg/api/errors"
-	kube_resource "k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/resource"
 	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kube_runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -407,15 +407,10 @@ func TestStartStepResourceRequirementsDoNotMixConcurrentTasks(t *testing.T) {
 	setupResults := make(chan error, len(workflows))
 	setupStart := make(chan struct{})
 	for _, workflow := range workflows {
-		go func(workflow struct {
-			taskUUID string
-			conf     *types.Config
-			clone    *types.Step
-			want     string
-		}) {
+		go func() {
 			<-setupStart
 			setupResults <- engine.SetupWorkflow(t.Context(), workflow.conf, workflow.taskUUID)
-		}(workflow)
+		}()
 	}
 	close(setupStart)
 	for range workflows {
@@ -425,12 +420,7 @@ func TestStartStepResourceRequirementsDoNotMixConcurrentTasks(t *testing.T) {
 	results := make(chan result, len(workflows))
 	start := make(chan struct{})
 	for _, workflow := range workflows {
-		go func(workflow struct {
-			taskUUID string
-			conf     *types.Config
-			clone    *types.Step
-			want     string
-		}) {
+		go func() {
 			<-start
 			if err := engine.StartStep(t.Context(), workflow.clone, workflow.taskUUID); err != nil {
 				results <- result{err: err}
@@ -443,7 +433,7 @@ func TestStartStepResourceRequirementsDoNotMixConcurrentTasks(t *testing.T) {
 			}
 			pod, err := client.CoreV1().Pods("test-ns").Get(t.Context(), podName, kube_meta_v1.GetOptions{})
 			results <- result{pod: pod, want: workflow.want, err: err}
-		}(workflow)
+		}()
 	}
 	close(start)
 	for range workflows {
@@ -523,7 +513,7 @@ func assertResourceQuantity(t *testing.T, resources kube_core_v1.ResourceList, n
 	t.Helper()
 	got, ok := resources[name]
 	require.True(t, ok, "resource %q is missing", name)
-	assert.Equal(t, 0, got.Cmp(kube_resource.MustParse(want)))
+	assert.Equal(t, 0, got.Cmp(resource.MustParse(want)))
 }
 
 func assertCloneRequestsDoNotExceedLimits(t *testing.T, resources kube_core_v1.ResourceRequirements) {

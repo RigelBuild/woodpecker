@@ -25,3 +25,13 @@ steps:
       NIX_CONFIG: 'experimental-features = nix-command flakes'
     commands:
       - nix build ".#checks.$(nix eval --raw --impure --expr builtins.currentSystem).woodpecker-server-boot" --no-link -L
+    # The Go server build outgrows the AKS CI 3Gi default. Request equals limit, so
+    # exceeding 8Gi OOM-kills the step.
+    backend_options:
+      kubernetes:
+        resources:
+          requests:
+            cpu: '2'
+            memory: 8Gi
+          limits:
+            memory: 8Gi
