@@ -12,3 +12,10 @@ CVE-2026-93687
 
 # docs/ build tooling only (got via cacheable-request); no fixed release.
 CVE-2026-93748
+
+# deepmerge 4.3.1 (docs/ via @svgr/plugin-svgo) has no fixed release.
+CVE-2026-93753
+
+# minimatch 3.x/5.x (docs/ via serve-handler and @redocly/openapi-core) is fixed
+# only in 11.x, whose API those consumers do not support. Build-time globs only.
+CVE-2026-118764
