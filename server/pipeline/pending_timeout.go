@@ -39,7 +39,7 @@ import (
 var pendingWorkflowsTimedOut = promauto.NewCounter(prometheus.CounterOpts{
 	Namespace: "woodpecker",
 	Name:      "pending_workflows_timed_out_total",
-	Help:      "Queued workflows ended error because no agent took them within pending-timeout.",
+	Help:      "Queued workflows ended error because no live agent matched their labels before a pending timeout.",
 })
 
 // loadLiveAgentFilters returns a label filter for each agent that can take work now.
@@ -142,8 +142,19 @@ func runnableSince(p *model.Pipeline, workflows []*model.Workflow, deleted map[i
 }
 
 // pendingTimeoutReason names the timeout and the task labels an agent must match.
-func pendingTimeoutReason(task *model.Task, timeout time.Duration) string {
-	return fmt.Sprintf("no agent took this workflow within %s (pending-timeout); labels: [%s]", timeout, strings.Join(reasonLabels(task), ", "))
+func pendingTimeoutReason(task *model.Task, timeout time.Duration, unmatched bool) string {
+	if unmatched {
+		return fmt.Sprintf(
+			"no live agent matches this workflow's labels after %s (pending-unmatched-timeout); labels: [%s]",
+			timeout,
+			strings.Join(reasonLabels(task), ", "),
+		)
+	}
+	return fmt.Sprintf(
+		"no agent took this workflow within %s (pending-timeout); labels: [%s]",
+		timeout,
+		strings.Join(reasonLabels(task), ", "),
+	)
 }
 
 func reasonLabels(task *model.Task) []string {

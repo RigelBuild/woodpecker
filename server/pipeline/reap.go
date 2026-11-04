@@ -34,7 +34,7 @@ import (
 const defaultReapTimeout = 60 * time.Minute
 
 // ReapOrphanedWorkflows finalizes active workflows that cannot finish through an agent.
-func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Time, grace, pendingTimeout time.Duration) error {
+func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Time, grace, pendingTimeout, pendingUnmatchedTimeout time.Duration) error {
 	feeds, err := storage.GetPipelineQueue()
 	if err != nil {
 		return fmt.Errorf("list active pipelines: %w", err)
@@ -127,7 +127,16 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				}
 				resolved, deleted := withMissingDeps(storage, task, workflows, outsideTree)
 				stampUnfinishedDeps(storage, resolved, deleted, task, now.Unix())
-				if !pendingTimedOut(pipeline, resolved, deleted, task, now, pendingTimeout) {
+				pendingExpired, unmatchedExpired := pendingTimedOut(
+					pipeline,
+					resolved,
+					deleted,
+					task,
+					now,
+					pendingTimeout,
+					pendingUnmatchedTimeout,
+				)
+				if !pendingExpired && !unmatchedExpired {
 					continue
 				}
 				if !liveLoaded {
@@ -140,7 +149,13 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				if liveErr != nil || anyAgentTakes(liveFilters, task) {
 					continue
 				}
-				if !reapWorkflow(storage, workflow, now.Unix(), model.StatusError, pendingTimeoutReason(task, pendingTimeout)) {
+				unmatchedTimeoutFired := !pendingExpired && unmatchedExpired
+				timeout := pendingTimeout
+				if unmatchedTimeoutFired {
+					timeout = pendingUnmatchedTimeout
+				}
+				reason := pendingTimeoutReason(task, timeout, unmatchedTimeoutFired)
+				if !reapWorkflow(storage, workflow, now.Unix(), model.StatusError, reason) {
 					continue
 				}
 				if err := server.Config.Services.Scheduler.CancelWorkflows(ctx, []string{task.ID}); err != nil {
@@ -148,11 +163,15 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 				}
 				changed = true
 				pendingWorkflowsTimedOut.Inc()
+				timeoutName := "pending-timeout"
+				if unmatchedTimeoutFired {
+					timeoutName = "pending-unmatched-timeout"
+				}
 				log.Info().
 					Str("repo", repo.FullName).
 					Int64("pipeline", pipeline.Number).
 					Int64("workflow_id", workflow.ID).
-					Str("reason", "pending-timeout").
+					Str("reason", timeoutName).
 					Strs("labels", reasonLabels(task)).
 					Msg("finalized queued workflow")
 				continue
@@ -303,12 +322,26 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 	return true
 }
 
-// pendingTimedOut reports whether a runnable task has waited longer than the timeout.
-func pendingTimedOut(p *model.Pipeline, workflows []*model.Workflow, deleted map[int64]bool, task *model.Task, now time.Time, timeout time.Duration) bool {
+// pendingTimedOut reports whether a runnable task reached either pending timeout.
+func pendingTimedOut(
+	p *model.Pipeline,
+	workflows []*model.Workflow,
+	deleted map[int64]bool,
+	task *model.Task,
+	now time.Time,
+	timeout, unmatchedTimeout time.Duration,
+) (bool, bool) {
 	deps, ok := treeDepStatus(task, workflows)
 	if !ok || !(&model.Task{RunOn: task.RunOn, DepStatus: deps}).ShouldRun() {
-		return false
+		return false, false
 	}
 	since := runnableSince(p, workflows, deleted, task, now.Unix())
-	return since > 0 && time.Unix(since, 0).Before(now.Add(-timeout))
+	if since <= 0 {
+		return false, false
+	}
+	runnableAt := time.Unix(since, 0)
+	if runnableAt.Before(now.Add(-timeout)) {
+		return true, false
+	}
+	return false, unmatchedTimeout > 0 && !runnableAt.After(now.Add(-unmatchedTimeout))
 }
