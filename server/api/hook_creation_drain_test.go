@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -32,20 +33,14 @@ func TestCreationTracker(t *testing.T) {
 		}
 	})
 
-	t.Run("drain waits for active creation", func(t *testing.T) {
-		tracker := newCreationTracker()
-		done, ok := tracker.begin()
-		if !ok {
-			t.Fatal("begin refused before drain")
-		}
-		tracker.startDrain()
+	// synctest.Wait returns once drain is durably blocked, so "still waiting" is deterministic.
+	assertDrainWaitsFor := func(t *testing.T, tracker *creationTracker, done func()) {
+		t.Helper()
 		finished := make(chan error, 1)
 		go func() {
 			finished <- tracker.drain(t.Context())
 		}()
-		if _, ok := tracker.begin(); ok {
-			t.Fatal("begin accepted a creation while draining")
-		}
+		synctest.Wait()
 		select {
 		case err := <-finished:
 			t.Fatalf("drain returned before creation finished: %v", err)
@@ -55,6 +50,38 @@ func TestCreationTracker(t *testing.T) {
 		if err := <-finished; err != nil {
 			t.Fatalf("drain: %v", err)
 		}
+	}
+
+	t.Run("drain waits for active creation", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tracker := newCreationTracker()
+			done, ok := tracker.begin()
+			if !ok {
+				t.Fatal("begin refused before drain")
+			}
+			tracker.startDrain()
+			if _, ok := tracker.begin(); ok {
+				t.Fatal("begin accepted a creation while draining")
+			}
+			assertDrainWaitsFor(t, tracker, done)
+		})
+	})
+
+	t.Run("drain waits for a creation started after an earlier one finished", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tracker := newCreationTracker()
+			first, ok := tracker.begin()
+			if !ok {
+				t.Fatal("begin refused before drain")
+			}
+			first()
+			second, ok := tracker.begin()
+			if !ok {
+				t.Fatal("begin refused before drain")
+			}
+			tracker.startDrain()
+			assertDrainWaitsFor(t, tracker, second)
+		})
 	})
 
 	t.Run("deadline reports remaining creations", func(t *testing.T) {
