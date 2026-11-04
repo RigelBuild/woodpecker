@@ -867,7 +867,7 @@ Maximum time a runnable pending workflow waits for a matching live agent before 
 
 Maximum time a runnable pending workflow waits when no live agent's labels match it. Set to `0` to disable this timeout. Agent liveness is checked using the `PENDING_TIMEOUT` window. If `PENDING_TIMEOUT` is `0`, all pending timeout checks are disabled. Timeout checks are suspended while the queue is paused, and a task pinned to an agent `hostname` never times out. This setting requires `ORPHAN_REAP_INTERVAL` above `0`.
 
-An autoscaled pool that scales to zero has no live agent until its first agent registers. Set this timeout above the pool's worst-case scale-up time, or set it to `0`.
+An autoscaled pool that scales to zero has no live agent until its first agent registers. Set this timeout above the pool's worst-case scale-up time, or set it to `0`. Setting it to `0` disables only this timeout; `PENDING_TIMEOUT` still applies and must also exceed that scale-up time.
 
 ### SESSION_EXPIRES
 

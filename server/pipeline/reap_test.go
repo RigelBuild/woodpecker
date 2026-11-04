@@ -816,6 +816,32 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			pending:          []*model.Task{{ID: "41", Labels: map[string]string{"hostname": "builder-1"}}},
 			pendingUnmatched: true,
 		},
+		{
+			name:            "paused queue keeps unmatched dependent task in running pipeline",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - hour,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusSuccess, Started: nowUnix - 30*60, Finished: nowUnix - 20*60},
+				queuedWorkflow(41),
+			},
+			pending:          []*model.Task{linuxTask("41", "40")},
+			paused:           true,
+			pendingUnmatched: true,
+		},
+		{
+			name:            "hostname pinned dependent task in running pipeline ignores unmatched timeout",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - hour,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusSuccess, Started: nowUnix - 30*60, Finished: nowUnix - 20*60},
+				queuedWorkflow(41),
+			},
+			pending: []*model.Task{{
+				ID: "41", Labels: map[string]string{"hostname": "builder-1"},
+				Dependencies: []string{"40"},
+			}},
+			pendingUnmatched: true,
+		},
 	}
 
 	for _, tt := range tests {
