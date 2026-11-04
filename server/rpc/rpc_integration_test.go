@@ -66,6 +66,7 @@ func newTestRPC(t *testing.T, mockStore *store_mocks.MockStore, q queue.Queue) R
 		pipelineTime:  pipelineTime,
 		pipelineCount: pipelineCount,
 		reportWG:      reportWG,
+		wait:          func(context.Context, time.Duration) error { return nil },
 	}
 }
 

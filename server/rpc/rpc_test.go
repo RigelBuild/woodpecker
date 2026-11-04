@@ -17,6 +17,7 @@ package rpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -50,13 +51,23 @@ func (f *readOnlyNetrcForge) ReadOnlyNetrc(ctx context.Context, repo *model.Repo
 	return f.readOnlyNetrc(ctx, repo)
 }
 
-func setForgeForRepo(t *testing.T, repo *model.Repo, forgeClient forge.Forge) {
+func setForgeForRepo(t *testing.T, repo *model.Repo, forgeClient forge.Forge) *manager_mocks.MockManager {
 	t.Helper()
 	manager := manager_mocks.NewMockManager(t)
-	manager.On("ForgeFromRepo", repo).Return(forgeClient, nil)
+	manager.On("ForgeFromRepo", repo).Return(forgeClient, nil).Maybe()
 	previousManager := server.Config.Services.Manager
 	server.Config.Services.Manager = manager
 	t.Cleanup(func() { server.Config.Services.Manager = previousManager })
+	return manager
+}
+
+func setForgeManagerForRepo(t *testing.T) *manager_mocks.MockManager {
+	t.Helper()
+	manager := manager_mocks.NewMockManager(t)
+	previousManager := server.Config.Services.Manager
+	server.Config.Services.Manager = manager
+	t.Cleanup(func() { server.Config.Services.Manager = previousManager })
+	return manager
 }
 
 func setReadOnlyNetrcForge(t *testing.T, repo *model.Repo, readOnlyNetrc func(context.Context, *model.Repo) (*model.Netrc, error)) {
@@ -338,8 +349,6 @@ func TestRPCNextStripsNetrcOnFailures(t *testing.T) {
 		{name: "workflow lookup fails"},
 		{name: "pipeline lookup fails"},
 		{name: "repo lookup fails"},
-		{name: "forge lacks read-only netrc"},
-		{name: "netrc mint fails"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -374,20 +383,6 @@ func TestRPCNextStripsNetrcOnFailures(t *testing.T) {
 				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Twice()
 				mockStore.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, RepoID: repo.ID}, nil).Once()
 				mockStore.On("GetRepo", repo.ID).Return((*model.Repo)(nil), assert.AnError).Once()
-			case "forge lacks read-only netrc":
-				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Twice()
-				mockStore.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, RepoID: repo.ID}, nil).Once()
-				mockStore.On("GetRepo", repo.ID).Return(repo, nil).Once()
-				unsupported := forge_mocks.NewMockForge(t)
-				unsupported.On("Name").Return("unsupported")
-				setForgeForRepo(t, repo, unsupported)
-			case "netrc mint fails":
-				mockStore.On("WorkflowLoad", int64(30)).Return(&model.Workflow{ID: 30, PipelineID: 20}, nil).Twice()
-				mockStore.On("GetPipeline", int64(20)).Return(&model.Pipeline{ID: 20, RepoID: repo.ID}, nil).Once()
-				mockStore.On("GetRepo", repo.ID).Return(repo, nil).Once()
-				setReadOnlyNetrcForge(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
-					return nil, assert.AnError
-				})
 			}
 
 			s := newTestRPC(t, mockStore, queue)
@@ -398,6 +393,242 @@ func TestRPCNextStripsNetrcOnFailures(t *testing.T) {
 			assertNoNetrc(t, workflow)
 		})
 	}
+}
+
+func setupNetrcNext(t *testing.T, repo *model.Repo, mint func(context.Context, *model.Repo) (*model.Netrc, error)) (*RPC, context.Context, *store_mocks.MockStore, *queue_mocks.MockQueue) {
+	return setupNetrcNextWithSteps(t, repo, mint, nil)
+}
+
+func setupNetrcNextWithSteps(t *testing.T, repo *model.Repo, mint func(context.Context, *model.Repo) (*model.Netrc, error), steps []*model.Step) (*RPC, context.Context, *store_mocks.MockStore, *queue_mocks.MockQueue) {
+	t.Helper()
+	workflowData, err := json.Marshal(rpc.Workflow{
+		ID:      "30",
+		Timeout: 55,
+		Config: &backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{{
+			Name: "clone",
+			Environment: map[string]string{
+				"CI_NETRC_MACHINE":  "github.com",
+				"CI_NETRC_USERNAME": "x-access-token",
+				"CI_NETRC_PASSWORD": "stale-password",
+			},
+		}}}}},
+	})
+	require.NoError(t, err)
+
+	queue := queue_mocks.NewMockQueue(t)
+	queue.On("Poll", mock.Anything, int64(1), mock.Anything).Return(&model.Task{ID: "30", Data: workflowData}, nil).Once()
+	mockStore := store_mocks.NewMockStore(t)
+	mockStore.On("AgentFind", int64(1)).Return(defaultAgent(), nil)
+	workflow := &model.Workflow{ID: 30, PipelineID: 20, State: model.StatusPending, Children: steps}
+	mockStore.On("WorkflowLoad", int64(30)).Return(workflow, nil)
+	mockStore.On("WorkflowUpdate", mock.Anything).Maybe().Return(nil)
+	mockStore.On("StepListFromWorkflowFind", mock.Anything).Maybe().Return(steps, nil)
+	currentPipeline := &model.Pipeline{ID: 20, RepoID: repo.ID, Status: model.StatusRunning, Started: 100}
+	mockStore.On("GetPipeline", int64(20)).Return(currentPipeline, nil)
+	mockStore.On("GetRepo", repo.ID).Return(repo, nil)
+	mockStore.On("WorkflowGetTree", currentPipeline).Maybe().Return([]*model.Workflow{{ID: 30, State: model.StatusFailure, Error: "mint failed"}}, nil)
+	mockStore.On("UpdatePipeline", mock.Anything).Maybe().Return(nil)
+	mockStore.On("GetUser", mock.Anything).Maybe().Return(nil, errors.New("user not found"))
+	mockStore.On("AgentUpdate", mock.Anything).Maybe().Return(nil)
+	queue.On("Error", mock.Anything, "30", mock.Anything).Maybe().Return(nil)
+
+	if mint != nil {
+		setReadOnlyNetrcForge(t, repo, mint)
+	}
+	s := newTestRPC(t, mockStore, queue)
+	s.now = func() time.Time { return time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC) }
+	return &s, context.WithValue(t.Context(), agentIDKey, int64(1)), mockStore, queue
+}
+
+func TestRPCNextFailsAfterReadOnlyNetrcMintRetries(t *testing.T) {
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
+	mintError := errors.New("mint failed")
+	mints := 0
+	s, ctx, mockStore, queue := setupNetrcNext(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+		mints++
+		return nil, mintError
+	})
+	waits := make([]time.Duration, 0, 2)
+	s.wait = func(_ context.Context, delay time.Duration) error { waits = append(waits, delay); return nil }
+
+	workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+	require.NoError(t, err)
+	assert.Nil(t, workflow)
+	assert.Equal(t, 3, mints)
+	assert.Equal(t, []time.Duration{time.Second, 2 * time.Second}, waits)
+	mockStore.AssertCalled(t, "WorkflowUpdate", mock.MatchedBy(func(workflow *model.Workflow) bool {
+		return workflow.ID == 30 && workflow.Error == "could not mint read-only netrc for test-org/test-repo: mint failed"
+	}))
+	queue.AssertCalled(t, "Error", mock.Anything, "30", mock.MatchedBy(func(err error) bool {
+		return strings.Contains(err.Error(), repo.FullName) && strings.Contains(err.Error(), mintError.Error())
+	}))
+}
+
+func TestRPCNextDoesNotFailWorkflowWhenMintContextCanceled(t *testing.T) {
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
+	s, baseCtx, mockStore, queue := setupNetrcNext(t, repo, nil)
+	ctx, cancel := context.WithCancelCause(baseCtx)
+	defer cancel(nil)
+	mints := 0
+	waits := 0
+	setReadOnlyNetrcForge(t, repo, func(context.Context, *model.Repo) (*model.Netrc, error) {
+		mints++
+		cancel(context.Canceled)
+		return nil, errors.New("mint failed")
+	})
+	s.wait = func(context.Context, time.Duration) error { waits++; return nil }
+	workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, workflow)
+	assert.Equal(t, 1, mints)
+	assert.Zero(t, waits)
+	mockStore.AssertNotCalled(t, "StepListFromWorkflowFind", mock.Anything)
+	mockStore.AssertNotCalled(t, "StepUpdate", mock.Anything)
+	mockStore.AssertNotCalled(t, "WorkflowUpdate", mock.MatchedBy(func(saved *model.Workflow) bool {
+		return saved.State == model.StatusFailure || saved.Error != ""
+	}))
+	queue.AssertNotCalled(t, "Error", mock.Anything, "30", mock.Anything)
+}
+
+func TestRPCNextDoesNotFailWorkflowWhenRetryWaitCanceled(t *testing.T) {
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
+	mints := 0
+	s, baseCtx, mockStore, queue := setupNetrcNext(t, repo, func(context.Context, *model.Repo) (*model.Netrc, error) {
+		mints++
+		return nil, errors.New("mint failed")
+	})
+	ctx, cancel := context.WithCancelCause(baseCtx)
+	defer cancel(nil)
+	waits := 0
+	s.wait = func(context.Context, time.Duration) error {
+		waits++
+		cancel(context.Canceled)
+		return nil
+	}
+	workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, workflow)
+	assert.Equal(t, 1, mints)
+	assert.Equal(t, 1, waits)
+	mockStore.AssertNotCalled(t, "StepListFromWorkflowFind", mock.Anything)
+	mockStore.AssertNotCalled(t, "WorkflowUpdate", mock.MatchedBy(func(saved *model.Workflow) bool {
+		return saved.State == model.StatusFailure || saved.Error != ""
+	}))
+	queue.AssertNotCalled(t, "Error", mock.Anything, "30", mock.Anything)
+}
+
+func TestRPCNextFailsWorkflowAndPersistsPendingChild(t *testing.T) {
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
+	mintError := errors.New("mint failed")
+	child := &model.Step{ID: 41, PipelineID: 20, State: model.StatusPending, Name: "clone"}
+	s, ctx, mockStore, _ := setupNetrcNextWithSteps(t, repo, func(context.Context, *model.Repo) (*model.Netrc, error) {
+		return nil, mintError
+	}, []*model.Step{child})
+	s.wait = func(context.Context, time.Duration) error { return nil }
+	mockStore.On("StepUpdate", mock.MatchedBy(func(step *model.Step) bool {
+		return step.ID == child.ID && step.State == model.StatusKilled
+	})).Once().Return(nil)
+	workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+	require.NoError(t, err)
+	assert.Nil(t, workflow)
+	mockStore.AssertCalled(t, "StepUpdate", mock.MatchedBy(func(step *model.Step) bool {
+		return step.ID == child.ID && step.State == model.StatusKilled
+	}))
+	mockStore.AssertCalled(t, "WorkflowUpdate", mock.MatchedBy(func(workflow *model.Workflow) bool {
+		return workflow.ID == 30 && workflow.State == model.StatusFailure && strings.Contains(workflow.Error, mintError.Error())
+	}))
+}
+
+func TestRPCNextRetriesReadOnlyNetrcMint(t *testing.T) {
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
+	mints := 0
+	s, ctx, _, queue := setupNetrcNext(t, repo, func(_ context.Context, _ *model.Repo) (*model.Netrc, error) {
+		mints++
+		if mints == 1 {
+			return nil, errors.New("temporary mint failure")
+		}
+		return &model.Netrc{Machine: "github.com", Login: "x-access-token", Password: "dispatch-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	})
+	s.wait = func(context.Context, time.Duration) error { return nil }
+	queue.On("Error", mock.Anything, "30", mock.Anything).Maybe().Return(nil)
+	workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+	require.NoError(t, err)
+	require.NotNil(t, workflow)
+	assert.Equal(t, 2, mints)
+	assert.Equal(t, "dispatch-token", workflow.Config.Stages[0].Steps[0].Environment["CI_NETRC_PASSWORD"])
+}
+
+func TestRPCNextFailsForUnusableReadOnlyNetrc(t *testing.T) {
+	tests := []struct {
+		name           string
+		mint           func(context.Context, *model.Repo) (*model.Netrc, error)
+		forgeErr       error
+		unsupported    bool
+		wantMints      int
+		wantForgeCalls int
+	}{
+		{name: "forge lacks read-only netrc", unsupported: true, wantForgeCalls: 1},
+		{name: "forge lookup fails", forgeErr: errors.New("forge lookup failed"), wantForgeCalls: 1},
+		{name: "nil netrc", mint: func(context.Context, *model.Repo) (*model.Netrc, error) { return nil, nil }, wantMints: 1, wantForgeCalls: 1},
+		{name: "incomplete netrc", mint: func(context.Context, *model.Repo) (*model.Netrc, error) {
+			return &model.Netrc{Machine: "github.com", Login: "x-access-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
+		}, wantMints: 1, wantForgeCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, IsSCMPrivate: true, FullName: "test-org/test-repo"}
+			mints := 0
+			waits := 0
+			forgeCalls := 0
+			switch {
+			case tt.unsupported:
+				unsupported := forge_mocks.NewMockForge(t)
+				unsupported.On("Name").Return("unsupported")
+				manager := setForgeManagerForRepo(t)
+				manager.On("ForgeFromRepo", repo).Run(func(mock.Arguments) { forgeCalls++ }).Return(unsupported, nil).Once()
+			case tt.forgeErr != nil:
+				manager := setForgeManagerForRepo(t)
+				manager.On("ForgeFromRepo", repo).Run(func(mock.Arguments) { forgeCalls++ }).Return(nil, tt.forgeErr).Once()
+			default:
+				forgeClient := &readOnlyNetrcForge{readOnlyNetrc: func(ctx context.Context, repo *model.Repo) (*model.Netrc, error) {
+					mints++
+					return tt.mint(ctx, repo)
+				}}
+				manager := setForgeManagerForRepo(t)
+				manager.On("ForgeFromRepo", repo).Run(func(mock.Arguments) { forgeCalls++ }).Return(forgeClient, nil).Once()
+			}
+			s, ctx, mockStore, queue := setupNetrcNext(t, repo, nil)
+			s.wait = func(context.Context, time.Duration) error { waits++; return nil }
+			workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+			require.NoError(t, err)
+			assert.Nil(t, workflow)
+			assert.Equal(t, tt.wantMints, mints)
+			assert.Equal(t, tt.wantForgeCalls, forgeCalls)
+			assert.Zero(t, waits)
+			queue.AssertCalled(t, "Error", mock.Anything, "30", mock.Anything)
+			mockStore.AssertCalled(t, "WorkflowUpdate", mock.MatchedBy(func(workflow *model.Workflow) bool {
+				return workflow.ID == 30 && workflow.Error != ""
+			}))
+		})
+	}
+}
+
+func TestRPCNextSkipsMintForPublicRepoByDefault(t *testing.T) {
+	previous := server.Config.Pipeline.AuthenticatePublicRepos
+	server.Config.Pipeline.AuthenticatePublicRepos = false
+	t.Cleanup(func() { server.Config.Pipeline.AuthenticatePublicRepos = previous })
+	repo := &model.Repo{ID: 10, ForgeID: 5, Timeout: 55, FullName: "test-org/test-repo"}
+	mints := 0
+	setReadOnlyNetrcForge(t, repo, func(context.Context, *model.Repo) (*model.Netrc, error) {
+		mints++
+		return nil, errors.New("must not mint for public repo")
+	})
+	s, ctx, _, _ := setupNetrcNext(t, repo, nil)
+	workflow, err := s.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+	require.NoError(t, err)
+	require.NotNil(t, workflow)
+	assert.Zero(t, mints)
+	assertNoNetrc(t, workflow)
 }
 
 func TestRegisterAgent(t *testing.T) {
