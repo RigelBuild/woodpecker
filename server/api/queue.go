@@ -73,20 +73,45 @@ func GetQueueInfo(c *gin.Context) {
 	// Create a map to store agent names by ID
 	agentNameMap := make(map[int64]string)
 
+	pipelineIDs := make([]int64, 0)
+	seenPipelineIDs := make(map[int64]struct{})
+	for _, tasks := range [][]*model.Task{info.Pending, info.WaitingOnDeps, info.Running} {
+		for _, task := range tasks {
+			if task.PipelineID == 0 {
+				continue
+			}
+			if _, ok := seenPipelineIDs[task.PipelineID]; ok {
+				continue
+			}
+			seenPipelineIDs[task.PipelineID] = struct{}{}
+			pipelineIDs = append(pipelineIDs, task.PipelineID)
+		}
+	}
+
+	pipelines, err := _store.GetPipelinesByIDs(pipelineIDs)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+	pipelineNumberMap := make(map[int64]int64, len(pipelines))
+	for _, pipeline := range pipelines {
+		pipelineNumberMap[pipeline.ID] = pipeline.Number
+	}
+
 	// Process tasks and add agent names
-	pendingWithAgents, err := processQueueTasks(_store, info.Pending, agentNameMap)
+	pendingWithAgents, err := processQueueTasks(_store, info.Pending, agentNameMap, pipelineNumberMap)
 	if err != nil {
 		c.String(http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	waitingWithAgents, err := processQueueTasks(_store, info.WaitingOnDeps, agentNameMap)
+	waitingWithAgents, err := processQueueTasks(_store, info.WaitingOnDeps, agentNameMap, pipelineNumberMap)
 	if err != nil {
 		c.String(http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	runningWithAgents, err := processQueueTasks(_store, info.Running, agentNameMap)
+	runningWithAgents, err := processQueueTasks(_store, info.Running, agentNameMap, pipelineNumberMap)
 	if err != nil {
 		c.String(http.StatusInternalServerError, err.Error())
 		return
@@ -191,7 +216,12 @@ func BlockTilQueueHasRunningItem(c *gin.Context) {
 }
 
 // processQueueTasks converts tasks to QueueTask structs and adds agent names.
-func processQueueTasks(store store.Store, tasks []*model.Task, agentNameMap map[int64]string) ([]model.QueueTask, error) {
+func processQueueTasks(
+	store store.Store,
+	tasks []*model.Task,
+	agentNameMap map[int64]string,
+	pipelineNumberMap map[int64]int64,
+) ([]model.QueueTask, error) {
 	result := make([]model.QueueTask, 0, len(tasks))
 
 	for _, task := range tasks {
@@ -209,12 +239,12 @@ func processQueueTasks(store store.Store, tasks []*model.Task, agentNameMap map[
 		}
 
 		if task.PipelineID != 0 {
-			p, err := store.GetPipeline(task.PipelineID)
-			if err != nil {
+			pipelineNumber, ok := pipelineNumberMap[task.PipelineID]
+			if !ok {
 				return nil, fmt.Errorf("pipeline not found for task %s", task.ID)
 			}
 
-			taskResponse.PipelineNumber = p.Number
+			taskResponse.PipelineNumber = pipelineNumber
 		}
 
 		result = append(result, taskResponse)

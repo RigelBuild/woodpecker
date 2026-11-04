@@ -377,6 +377,27 @@ func TestGetRepoLatestPipelinesUsesNumber(t *testing.T) {
 	assert.EqualValues(t, model.StatusKilled, latest[2].Status)
 }
 
+func TestGetPipelinesByIDs(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	expected := []*model.Pipeline{
+		{ID: 10, RepoID: 1, Number: 1, Status: model.StatusSuccess},
+		{ID: 20, RepoID: 1, Number: 2, Status: model.StatusRunning},
+	}
+	require.NoError(t, wrapInsert(store.engine.Insert(expected)))
+
+	pipelines, err := store.GetPipelinesByIDs([]int64{20, 999, 10})
+	require.NoError(t, err)
+	require.Len(t, pipelines, 2)
+
+	got := make(map[int64]int64, len(pipelines))
+	for _, pipeline := range pipelines {
+		got[pipeline.ID] = pipeline.Number
+	}
+	assert.Equal(t, map[int64]int64{10: 1, 20: 2}, got)
+}
+
 // TestGetPipelineLastBeforeUsesNumber checks the preceding pipeline is found
 // by number, in the case where the two sequences disagree: the pipelines are
 // created in number order while their ids run the other way. TiDB can produce
