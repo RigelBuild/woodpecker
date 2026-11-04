@@ -144,15 +144,17 @@ func TestRPCStatusDeadline(t *testing.T) {
 		}
 	})
 
-	t.Run("plugin deadline error keeps its sentinel when the caller context is still live", func(t *testing.T) {
-		impl := forge_mocks.NewMockForge(t)
-		client := newStatusRPCClient(t, impl)
-		impl.On("Status", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-			Return(context.DeadlineExceeded)
+	for _, sentinel := range []error{context.DeadlineExceeded, context.Canceled} {
+		t.Run("plugin "+sentinel.Error()+" keeps its sentinel when the caller context is still live", func(t *testing.T) {
+			impl := forge_mocks.NewMockForge(t)
+			client := newStatusRPCClient(t, impl)
+			impl.On("Status", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return(sentinel)
 
-		err := client.Status(t.Context(), testUser(), testRepo(), &model.Pipeline{}, &model.Workflow{})
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-	})
+			err := client.Status(t.Context(), testUser(), testRepo(), &model.Pipeline{}, &model.Workflow{})
+			require.ErrorIs(t, err, sentinel)
+		})
+	}
 
 	t.Run("other plugin errors pass through unchanged", func(t *testing.T) {
 		impl := forge_mocks.NewMockForge(t)
