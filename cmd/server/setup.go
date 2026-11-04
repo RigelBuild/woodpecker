@@ -188,6 +188,7 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Pipeline.RegistryExtensionNetrc = c.Bool("registry-extension-netrc")
 	server.Config.Server.AsyncRepositoryUpdate = c.Bool("async-repository-update")
 	server.Config.Server.WebhookSyncTimeout = c.Duration("webhook-sync-timeout")
+	server.Config.Server.CreationDrainTimeout = c.Duration("creation-drain-timeout")
 	server.Config.Server.HookDedupWindow = c.Duration("hook-dedup-window")
 	server.Config.Server.OrphanReapInterval = c.Duration("orphan-reap-interval")
 	server.Config.Server.OrphanReapGrace = c.Duration("orphan-reap-grace")

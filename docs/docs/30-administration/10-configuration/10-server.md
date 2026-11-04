@@ -1120,6 +1120,17 @@ Closing a pull request clears the window for its refspec, so reopening one is ne
 
 ---
 
+### CREATION_DRAIN_TIMEOUT
+
+- Name: `WOODPECKER_CREATION_DRAIN_TIMEOUT`
+- Default: `25s`
+
+On shutdown, stop accepting new webhook pipeline creations and wait up to this duration for in-flight creations to finish. If the timeout expires, remaining creations may leave a `created` pipeline row for the orphan reaper to flag. Raise the Kubernetes termination grace period separately so it exceeds this timeout and the HTTP shutdown timeout.
+
+When shutdown has started, new webhook deliveries receive HTTP `503` before a pipeline is created. GitHub does not automatically retry failed webhook deliveries; inspect and redeliver the failed delivery in GitHub.
+
+---
+
 ### REPORT_SKIPPED_WORKFLOWS
 
 - Name: `WOODPECKER_REPORT_SKIPPED_WORKFLOWS`

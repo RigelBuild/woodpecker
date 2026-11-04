@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v7"
@@ -38,6 +39,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server"
+	"go.woodpecker-ci.org/woodpecker/v3/server/api"
 	cron_scheduler "go.woodpecker-ci.org/woodpecker/v3/server/cron"
 	"go.woodpecker-ci.org/woodpecker/v3/server/metric"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
@@ -89,17 +91,47 @@ func run(ctx context.Context, c *cli.Command) error {
 		return err
 	}
 
+	shutdownBaseCtx := context.WithoutCancel(ctx)
 	ctx, ctxCancel := context.WithCancelCause(ctx)
+	shutdownCtx = shutdownBaseCtx
+	var shutdownOnce sync.Once
+	shutdownStarted := make(chan struct{})
+	shutdownDone := make(chan struct{})
 	stopServerFunc = func(err error) {
-		if err != nil {
-			log.Error().Err(err).Msg("shutdown of whole server")
-		}
-		stopServerFunc = func(error) {}
-		shutdownCtx, shutdownCancelFunc = context.WithTimeout(shutdownCtx, shutdownTimeout)
-		ctxCancel(err)
+		shutdownOnce.Do(func() {
+			defer close(shutdownStarted)
+			if err != nil {
+				log.Error().Err(err).Msg("shutdown of whole server")
+			}
+			inFlight := api.StartWebhookPipelineCreationDrain()
+			log.Info().Int("in-flight", inFlight).Msg("stopping new webhook pipeline creations")
+			shutdownCtx, shutdownCancelFunc = context.WithTimeout(shutdownBaseCtx, shutdownTimeout)
+			ctxCancel(err)
+			drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(shutdownBaseCtx), server.Config.Server.CreationDrainTimeout)
+			go func(ctx context.Context, cancel context.CancelFunc) {
+				defer close(shutdownDone)
+				defer cancel()
+				if err := api.DrainWebhookPipelineCreations(ctx); err != nil {
+					drainErr, ok := errors.AsType[*api.CreationDrainError](err)
+					if ok {
+						log.Warn().Int("in-flight", drainErr.InFlight).Err(err).Msg("webhook pipeline creation drain timed out")
+						return
+					}
+					log.Warn().Err(err).Int("in-flight", api.WebhookPipelineCreationsInFlight()).Msg("webhook pipeline creation drain interrupted")
+					return
+				}
+				log.Info().Msg("webhook pipeline creation drain completed")
+			}(drainCtx, drainCancel)
+		})
 	}
-	defer stopServerFunc(nil)
-	defer shutdownCancelFunc()
+	stopOnCancel := context.AfterFunc(ctx, func() { stopServerFunc(context.Cause(ctx)) })
+	defer stopOnCancel()
+	defer func() {
+		stopServerFunc(nil)
+		<-shutdownStarted
+		<-shutdownDone
+		shutdownCancelFunc()
+	}()
 
 	// set gin mode based on log level
 	if zerolog.GlobalLevel() > zerolog.DebugLevel {
@@ -250,6 +282,7 @@ func run(ctx context.Context, c *cli.Command) error {
 
 			go func() {
 				<-ctx.Done()
+				<-shutdownStarted
 				log.Info().Msg("shutdown tls server ...")
 				if err := tlsServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
 					log.Error().Err(err).Msg("shutdown tls server failed")
@@ -289,7 +322,7 @@ func run(ctx context.Context, c *cli.Command) error {
 			setupServerTimeouts(redirectServer)
 			go func() {
 				<-ctx.Done()
-				log.Info().Msg("shutdown redirect server ...")
+				<-shutdownStarted
 				if err := redirectServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
 					log.Error().Err(err).Msg("shutdown redirect server failed")
 				} else {
@@ -339,6 +372,7 @@ func run(ctx context.Context, c *cli.Command) error {
 			go func() {
 				<-ctx.Done()
 				log.Info().Msg("shutdown http server ...")
+				<-shutdownStarted
 				if err := httpServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
 					log.Error().Err(err).Msg("shutdown http server failed")
 				} else {
@@ -368,6 +402,7 @@ func run(ctx context.Context, c *cli.Command) error {
 
 			go func() {
 				<-ctx.Done()
+				<-shutdownStarted
 				log.Info().Msg("shutdown metrics server ...")
 				if err := metricsServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck
 					log.Error().Err(err).Msg("shutdown metrics server failed")
@@ -384,8 +419,13 @@ func run(ctx context.Context, c *cli.Command) error {
 			return err
 		})
 	}
-
-	return serviceWaitingGroup.Wait()
+	err = serviceWaitingGroup.Wait()
+	if ctx.Err() == nil {
+		stopServerFunc(err)
+	}
+	<-shutdownStarted
+	<-shutdownDone
+	return err
 }
 
 func setUnixSocketPermission(path, permission string) error {

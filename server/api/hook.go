@@ -275,8 +275,18 @@ func PostHook(c *gin.Context) {
 	done := make(chan struct{})
 	var pl *model.Pipeline
 
+	creationDone, ok := webhookPipelineCreations.begin()
+	if !ok {
+		cancel()
+		msg := "server is shutting down; webhook was not queued"
+		log.Info().Str("repo", repo.FullName).Msg(msg)
+		c.String(http.StatusServiceUnavailable, msg)
+		return
+	}
+
 	go func() {
 		defer cancel()
+		defer creationDone()
 		pl, err = pipeline.Create(bgCtx, _store, repo, pipelineFromForge)
 		if err != nil {
 			// A filtered pipeline is an expected outcome, not a failure.
@@ -286,7 +296,7 @@ func PostHook(c *gin.Context) {
 				log.Error().Err(err).Str("repo", repo.FullName).Msg("could not create pipeline from webhook")
 			}
 		}
-		done <- struct{}{}
+		close(done)
 	}()
 
 	syncTimeout := server.Config.Server.WebhookSyncTimeout

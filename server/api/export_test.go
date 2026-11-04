@@ -20,3 +20,10 @@ package api
 func ResetHookDedupWindow() {
 	hookDedupWindow.reset()
 }
+
+// ReplaceWebhookPipelineCreationsForTest isolates shutdown state in handler tests.
+func ReplaceWebhookPipelineCreationsForTest() func() {
+	previous := webhookPipelineCreations
+	webhookPipelineCreations = newCreationTracker()
+	return func() { webhookPipelineCreations = previous }
+}
