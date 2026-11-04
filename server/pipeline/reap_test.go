@@ -770,6 +770,52 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			agentListErr:    errors.New("database unavailable"),
 			listAgents:      true,
 		},
+		{
+			name:            "dependency finished 10 minutes ago keeps unmatched task queued",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - hour,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusSuccess, Started: nowUnix - 30*60, Finished: nowUnix - 10*60},
+				queuedWorkflow(41),
+			},
+			pending:          []*model.Task{linuxTask("41", "40")},
+			pendingUnmatched: true,
+		},
+		{
+			name:            "dependency finished 20 minutes ago times out unmatched task",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - hour,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusSuccess, Started: nowUnix - 30*60, Finished: nowUnix - 20*60},
+				queuedWorkflow(41),
+			},
+			pending:           []*model.Task{linuxTask("41", "40")},
+			pendingUnmatched:  true,
+			errMsg:            "no live agent matches this workflow's labels after 15m0s (pending-unmatched-timeout); labels: [type=linux]",
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
+			name:             "paused queue keeps unmatched task queued",
+			pipelineStatus:   model.StatusPending,
+			pipelineCreated:  nowUnix - 20*60,
+			workflows:        []*model.Workflow{queuedWorkflow(41)},
+			pending:          []*model.Task{linuxTask("41")},
+			paused:           true,
+			pendingUnmatched: true,
+		},
+		{
+			name:             "hostname pinned task ignores unmatched timeout",
+			pipelineStatus:   model.StatusPending,
+			pipelineCreated:  nowUnix - 20*60,
+			workflows:        []*model.Workflow{queuedWorkflow(41)},
+			pending:          []*model.Task{{ID: "41", Labels: map[string]string{"hostname": "builder-1"}}},
+			pendingUnmatched: true,
+		},
 	}
 
 	for _, tt := range tests {
