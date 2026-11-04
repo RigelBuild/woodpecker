@@ -115,6 +115,29 @@ func TestWorkflowsReplaceBackfillsIDs(t *testing.T) {
 	}
 }
 
+// One call can mix rows with a preset ID and rows from two pipelines sharing PIDs.
+func TestInsertWithIDsMixedBatch(t *testing.T) {
+	s := newBatchTestStore(t)
+	preset := &model.Workflow{ID: 5000, PipelineID: 1, PID: 1, Name: "preset", State: model.StatusPending}
+	first := &model.Workflow{PipelineID: 1, PID: 2, Name: "p1-2", State: model.StatusPending}
+	second := &model.Workflow{PipelineID: 2, PID: 1, Name: "p2-1", State: model.StatusPending}
+	third := &model.Workflow{PipelineID: 2, PID: 2, Name: "p2-2", State: model.StatusPending}
+	rows := []*model.Workflow{preset, first, second, third}
+	require.NoError(t, s.WorkflowsCreate(rows))
+
+	assert.EqualValues(t, 5000, preset.ID)
+	for _, wf := range rows {
+		require.NotZero(t, wf.ID)
+		stored := new(model.Workflow)
+		has, err := s.engine.ID(wf.ID).Get(stored)
+		require.NoError(t, err)
+		require.True(t, has, "workflow %s", wf.Name)
+		assert.Equal(t, wf.Name, stored.Name)
+		assert.Equal(t, wf.PipelineID, stored.PipelineID)
+		assert.Equal(t, wf.PID, stored.PID)
+	}
+}
+
 func TestWorkflowGetTreeMatchesPerWorkflowLoad(t *testing.T) {
 	s := newBatchTestStore(t)
 	pipeline := &model.Pipeline{ID: 1}
@@ -184,7 +207,7 @@ func TestConfigsPersist(t *testing.T) {
 	assert.Equal(t, got, again, "a second call stores nothing new")
 }
 
-// Covers https://github.com/woodpecker-ci/woodpecker/issues/7173 on the batch path.
+// A concurrent insert of the same config must resolve to one row on the batch path.
 func TestConfigsPersistConcurrentDuplicate(t *testing.T) {
 	s := newBatchTestStore(t)
 	hook := &concurrentConfigInsertHook{

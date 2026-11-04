@@ -122,7 +122,7 @@ func (s storage) ConfigsPersist(repoID int64, confs []*model.Config) ([]*model.C
 			err := wrapInsert(sess.Insert(chunk))
 			if errors.Is(err, types.ErrInsertDuplicateDetected) {
 				// a concurrent request persisted one of these configs after our lookup;
-				// ConfigPersist resolves that per row (see https://github.com/woodpecker-ci/woodpecker/issues/7173)
+				// ConfigPersist resolves that per row
 				for _, conf := range chunk {
 					if _, err := s.ConfigPersist(conf); err != nil {
 						return nil, err
