@@ -622,6 +622,74 @@ func (_c *MockStore_ConfigsForPipeline_Call) RunAndReturn(run func(pipelineID in
 	return _c
 }
 
+// ConfigsPersist provides a mock function for the type MockStore
+func (_mock *MockStore) ConfigsPersist(repoID int64, configs []*model.Config) ([]*model.Config, error) {
+	ret := _mock.Called(repoID, configs)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ConfigsPersist")
+	}
+
+	var r0 []*model.Config
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(int64, []*model.Config) ([]*model.Config, error)); ok {
+		return returnFunc(repoID, configs)
+	}
+	if returnFunc, ok := ret.Get(0).(func(int64, []*model.Config) []*model.Config); ok {
+		r0 = returnFunc(repoID, configs)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*model.Config)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(int64, []*model.Config) error); ok {
+		r1 = returnFunc(repoID, configs)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_ConfigsPersist_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ConfigsPersist'
+type MockStore_ConfigsPersist_Call struct {
+	*mock.Call
+}
+
+// ConfigsPersist is a helper method to define mock.On call
+//   - repoID int64
+//   - configs []*model.Config
+func (_e *MockStore_Expecter) ConfigsPersist(repoID any, configs any) *MockStore_ConfigsPersist_Call {
+	return &MockStore_ConfigsPersist_Call{Call: _e.mock.On("ConfigsPersist", repoID, configs)}
+}
+
+func (_c *MockStore_ConfigsPersist_Call) Run(run func(repoID int64, configs []*model.Config)) *MockStore_ConfigsPersist_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 int64
+		if args[0] != nil {
+			arg0 = args[0].(int64)
+		}
+		var arg1 []*model.Config
+		if args[1] != nil {
+			arg1 = args[1].([]*model.Config)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_ConfigsPersist_Call) Return(configs1 []*model.Config, err error) *MockStore_ConfigsPersist_Call {
+	_c.Call.Return(configs1, err)
+	return _c
+}
+
+func (_c *MockStore_ConfigsPersist_Call) RunAndReturn(run func(repoID int64, configs []*model.Config) ([]*model.Config, error)) *MockStore_ConfigsPersist_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreatePipeline provides a mock function for the type MockStore
 func (_mock *MockStore) CreatePipeline(pipeline *model.Pipeline, steps ...*model.Step) error {
 	var tmpRet mock.Arguments
@@ -4915,6 +4983,57 @@ func (_c *MockStore_PipelineConfigCreate_Call) RunAndReturn(run func(pipelineCon
 	return _c
 }
 
+// PipelineConfigsCreate provides a mock function for the type MockStore
+func (_mock *MockStore) PipelineConfigsCreate(pipelineConfigs []*model.PipelineConfig) error {
+	ret := _mock.Called(pipelineConfigs)
+
+	if len(ret) == 0 {
+		panic("no return value specified for PipelineConfigsCreate")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func([]*model.PipelineConfig) error); ok {
+		r0 = returnFunc(pipelineConfigs)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_PipelineConfigsCreate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'PipelineConfigsCreate'
+type MockStore_PipelineConfigsCreate_Call struct {
+	*mock.Call
+}
+
+// PipelineConfigsCreate is a helper method to define mock.On call
+//   - pipelineConfigs []*model.PipelineConfig
+func (_e *MockStore_Expecter) PipelineConfigsCreate(pipelineConfigs any) *MockStore_PipelineConfigsCreate_Call {
+	return &MockStore_PipelineConfigsCreate_Call{Call: _e.mock.On("PipelineConfigsCreate", pipelineConfigs)}
+}
+
+func (_c *MockStore_PipelineConfigsCreate_Call) Run(run func(pipelineConfigs []*model.PipelineConfig)) *MockStore_PipelineConfigsCreate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 []*model.PipelineConfig
+		if args[0] != nil {
+			arg0 = args[0].([]*model.PipelineConfig)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_PipelineConfigsCreate_Call) Return(err error) *MockStore_PipelineConfigsCreate_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_PipelineConfigsCreate_Call) RunAndReturn(run func(pipelineConfigs []*model.PipelineConfig) error) *MockStore_PipelineConfigsCreate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // PipelineDispatchClaim provides a mock function for the type MockStore
 func (_mock *MockStore) PipelineDispatchClaim(pipeline *model.Pipeline, now int64) (bool, error) {
 	ret := _mock.Called(pipeline, now)
@@ -6630,6 +6749,57 @@ func (_c *MockStore_TaskInsert_Call) Return(err error) *MockStore_TaskInsert_Cal
 }
 
 func (_c *MockStore_TaskInsert_Call) RunAndReturn(run func(task *model.Task) error) *MockStore_TaskInsert_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// TaskInsertBatch provides a mock function for the type MockStore
+func (_mock *MockStore) TaskInsertBatch(tasks []*model.Task) error {
+	ret := _mock.Called(tasks)
+
+	if len(ret) == 0 {
+		panic("no return value specified for TaskInsertBatch")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func([]*model.Task) error); ok {
+		r0 = returnFunc(tasks)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_TaskInsertBatch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'TaskInsertBatch'
+type MockStore_TaskInsertBatch_Call struct {
+	*mock.Call
+}
+
+// TaskInsertBatch is a helper method to define mock.On call
+//   - tasks []*model.Task
+func (_e *MockStore_Expecter) TaskInsertBatch(tasks any) *MockStore_TaskInsertBatch_Call {
+	return &MockStore_TaskInsertBatch_Call{Call: _e.mock.On("TaskInsertBatch", tasks)}
+}
+
+func (_c *MockStore_TaskInsertBatch_Call) Run(run func(tasks []*model.Task)) *MockStore_TaskInsertBatch_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 []*model.Task
+		if args[0] != nil {
+			arg0 = args[0].([]*model.Task)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_TaskInsertBatch_Call) Return(err error) *MockStore_TaskInsertBatch_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_TaskInsertBatch_Call) RunAndReturn(run func(tasks []*model.Task) error) *MockStore_TaskInsertBatch_Call {
 	_c.Call.Return(run)
 	return _c
 }

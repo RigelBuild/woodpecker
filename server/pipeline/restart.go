@@ -95,15 +95,11 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		return newPipeline, nil
 	}
 	// Persist and link the new config, as Create does.
-	configs := make([]*model.Config, 0, len(pipelineFiles))
-	for _, pipelineFile := range pipelineFiles {
-		config, cErr := findOrPersistPipelineConfig(store, newPipeline, pipelineFile)
-		if cErr != nil {
-			msg := fmt.Sprintf("failure to find or persist pipeline config for %s", repo.FullName)
-			log.Error().Err(cErr).Msg(msg)
-			return nil, errors.New(msg)
-		}
-		configs = append(configs, config)
+	configs, err := findOrPersistPipelineConfigs(store, newPipeline, pipelineFiles)
+	if err != nil {
+		msg := fmt.Sprintf("failure to find or persist pipeline config for %s", repo.FullName)
+		log.Error().Err(err).Msg(msg)
+		return nil, errors.New(msg)
 	}
 	if err := linkPipelineConfigs(store, configs, newPipeline.ID); err != nil {
 		msg := fmt.Sprintf("failure to persist pipeline config for %s.", repo.FullName)
@@ -146,20 +142,6 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 	}
 
 	return newPipeline, nil
-}
-
-func linkPipelineConfigs(store store.Store, configs []*model.Config, pipelineID int64) error {
-	for _, conf := range configs {
-		pipelineConfig := &model.PipelineConfig{
-			ConfigID:   conf.ID,
-			PipelineID: pipelineID,
-		}
-		err := store.PipelineConfigCreate(pipelineConfig)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func createNewOutOfOld(old *model.Pipeline) *model.Pipeline {

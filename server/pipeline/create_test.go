@@ -38,26 +38,22 @@ func TestConfigPersistedBeforeParsing(t *testing.T) {
 	}
 
 	persistedConfig := &model.Config{ID: 1, RepoID: 10, Name: "woodpecker"}
-	mockStore.On("ConfigPersist", &model.Config{
+	mockStore.On("ConfigsPersist", int64(10), []*model.Config{{
 		RepoID: int64(10),
 		Name:   "woodpecker",
 		Data:   forgeYamls[0].Data,
-	}).Return(persistedConfig, nil)
+	}}).Return([]*model.Config{persistedConfig}, nil)
 
-	mockStore.On("PipelineConfigCreate", &model.PipelineConfig{
+	mockStore.On("PipelineConfigsCreate", []*model.PipelineConfig{{
 		ConfigID:   int64(1),
 		PipelineID: int64(1),
-	}).Return(nil)
+	}}).Return(nil)
 
 	// Call the persist and link functions directly to verify they work
 	// (the actual Create function requires too many dependencies to mock fully)
-	var configs []*model.Config
-	for _, forgeYamlConfig := range forgeYamls {
-		config, err := findOrPersistPipelineConfig(mockStore, pipeline, forgeYamlConfig)
-		assert.NoError(t, err)
-		configs = append(configs, config)
-	}
-	err := linkPipelineConfigs(mockStore, configs, pipeline.ID)
+	configs, err := findOrPersistPipelineConfigs(mockStore, pipeline, forgeYamls)
+	assert.NoError(t, err)
+	err = linkPipelineConfigs(mockStore, configs, pipeline.ID)
 	assert.NoError(t, err)
 
 	mockStore.AssertExpectations(t)

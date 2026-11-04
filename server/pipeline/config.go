@@ -21,10 +21,33 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
-func findOrPersistPipelineConfig(store store.Store, currentPipeline *model.Pipeline, forgeYamlConfig *forge_types.FileMeta) (*model.Config, error) {
-	return store.ConfigPersist(&model.Config{
-		RepoID: currentPipeline.RepoID,
-		Name:   builder.SanitizePath(forgeYamlConfig.Name),
-		Data:   forgeYamlConfig.Data,
-	})
+// findOrPersistPipelineConfigs stores the pipeline's config files and returns
+// the stored rows in the order of forgeYamlConfigs.
+func findOrPersistPipelineConfigs(store store.Store, currentPipeline *model.Pipeline, forgeYamlConfigs []*forge_types.FileMeta) ([]*model.Config, error) {
+	if len(forgeYamlConfigs) == 0 {
+		return []*model.Config{}, nil
+	}
+	configs := make([]*model.Config, 0, len(forgeYamlConfigs))
+	for _, forgeYamlConfig := range forgeYamlConfigs {
+		configs = append(configs, &model.Config{
+			RepoID: currentPipeline.RepoID,
+			Name:   builder.SanitizePath(forgeYamlConfig.Name),
+			Data:   forgeYamlConfig.Data,
+		})
+	}
+	return store.ConfigsPersist(currentPipeline.RepoID, configs)
+}
+
+func linkPipelineConfigs(store store.Store, configs []*model.Config, pipelineID int64) error {
+	if len(configs) == 0 {
+		return nil
+	}
+	links := make([]*model.PipelineConfig, 0, len(configs))
+	for _, conf := range configs {
+		links = append(links, &model.PipelineConfig{
+			ConfigID:   conf.ID,
+			PipelineID: pipelineID,
+		})
+	}
+	return store.PipelineConfigsCreate(links)
 }

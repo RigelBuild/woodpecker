@@ -131,7 +131,11 @@ type Store interface {
 	// Configs
 	ConfigsForPipeline(pipelineID int64) ([]*model.Config, error)
 	ConfigPersist(*model.Config) (*model.Config, error)
+	// ConfigsPersist persists the configs of one repo in a bounded number of
+	// queries and returns the stored rows in input order.
+	ConfigsPersist(repoID int64, configs []*model.Config) ([]*model.Config, error)
 	PipelineConfigCreate(*model.PipelineConfig) error
+	PipelineConfigsCreate([]*model.PipelineConfig) error
 
 	// Secrets
 	SecretFind(*model.Repo, string) (*model.Secret, error)
@@ -174,6 +178,7 @@ type Store interface {
 	// TaskList TODO: paginate & opt filter
 	TaskList() ([]*model.Task, error)
 	TaskInsert(*model.Task) error
+	TaskInsertBatch([]*model.Task) error
 	TaskDelete(string) error
 
 	// ServerConfig
