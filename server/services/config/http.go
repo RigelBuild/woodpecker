@@ -16,8 +16,11 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"syscall"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -28,6 +31,13 @@ import (
 )
 
 var readOnlyNetrcMintTimeout = forge.ReadOnlyNetrcMintTimeout
+
+// A single-pod extension refuses connections while it restarts, for longer than Send's own retries.
+var (
+	extensionRefusedWindow = 60 * time.Second
+	extensionRefusedNow    = time.Now
+	extensionRefusedWait   = func() <-chan time.Time { return time.After(2 * time.Second) }
+)
 
 type httpService struct {
 	endpoint     string
@@ -89,7 +99,7 @@ func (h *httpService) Fetch(ctx context.Context, forgeClient forge.Forge, user *
 		body.Netrc = netrc
 	}
 
-	status, err := h.client.Send(ctx, http.MethodPost, h.endpoint, body, response)
+	status, err := h.sendRetryingRefused(ctx, body, response)
 	if err != nil && status != http.StatusNoContent {
 		return nil, fmt.Errorf("failed to fetch config via http (status: %d): %w", status, err)
 	}
@@ -114,4 +124,26 @@ func (h *httpService) Fetch(ctx context.Context, forgeClient forge.Forge, user *
 	}
 
 	return fileMetaList, nil
+}
+
+// sendRetryingRefused retries only refused connections. The window is checked between calls, so a final Send may run past it.
+func (h *httpService) sendRetryingRefused(ctx context.Context, body requestStructure, response *responseStructure) (int, error) {
+	start := extensionRefusedNow()
+	for attempt := 1; ; attempt++ {
+		status, err := h.client.Send(ctx, http.MethodPost, h.endpoint, body, response)
+		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) {
+			return status, err
+		}
+		elapsed := extensionRefusedNow().Sub(start)
+		if elapsed >= extensionRefusedWindow {
+			return status, fmt.Errorf("config extension refused connections for %s: %w", elapsed.Round(time.Second), err)
+		}
+		log.Warn().Err(err).Str("endpoint", h.endpoint).Int("attempt", attempt).Dur("elapsed", elapsed).
+			Msg("config extension refused the connection, retrying")
+		select {
+		case <-ctx.Done():
+			return status, fmt.Errorf("config extension refused connections until the context ended: %w", errors.Join(ctx.Err(), err))
+		case <-extensionRefusedWait():
+		}
+	}
 }
