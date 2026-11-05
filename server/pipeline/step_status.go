@@ -33,13 +33,12 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 
 	switch step.State {
 	case model.StatusPending:
-		// Handle skip before anything else — skipped steps never started,
-		// so we must not set Started or transition through Running.
 		if state.Skipped {
 			step.State = model.StatusSkipped
-			if state.Finished != 0 {
-				step.Finished = state.Finished
-			}
+			step.Started = state.Started
+			step.Finished = state.Finished
+			step.ExitCode = state.ExitCode
+			step.Error = state.Error
 			return &step, false, nil
 		}
 
@@ -65,7 +64,6 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 				step.State = model.StatusSuccess
 			} else {
 				step.State = model.StatusFailure
-
 				if step.Failure == model.FailureCancel {
 					cancelPipelineFromStep = true
 				}
@@ -82,11 +80,13 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			step.ExitCode = state.ExitCode
 			step.Error = state.Error
 
-			if state.ExitCode == 0 && state.Error == "" {
+			switch {
+			case state.Skipped:
+				step.State = model.StatusSkipped
+			case state.ExitCode == 0 && state.Error == "":
 				step.State = model.StatusSuccess
-			} else {
+			default:
 				step.State = model.StatusFailure
-
 				if step.Failure == model.FailureCancel {
 					cancelPipelineFromStep = true
 				}

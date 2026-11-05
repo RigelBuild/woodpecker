@@ -218,6 +218,31 @@ func TestUpdateStepStatus(t *testing.T) {
 		})
 	})
 
+	t.Run("SkipExitCodeFinishedStep", func(t *testing.T) {
+		t.Parallel()
+		step := &model.Step{State: model.StatusRunning, Started: 42}
+		state := rpc.StepState{Skipped: true, Exited: true, Started: 42, Finished: 50, ExitCode: 42}
+
+		err := UpdateStepStatus(t.Context(), mockStoreStep(t), step, state)
+
+		assert.NoError(t, err)
+		assert.Equal(t, model.StatusSkipped, step.State)
+		assert.Equal(t, int64(42), step.Started)
+		assert.Equal(t, int64(50), step.Finished)
+		assert.Equal(t, 42, step.ExitCode)
+	})
+
+	t.Run("SkipExitCodeKeepsWorkflowAndPipelineSuccessful", func(t *testing.T) {
+		t.Parallel()
+		workflowState := WorkflowStatus([]*model.Step{
+			{State: model.StatusSuccess, Failure: model.FailureFail},
+			{State: model.StatusSkipped, Started: 42, Failure: model.FailureFail},
+		})
+		pipelineState := PipelineStatus([]*model.Workflow{{State: workflowState}})
+
+		assert.Equal(t, model.StatusSuccess, workflowState)
+		assert.Equal(t, model.StatusSuccess, pipelineState)
+	})
 	t.Run("Skipped", func(t *testing.T) {
 		t.Parallel()
 

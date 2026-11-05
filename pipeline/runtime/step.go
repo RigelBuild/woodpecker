@@ -219,6 +219,10 @@ func (r *Runtime) completeStep(runnerCtx context.Context, step *backend_types.St
 			Code: waitState.ExitCode,
 		}
 	}
+	if waitState.Error == nil && step.SkipExitCode != 0 && waitState.ExitCode == step.SkipExitCode {
+		waitState.Skipped = true
+		return waitState, nil
+	}
 	if waitState.ExitCode != 0 {
 		return waitState, &pipeline_errors.ExitError{
 			UUID: step.UUID,

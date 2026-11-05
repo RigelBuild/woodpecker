@@ -174,6 +174,10 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 	onSuccess := container.When.IncludesStatusSuccess(c.metadata, false, whenEnv)
 	// at least one constraint must include the status failure.
 	onFailure := container.When.IncludesStatusFailure(c.metadata, false, whenEnv)
+	var skipExitCode int
+	if container.SkipExitCode != nil {
+		skipExitCode = *container.SkipExitCode
+	}
 
 	failure := container.Failure
 	if container.Failure == "" {
@@ -210,6 +214,7 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 		OnSuccess:      onSuccess,
 		OnFailure:      onFailure,
 		Failure:        failure,
+		SkipExitCode:   skipExitCode,
 		NetworkMode:    networkMode,
 		Ports:          ports,
 		BackendOptions: container.BackendOptions,

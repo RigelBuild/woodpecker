@@ -166,6 +166,28 @@ func findStartedTrace(traces []state.State, name string) *state.State {
 // Realistic workflow simulations.
 //
 
+func TestWorkflowSkipExitCode(t *testing.T) {
+	t.Parallel()
+	step := cmdStep("gate", withExitCode(42), func(step *backend_types.Step) { step.SkipExitCode = 42 })
+	engine := dummy.New()
+	tracer := newTestTracer(t)
+	r := New(
+		&backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{step}}}},
+		engine,
+		WithTracer(tracer),
+		WithLogger(newTestLogger(t)),
+	)
+
+	assert.NoError(t, r.Run(t.Context()))
+	assert.NoError(t, r.Err())
+	traces := getTracerStates(tracer)
+	gateTrace := findLastTraceByName(traces, "gate")
+	if assert.NotNil(t, gateTrace) {
+		assert.True(t, gateTrace.CurrStepState.Skipped)
+		assert.Equal(t, 42, gateTrace.CurrStepState.ExitCode)
+	}
+}
+
 func TestWorkflowCloneBuildDeploy(t *testing.T) {
 	t.Parallel()
 	tracer := newTestTracer(t)

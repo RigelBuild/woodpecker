@@ -61,6 +61,24 @@ func TestConvertPortWrong(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestCompileStepSkipExitCode(t *testing.T) {
+	compiler := New(WithLocal(true), WithPrefix("test"), WithWorkspace("/woodpecker", "src"))
+	skipExitCode := 42
+	workflow := &yaml_types.Workflow{
+		SkipClone: true,
+		Steps: yaml_types.ContainerList{ContainerList: []*yaml_types.Container{{
+			Name:         "test",
+			Image:        "alpine",
+			Commands:     []string{"exit 42"},
+			SkipExitCode: &skipExitCode,
+		}}},
+	}
+
+	config, err := compiler.Compile(workflow)
+	assert.NoError(t, err)
+	assert.Equal(t, skipExitCode, config.Stages[0].Steps[0].SkipExitCode)
+}
+
 func TestWorkspaceVolumeAlwaysAdded(t *testing.T) {
 	compiler := New(
 		WithPrefix("test"),

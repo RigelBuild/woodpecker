@@ -146,6 +146,11 @@ func TestSchema(t *testing.T) {
 			testFile: ".woodpecker/test-broken-service-without-name.yaml",
 			fail:     true,
 		},
+		{
+			name:     "skip exit code zero",
+			testFile: ".woodpecker/test-skip-exit-code-zero.yaml",
+			fail:     true,
+		},
 	}
 
 	for _, tt := range testTable {

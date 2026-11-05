@@ -221,8 +221,11 @@ func TestLintErrors(t *testing.T) {
 			from: "{steps: { build: { image: golang } }, services: [ { name: database, image: mysql }, { name: database, image: postgres } ] }",
 			want: "Service names must be unique, `database` is used more than once",
 		},
+		{
+			from: "steps: { build: { image: golang, skip_exit_code: 0, commands: [ 'go test' ] } }",
+			want: "`skip_exit_code` must be non-zero",
+		},
 	}
-
 	for _, tt := range testdata {
 		conf, err := yaml.ParseString(tt.from)
 		require.NoError(t, err)

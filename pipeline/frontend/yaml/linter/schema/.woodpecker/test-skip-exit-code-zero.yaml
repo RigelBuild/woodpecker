@@ -1,0 +1,5 @@
+steps:
+  test:
+    image: alpine
+    commands: echo test
+    skip_exit_code: 0

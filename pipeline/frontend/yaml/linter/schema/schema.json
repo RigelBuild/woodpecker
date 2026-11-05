@@ -400,6 +400,11 @@
           "description": "Detach a step to run in background until pipeline finishes. Read more: https://woodpecker-ci.org/docs/usage/services#detachment",
           "type": "boolean"
         },
+        "skip_exit_code": {
+          "description": "Exit code that marks this step skipped. Must be non-zero.",
+          "type": "integer",
+          "anyOf": [{ "minimum": 1 }, { "maximum": -1 }]
+        },
         "failure": {
           "description": "How to handle the failure of this step. Read more: https://woodpecker-ci.org/docs/usage/workflow-syntax#failure",
           "type": "string",
@@ -460,6 +465,11 @@
         "detach": {
           "description": "Detach a step to run in background until pipeline finishes. Read more: https://woodpecker-ci.org/docs/usage/services#detachment",
           "type": "boolean"
+        },
+        "skip_exit_code": {
+          "description": "Exit code that marks this step skipped. Must be non-zero.",
+          "type": "integer",
+          "anyOf": [{ "minimum": 1 }, { "maximum": -1 }]
         },
         "failure": {
           "description": "How to handle the failure of this step. Read more: https://woodpecker-ci.org/docs/usage/workflow-syntax#failure",
