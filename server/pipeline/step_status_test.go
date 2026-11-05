@@ -15,6 +15,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -216,6 +217,39 @@ func TestUpdateStepStatus(t *testing.T) {
 			assert.Equal(t, 1, step.ExitCode)
 			assert.Equal(t, "canceled", step.Error)
 		})
+	})
+	t.Run("LegacyAgentSkipExitCode", func(t *testing.T) {
+		t.Parallel()
+		for _, tt := range []struct {
+			name     string
+			exitCode int
+			want     model.StatusValue
+		}{
+			{name: "matching exit is skipped", exitCode: 42, want: model.StatusSkipped},
+			{name: "different exit still fails", exitCode: 7, want: model.StatusFailure},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				step := &model.Step{
+					UUID: "skip-uuid", SkipExitCode: 42,
+					State: model.StatusRunning, Started: 10,
+				}
+				state := rpc.StepState{
+					Exited: true, Finished: 20, ExitCode: tt.exitCode,
+					Error: fmt.Sprintf("uuid=skip-uuid: exit code %d", tt.exitCode),
+				}
+				err := UpdateStepStatus(t.Context(), mockStoreStep(t), step, state)
+
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, step.State)
+				if tt.want == model.StatusSkipped {
+					workflowState := WorkflowStatus([]*model.Step{step})
+					pipelineState := PipelineStatus([]*model.Workflow{{State: workflowState}})
+					assert.Equal(t, model.StatusSuccess, workflowState)
+					assert.Equal(t, model.StatusSuccess, pipelineState)
+				}
+			})
+		}
 	})
 
 	t.Run("SkipExitCodeFinishedStep", func(t *testing.T) {

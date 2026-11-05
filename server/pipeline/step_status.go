@@ -42,7 +42,7 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			return &step, false, nil
 		}
 
-		// Transition from pending to running when started
+		// Transition from pending to running when started.
 		if state.Finished == 0 {
 			step.State = model.StatusRunning
 		}
@@ -51,7 +51,7 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			step.Started = time.Now().Unix()
 		}
 
-		// Handle direct transition to finished if step setup error happened
+		// Handle direct transition to finished if step setup error happened.
 		if state.Exited || state.Error != "" {
 			step.Finished = state.Finished
 			if step.Finished == 0 {
@@ -60,9 +60,13 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			step.ExitCode = state.ExitCode
 			step.Error = state.Error
 
-			if state.ExitCode == 0 && state.Error == "" {
+			switch {
+			case shouldSkipOnExitCode(step, state):
+				step.State = model.StatusSkipped
+				step.Error = ""
+			case state.ExitCode == 0 && state.Error == "":
 				step.State = model.StatusSuccess
-			} else {
+			default:
 				step.State = model.StatusFailure
 				if step.Failure == model.FailureCancel {
 					cancelPipelineFromStep = true
@@ -71,7 +75,7 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 		}
 
 	case model.StatusRunning:
-		// Already running, check if it finished
+		// Already running, check if it finished.
 		if state.Exited || state.Error != "" {
 			step.Finished = state.Finished
 			if step.Finished == 0 {
@@ -83,6 +87,9 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			switch {
 			case state.Skipped:
 				step.State = model.StatusSkipped
+			case shouldSkipOnExitCode(step, state):
+				step.State = model.StatusSkipped
+				step.Error = ""
 			case state.ExitCode == 0 && state.Error == "":
 				step.State = model.StatusSuccess
 			default:
@@ -97,7 +104,7 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 		return nil, false, fmt.Errorf("step has state %s and does not expect rpc state updates", step.State)
 	}
 
-	// Handle cancellation across both cases
+	// Handle cancellation across both cases.
 	if state.Canceled && step.State != model.StatusKilled {
 		step.State = model.StatusKilled
 		if step.Finished == 0 {
@@ -106,6 +113,12 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 	}
 
 	return &step, cancelPipelineFromStep, nil
+}
+
+// shouldSkipOnExitCode identifies a configured non-zero exit from either agent version.
+func shouldSkipOnExitCode(step model.Step, state rpc.StepState) bool {
+	return state.Exited && state.ExitCode != 0 &&
+		step.SkipExitCode != 0 && state.ExitCode == step.SkipExitCode
 }
 
 // UpdateStepStatus updates step status based on agent reports via RPC.

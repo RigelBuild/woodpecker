@@ -354,16 +354,17 @@ func workflowsFromPipelineBuilder(pipeline *model.Pipeline, pipelineItems []*bui
 				for _, step := range stage.Steps {
 					pidSequence++
 					step := &model.Step{
-						Name:       step.Name,
-						UUID:       step.UUID,
-						PipelineID: pipeline.ID,
-						PID:        pidSequence,
-						PPID:       item.Workflow.PID,
-						State:      model.StatusPending,
-						Failure:    step.Failure,
-						Type:       model.StepType(step.Type),
-						DependsOn:  step.DependsOn,
-						Detached:   step.Detached,
+						Name:         step.Name,
+						UUID:         step.UUID,
+						PipelineID:   pipeline.ID,
+						PID:          pidSequence,
+						PPID:         item.Workflow.PID,
+						State:        model.StatusPending,
+						Failure:      step.Failure,
+						SkipExitCode: step.SkipExitCode,
+						Type:         model.StepType(step.Type),
+						DependsOn:    step.DependsOn,
+						Detached:     step.Detached,
 					}
 
 					if pipeline.Status == model.StatusBlocked {
