@@ -124,26 +124,25 @@ func (c *client) requiredStatusClient(ctx context.Context, user *model.User, rep
 	return gh, err
 }
 
-// reconcileTerminalStatus keeps a required commit status from posting a
-// non-terminal state once the pipeline itself has reached a terminal one. The
-// rolled-up workflow status can be StatusRunning/StatusPending when a cancel set
-// a terminal pipeline status but deliberately left the still-running workflows
-// untouched (cancel.go — they finish on the agent stop signal). In that window a
-// naive aggregate would post "pending" to a required branch-protection check, which
-// flaps the gate and — if the agent never reports Done — strands it pending
-// forever. When the rolled-up status is non-terminal but the pipeline status is
-// terminal, prefer the pipeline status; otherwise keep the (more specific)
-// rolled-up verdict.
+// reconcileTerminalStatus preserves terminal pipeline errors masked by a green
+// workflow rollup, without letting meta-only failures turn the code gate red.
 func reconcileTerminalStatus(rolled, pipelineStatus model.StatusValue) model.StatusValue {
-	if model.IsTerminalStatus(rolled) || !model.IsTerminalStatus(pipelineStatus) {
+	if model.IsTerminalStatus(rolled) {
+		isUnsuccessfulPipeline := pipelineStatus == model.StatusKilled ||
+			pipelineStatus == model.StatusError || pipelineStatus == model.StatusDeclined
+		if rolled == model.StatusSuccess && isUnsuccessfulPipeline {
+			return pipelineStatus
+		}
+		return rolled
+	}
+	if !model.IsTerminalStatus(pipelineStatus) {
 		return rolled
 	}
 	return pipelineStatus
 }
 
-// codeStatus rolls up the code (non-meta) workflows. With none it falls back to
-// the pipeline status: a config-errored pipeline persists no tree, and rolling up
-// an empty set would post a vacuous success.
+// codeStatus rolls up non-meta workflows, falling back to pipeline status when
+// no code workflow exists; killed, errored, and declined pipelines cannot pass.
 func codeStatus(p *model.Pipeline, workflows []*model.Workflow) model.StatusValue {
 	code := make([]*model.Workflow, 0, len(workflows))
 	for _, workflow := range workflows {

@@ -307,6 +307,79 @@ func TestStatusAggregateAllMetaGatesFallsBackToPipelineStatus(t *testing.T) {
 		"with no code workflow, CI (pr) falls back to the stored pipeline status, not the meta gate's verdict")
 }
 
+// TestStatusAggregateTerminalStatusIsNotMaskedBySkippedCodeWorkflows ensures
+// unstarted code workflows cannot make a terminal unsuccessful pipeline green.
+func TestStatusAggregateTerminalStatusIsNotMaskedBySkippedCodeWorkflows(t *testing.T) {
+	tests := []struct {
+		name           string
+		pipelineStatus model.StatusValue
+		workflows      []*model.Workflow
+		want           string
+	}{
+		{
+			name:           "killed pipeline with skipped code workflows",
+			pipelineStatus: model.StatusKilled,
+			workflows: []*model.Workflow{
+				{Name: "build", State: model.StatusSuccess},
+				{Name: "test", State: model.StatusSkipped},
+				{Name: "lint", State: model.StatusSkipped},
+			},
+			want: statusFailure,
+		},
+		{
+			name:           "canceled pipeline with skipped code workflows",
+			pipelineStatus: model.StatusCanceled,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSkipped}},
+			want:           statusSuccess,
+		},
+		{
+			name:           "successful pipeline with skipped code workflows",
+			pipelineStatus: model.StatusSuccess,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSkipped}},
+			want:           statusSuccess,
+		},
+		{
+			name:           "errored pipeline with all code workflows successful",
+			pipelineStatus: model.StatusError,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSuccess}},
+			want:           statusFailure,
+		},
+		{
+			name:           "declined pipeline with all code workflows successful",
+			pipelineStatus: model.StatusDeclined,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSuccess}},
+			want:           statusFailure,
+		},
+		{
+			name:           "killed pipeline with all code workflows successful",
+			pipelineStatus: model.StatusKilled,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSuccess}},
+			want:           statusFailure,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var posted github.RepoStatus
+			c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+					t.Errorf("decode posted status: %v", err)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				if _, err := w.Write([]byte(`{}`)); err != nil {
+					t.Errorf("write response: %v", err)
+				}
+			})
+			pipeline.Status = tt.pipelineStatus
+
+			err := c.StatusAggregate(ctx, user, repo, pipeline, tt.workflows)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, posted.GetState())
+		})
+	}
+}
+
 // TestStatusAggregateCancelWhileRunningPostsTerminal is the terminal-never-pending
 // regression for the cancel path: a cancel sets a terminal pipeline status
 // (StatusKilled) but leaves the still-running workflows untouched (they finish on
@@ -353,6 +426,31 @@ func TestStatusMetaCancelWhileRunningPostsTerminal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, statusFailure, posted.GetState(),
 		"a canceled pipeline with a still-running meta gate must post a terminal CI (meta), never pending")
+}
+
+// TestStatusMetaKilledPipelineWithSkippedGateDoesNotPostSuccess ensures the
+// meta aggregate applies the same terminal-pipeline protection as the code gate.
+func TestStatusMetaKilledPipelineWithSkippedGateDoesNotPostSuccess(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Errorf("decode posted status: %v", err)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		if _, err := w.Write([]byte(`{}`)); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	})
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusKilled}
+	workflows := []*model.Workflow{
+		{Name: "spec-impact", State: model.StatusSuccess, OnMetadataEdit: true},
+		{Name: "required-checks", State: model.StatusSkipped, OnMetadataEdit: true},
+	}
+
+	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, statusFailure, posted.GetState())
 }
 
 // statusMetaFixture wires the meta-aggregate harness, mirroring
@@ -537,27 +635,128 @@ func TestIsTerminalStatusMatchesConvertStatus(t *testing.T) {
 	}
 }
 
-// postedStates records each commit-status POST; the first `fail` POSTs get a 500.
-func postedStates(fail int) (*[]string, http.HandlerFunc) {
+// postedStates records commit-status POSTs; the first fail POSTs get a 500.
+func postedStates(t *testing.T, fail int) (*[]string, http.HandlerFunc) {
+	t.Helper()
 	states := &[]string{}
 	return states, func(w http.ResponseWriter, r *http.Request) {
 		var posted github.RepoStatus
-		_ = json.NewDecoder(r.Body).Decode(&posted) // a malformed body fails the state assertion
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Errorf("decode posted status: %v", err)
+			return
+		}
 		*states = append(*states, posted.GetState())
 		if len(*states) <= fail {
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"message":"server error"}`))
+			if _, err := w.Write([]byte(`{"message":"server error"}`)); err != nil {
+				t.Errorf("write error response: %v", err)
+			}
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{}`))
+		if _, err := w.Write([]byte(`{}`)); err != nil {
+			t.Errorf("write success response: %v", err)
+		}
 	}
+}
+
+func TestReportCanceledAggregateFailsWithoutSameCommitSuccessor(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusSuccess}}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p}, nil).Maybe()
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusFailure}, *states)
+}
+
+type countingAggregateReporter struct {
+	forge.Forge
+	calls int
+}
+
+func (r *countingAggregateReporter) StatusAggregate(context.Context, *model.User, *model.Repo, *model.Pipeline, []*model.Workflow) error {
+	r.calls++
+	return nil
+}
+
+func TestReportCanceledAggregateDoesNotCallReporterWithInitialSuccessor(t *testing.T) {
+	reporter := &countingAggregateReporter{}
+	p := &model.Pipeline{
+		ID:        20,
+		Number:    5,
+		Event:     model.EventPull,
+		Status:    model.StatusCanceled,
+		Commit:    "abc123",
+		Ref:       "refs/pull/7/head",
+		Workflows: []*model.Workflow{{Name: "build", State: model.StatusSuccess}},
+	}
+	successor := &model.Pipeline{Number: 6, Event: model.EventPull, Commit: p.Commit, Ref: p.Ref}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p, successor}, nil).Maybe()
+
+	err := forge.ReportAggregateStatus(context.Background(), reporter, s, &model.User{}, &model.Repo{}, p)
+	require.NoError(t, err)
+	assert.Zero(t, reporter.calls, "initial same-commit successor must prevent aggregate reporting")
+}
+
+func TestReportCanceledAggregateDefersToSameCommitSuccessor(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusSuccess}}
+	p.Ref = "refs/pull/7/head"
+	successor := &model.Pipeline{Number: 6, Event: model.EventPull, Commit: p.Commit, Ref: p.Ref}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p, successor}, nil).Maybe()
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Empty(t, *states)
+}
+
+func TestReportCanceledAggregateRetryDefersToSameCommitSuccessor(t *testing.T) {
+	states, handler := postedStates(t, 1)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusSuccess}}
+	successor := &model.Pipeline{Number: 6, Event: model.EventPull, Commit: p.Commit, Ref: p.Ref}
+	s := store_mocks.NewMockStore(t)
+	listCalls := 0
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).Run(func(mock.Arguments) {
+		listCalls++
+	}).Return(func(_ *model.Repo, _ *model.ListOptionsWithAll, _ *model.PipelineFilter) ([]*model.Pipeline, error) {
+		if listCalls <= 2 {
+			return []*model.Pipeline{}, nil
+		}
+		return []*model.Pipeline{successor}, nil
+	}, nil)
+
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusFailure}, *states, "the first POST failed; the retry must be skipped")
+}
+
+func TestReportCanceledAggregateQueryErrorPostsNothing(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusSuccess}}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline(nil), errors.New("db down")).Maybe()
+	require.Error(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Empty(t, *states)
 }
 
 // A report computed from a running snapshot that retries after the pipeline
 // finished must post the stored terminal verdict, not its stale pending.
 func TestReportAggregateRetryPostsStoredTerminalVerdict(t *testing.T) {
-	states, h := postedStates(1)
+	states, h := postedStates(t, 1)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
 	p.ID, p.Status = 20, model.StatusRunning
 	p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusRunning}}
@@ -570,10 +769,9 @@ func TestReportAggregateRetryPostsStoredTerminalVerdict(t *testing.T) {
 	assert.Equal(t, []string{statusPending, statusSuccess}, *states)
 }
 
-// The refreshed CI (pr) verdict rolls up the stored code tree: a failed meta
-// gate must not red it once the code workflows pass.
+// Refreshed code verdicts use the latest stored tree, excluding meta gates.
 func TestReportAggregateRefreshRollsUpStoredCodeTree(t *testing.T) {
-	states, h := postedStates(0)
+	states, h := postedStates(t, 0)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
 	p.ID, p.Status = 20, model.StatusRunning
 	p.Workflows = []*model.Workflow{
@@ -593,10 +791,9 @@ func TestReportAggregateRefreshRollsUpStoredCodeTree(t *testing.T) {
 	assert.Equal(t, []string{statusSuccess}, *states)
 }
 
-// Outside PR events the aggregate is the whole-pipeline verdict, so the
-// refresh posts the stored status and never rolls up a tree.
+// Outside PR events, refreshes use only the stored pipeline verdict.
 func TestReportAggregateRefreshOnPushUsesPipelineStatus(t *testing.T) {
-	states, h := postedStates(0)
+	states, h := postedStates(t, 0)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
 	p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
 	s := store_mocks.NewMockStore(t)
@@ -608,7 +805,7 @@ func TestReportAggregateRefreshOnPushUsesPipelineStatus(t *testing.T) {
 
 // A refresh that finds the pipeline still running keeps the pending snapshot.
 func TestReportAggregateRefreshKeepsSnapshotWhileRunning(t *testing.T) {
-	states, h := postedStates(0)
+	states, h := postedStates(t, 0)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
 	p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
 	s := store_mocks.NewMockStore(t)
@@ -618,11 +815,10 @@ func TestReportAggregateRefreshKeepsSnapshotWhileRunning(t *testing.T) {
 	assert.Equal(t, []string{statusPending}, *states)
 }
 
-// A store read failure must not post the pending snapshot: the pipeline may
-// have finished. The refresh retries, and posts nothing if the store stays down.
+// Store read failures block stale writes; the retry can recover or fail closed.
 func TestReportAggregateRefreshErrorPostsNoStalePending(t *testing.T) {
 	t.Run("recovers", func(t *testing.T) {
-		states, h := postedStates(0)
+		states, h := postedStates(t, 0)
 		c, ctx, repo, user, p := statusAggregateFixture(t, h)
 		p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
 		s := store_mocks.NewMockStore(t)
@@ -633,7 +829,7 @@ func TestReportAggregateRefreshErrorPostsNoStalePending(t *testing.T) {
 		assert.Equal(t, []string{statusSuccess}, *states)
 	})
 	t.Run("stays down", func(t *testing.T) {
-		states, h := postedStates(0)
+		states, h := postedStates(t, 0)
 		c, ctx, repo, user, p := statusAggregateFixture(t, h)
 		p.ID, p.Event, p.Status = 20, model.EventPush, model.StatusRunning
 		s := store_mocks.NewMockStore(t)
@@ -646,7 +842,7 @@ func TestReportAggregateRefreshErrorPostsNoStalePending(t *testing.T) {
 
 // The meta context gets the same per-attempt refresh.
 func TestReportMetaRefreshPostsStoredTerminalVerdict(t *testing.T) {
-	states, h := postedStates(0)
+	states, h := postedStates(t, 0)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
 	p.ID, p.Number, p.Status = 20, 1, model.StatusRunning
 	p.Workflows = []*model.Workflow{{Name: "spec-impact", State: model.StatusRunning, OnMetadataEdit: true}}
@@ -661,10 +857,9 @@ func TestReportMetaRefreshPostsStoredTerminalVerdict(t *testing.T) {
 	assert.Equal(t, []string{statusFailure}, *states)
 }
 
-// A later meta pipeline that appears after the wrapper's check owns CI (meta):
-// the older report posts nothing.
+// A later meta pipeline owns the context even if it appears after the wrapper check.
 func TestReportMetaRefreshDefersToLaterMetaPipeline(t *testing.T) {
-	states, h := postedStates(0)
+	states, h := postedStates(t, 0)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
 	p.ID, p.Number, p.Status = 20, 1, model.StatusRunning
 	p.Workflows = []*model.Workflow{{Name: "spec-impact", State: model.StatusRunning, OnMetadataEdit: true}}
@@ -677,11 +872,9 @@ func TestReportMetaRefreshDefersToLaterMetaPipeline(t *testing.T) {
 	assert.Empty(t, *states)
 }
 
-// A meta report whose snapshot is already terminal still re-checks freshness
-// before a retry: a later meta pipeline that appears during backoff owns
-// CI (meta), so the older green verdict must not be re-posted.
+// A meta retry must re-check freshness before posting the old verdict.
 func TestReportMetaTerminalRetryDefersToLaterMetaPipeline(t *testing.T) {
-	states, h := postedStates(1)
+	states, h := postedStates(t, 1)
 	c, ctx, repo, user, p := statusAggregateFixture(t, h)
 	p.ID, p.Number, p.Status = 20, 1, model.StatusRunning
 	p.Workflows = []*model.Workflow{
@@ -690,8 +883,7 @@ func TestReportMetaTerminalRetryDefersToLaterMetaPipeline(t *testing.T) {
 	}
 	later := &model.Pipeline{ID: 21, Number: 2, Commit: p.Commit, Event: model.EventPullMetadata, Status: model.StatusFailure}
 	s := store_mocks.NewMockStore(t)
-	// Wrapper check and first attempt see no later pipeline; the edit lands
-	// during backoff after the failed POST.
+	// The later pipeline appears during backoff after the failed POST.
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).Return([]*model.Pipeline{}, nil).Twice()
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).Return([]*model.Pipeline{later}, nil).Once()
 

@@ -222,21 +222,61 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 		return nil
 	}
 
+	canceledWithoutSuccessor := false
+	var later func() (bool, error)
+	if b.Event == model.EventPull && b.Status == model.StatusCanceled {
+		later = func() (bool, error) {
+			return hasLaterPullPipelineOnCommit(s, r, b)
+		}
+		newer, err := later()
+		if err != nil {
+			return err
+		}
+		if newer {
+			return nil
+		}
+		// A canceled PR run without a same-commit successor did not test the head.
+		failed := *b
+		failed.Status = model.StatusFailure
+		b = &failed
+		canceledWithoutSuccessor = true
+	}
+
 	var workflows []*model.Workflow
 	if b.Event == model.EventPull || b.Event == model.EventPullMetadata {
-		workflows = b.Workflows
-		if len(workflows) == 0 {
-			var err error
-			workflows, err = s.WorkflowGetTree(b)
-			if err != nil {
-				return err
+		if !canceledWithoutSuccessor {
+			workflows = b.Workflows
+			if len(workflows) == 0 {
+				var err error
+				workflows, err = s.WorkflowGetTree(b)
+				if err != nil {
+					return err
+				}
+				b.Workflows = workflows
 			}
-			b.Workflows = workflows
 		}
 	}
 
-	ctx = context.WithValue(ctx, refresherKey{}, newRefresher(s, b, nil))
+	ctx = context.WithValue(ctx, refresherKey{}, newRefresher(s, b, later))
 	return reporter.StatusAggregate(ctx, u, r, b, workflows)
+}
+
+// hasLaterPullPipelineOnCommit reports whether a later pull pipeline owns this
+// commit's aggregate context, regardless of whether it has finished yet.
+func hasLaterPullPipelineOnCommit(s store.Store, r *model.Repo, b *model.Pipeline) (bool, error) {
+	pipelines, err := s.GetPipelineList(r, &model.ListOptionsWithAll{All: true}, &model.PipelineFilter{
+		Events:      []model.WebhookEvent{model.EventPull},
+		RefContains: b.Ref,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range pipelines {
+		if candidate.Commit == b.Commit && candidate.Number > b.Number {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // MetaStatusReporter is an optional Forge capability: report a SECOND, selective
