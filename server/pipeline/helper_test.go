@@ -462,17 +462,13 @@ func TestReportMetaStatusPostsWhenLaterMetaPipelineErrored(t *testing.T) {
 		"a newer pipeline that errored before posting a verdict must not suppress this terminal report")
 }
 
-// TestCancelPostsTerminalMetaWithNilWorkflows is the Q2 terminal-never-pending
-// guarantee, exercised through the REAL cancel.go path (not the happy helper.go
-// path). Cancel calls updatePipelineStatus with killedPipeline.Workflows == nil
-// (the tree is loaded AFTER, at cancel.go:86). If ReportMetaStatus trusted that
-// nil it would no-op and strand CI (meta) pending forever. Instead it self-loads
-// the tree, so the meta post still fires with a TERMINAL rollup: the pending gate
-// was skipped by the cancel, and an all-skipped meta set rolls up to success —
-// terminal, not pending.
-func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
+// TestCancelPostsAggregateFailureAndTerminalMetaWithNilWorkflows exercises the
+// real cancel path and ensures both required aggregates receive terminal states.
+func TestCancelPostsAggregateFailureAndTerminalMetaWithNilWorkflows(t *testing.T) {
+	setStatusAggregate(t, true)
 	setStatusMeta(t, true)
 
+	setStatusPerWorkflow(t, false)
 	s := store_mocks.NewMockStore(t)
 	// The gate is pending on the first tree read (so Cancel skips it), then
 	// persisted as skipped — the DB read the self-load sees reflects that skip,
@@ -490,7 +486,7 @@ func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
 	s.On("UpdatePipeline", mock.Anything).Return(nil)
 	// Freshness: this pipeline is the only meta-carrying one for the commit.
 	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
-		Return([]*model.Pipeline{{Number: 5, Event: model.EventPull, Commit: "abc123"}}, nil)
+		Return([]*model.Pipeline{{Number: 5, Event: model.EventPull, Commit: "abc123", Ref: "refs/pull/7/head"}}, nil).Twice()
 
 	q := queue_mocks.NewMockQueue(t)
 	q.On("ErrorAtOnce", mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -515,6 +511,9 @@ func TestCancelPostsTerminalMetaWithNilWorkflows(t *testing.T) {
 
 	err := Cancel(context.Background(), f, s, repo, user, pipeline, &model.CancelInfo{})
 	require.NoError(t, err)
+	require.Equal(t, 1, f.aggregateCalls)
+	assert.Equal(t, model.StatusFailure, f.aggregatePipeline.Status,
+		"a canceled pull request without a same-commit successor must report aggregate failure")
 	require.Equal(t, 1, f.metaCalls,
 		"the canceled pipeline must still post CI (meta) even though its Workflows were nil at the call site")
 	require.NotEmpty(t, f.metaWorkflows, "ReportMetaStatus must self-load the tree rather than no-op on nil Workflows")

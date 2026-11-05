@@ -441,7 +441,6 @@ func TestStatusMetaKilledPipelineWithSkippedGateDoesNotPostSuccess(t *testing.T)
 	assert.Equal(t, statusFailure, posted.GetState())
 }
 
-
 // statusMetaFixture wires the meta-aggregate harness, mirroring
 // statusAggregateFixture: it sets the meta config (StatusContext "CI",
 // StatusMetaContext "{{ .context }} (meta)"), mocks the commit-status POST, and
@@ -639,6 +638,33 @@ func postedStates(fail int) (*[]string, http.HandlerFunc) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{}`))
 	}
+}
+
+func TestReportCanceledAggregateFailsWithoutSameCommitSuccessor(t *testing.T) {
+	states, handler := postedStates(0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p}, nil).Once()
+
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusFailure}, *states)
+}
+
+func TestReportCanceledAggregateDefersToSameCommitSuccessor(t *testing.T) {
+	states, handler := postedStates(0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	successor := &model.Pipeline{Number: 6, Event: model.EventPull, Commit: p.Commit, Ref: p.Ref}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p, successor}, nil).Once()
+
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Empty(t, *states)
 }
 
 // A report computed from a running snapshot that retries after the pipeline
