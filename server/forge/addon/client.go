@@ -17,6 +17,8 @@ package addon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/rpc"
@@ -228,10 +230,25 @@ func (g *RPC) Status(ctx context.Context, u *model.User, r *model.Repo, b *model
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return result.Error
+		return remoteStatusError(result.Error)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// remoteStatusError restores the context sentinel the RPC flattened to text, since the
+// plugin's copy of the caller deadline can fire just before the caller's own timer.
+func remoteStatusError(err error) error {
+	var serverErr rpc.ServerError
+	if !errors.As(err, &serverErr) {
+		return err
+	}
+	for _, sentinel := range []error{context.DeadlineExceeded, context.Canceled} {
+		if string(serverErr) == sentinel.Error() {
+			return fmt.Errorf("plugin status: %w", sentinel)
+		}
+	}
+	return err
 }
 
 func (g *RPC) Netrc(u *model.User, r *model.Repo) (*model.Netrc, error) {

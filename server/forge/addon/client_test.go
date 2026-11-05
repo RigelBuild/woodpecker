@@ -144,6 +144,29 @@ func TestRPCStatusDeadline(t *testing.T) {
 		}
 	})
 
+	for _, sentinel := range []error{context.DeadlineExceeded, context.Canceled} {
+		t.Run("plugin "+sentinel.Error()+" keeps its sentinel when the caller context is still live", func(t *testing.T) {
+			impl := forge_mocks.NewMockForge(t)
+			client := newStatusRPCClient(t, impl)
+			impl.On("Status", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return(sentinel)
+
+			err := client.Status(t.Context(), testUser(), testRepo(), &model.Pipeline{}, &model.Workflow{})
+			require.ErrorIs(t, err, sentinel)
+		})
+	}
+
+	t.Run("other plugin errors pass through unchanged", func(t *testing.T) {
+		impl := forge_mocks.NewMockForge(t)
+		client := newStatusRPCClient(t, impl)
+		impl.On("Status", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+			Return(errors.New("forge said no"))
+
+		err := client.Status(t.Context(), testUser(), testRepo(), &model.Pipeline{}, &model.Workflow{})
+		require.EqualError(t, err, "forge said no")
+		require.NotErrorIs(t, err, context.DeadlineExceeded)
+	})
+
 	t.Run("call without deadline gives plugin unbounded context", func(t *testing.T) {
 		impl := forge_mocks.NewMockForge(t)
 		remoteContext := make(chan context.Context, 1)
