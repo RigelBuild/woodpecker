@@ -758,11 +758,40 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 				since := kube_meta_v1.NewTime(last)
 				nextOpts.SinceTime = &since
 			}
-			logs, err = e.openPodLogStream(tailCtx, e.config.GetNamespace(step.OrgID), podName, nextOpts)
-			for err != nil {
+			for {
+				logs, err = e.openPodLogStream(tailCtx, e.config.GetNamespace(step.OrgID), podName, nextOpts)
+				if err == nil {
+					break
+				}
 				if tailCtx.Err() != nil {
 					return
 				}
+				if kube_errors.IsNotFound(err) {
+					log.Debug().Err(err).Str("pod", podName).Msg("pod log stream no longer exists; stopping log tail")
+					return
+				}
+
+				pod, getErr := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(tailCtx, podName, kube_meta_v1.GetOptions{})
+				if kube_errors.IsNotFound(getErr) {
+					log.Debug().Err(err).Str("pod", podName).Msg("pod deleted while reopening log stream; stopping log tail")
+					return
+				}
+				if getErr == nil {
+					container, found := stepContainerStatus(pod, podName)
+					if found && container.State.Terminated != nil {
+						if nextOpts.Follow {
+							log.Debug().Err(err).Str("pod", podName).Msg("step container terminated while reopening log stream; requesting final log drain")
+							terminated = true
+							nextOpts.Follow = false
+							continue
+						}
+						log.Debug().Err(err).Str("pod", podName).Msg("failed to open final pod log stream after container termination")
+						return
+					}
+				} else {
+					log.Warn().Err(getErr).Str("pod", podName).Msg("failed to check pod while reopening log stream")
+				}
+
 				log.Warn().Err(err).Str("pod", podName).Dur("backoff", reopenDelay).Msg("failed to reopen pod log stream, retrying with backoff")
 				if waitErr := e.waitBeforeLogReopen(tailCtx, reopenDelay); waitErr != nil {
 					return
@@ -773,7 +802,6 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 						reopenDelay = maxLogReopenDelay
 					}
 				}
-				logs, err = e.openPodLogStream(tailCtx, e.config.GetNamespace(step.OrgID), podName, nextOpts)
 			}
 			stream, ok = active.replace(logs)
 			if !ok {

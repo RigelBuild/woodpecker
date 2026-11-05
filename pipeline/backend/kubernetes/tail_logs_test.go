@@ -123,6 +123,97 @@ func TestTailLogsDrainsFinalTerminatedStream(t *testing.T) {
 	assert.NotNil(t, opened[1].SinceTime)
 }
 
+func TestTailLogsStopsWhenReopenedLogStreamIsNotFound(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("tail-reopen-not-found")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	createTailTestPod(t, client, podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}})
+
+	var openCount atomic.Int32
+	engine.openLogStream = func(_ context.Context, _, _ string, _ *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+		if openCount.Add(1) == 1 {
+			return io.NopCloser(strings.NewReader("")), nil
+		}
+		return nil, kube_errors.NewNotFound(kube_core_v1.Resource("pods"), podName)
+	}
+	var getCount atomic.Int32
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		getCount.Add(1)
+		return true, tailTestPod(podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}}), nil
+	})
+	var waitCount atomic.Int32
+	engine.waitLogReopen = func(ctx context.Context, _ time.Duration) error {
+		if waitCount.Add(1) == 1 {
+			return nil
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	reader, err := engine.tailLogs(ctx, step, podName)
+	require.NoError(t, err)
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.Copy(io.Discard, reader)
+		readDone <- readErr
+	}()
+	select {
+	case err := <-readDone:
+		assert.NoError(t, err)
+		assert.Equal(t, int32(2), openCount.Load())
+		assert.Equal(t, int32(1), getCount.Load())
+	case <-time.After(time.Second):
+		t.Fatal("reader did not reach EOF after the reopened log stream returned NotFound")
+	}
+	require.NoError(t, reader.Close())
+}
+
+func TestTailLogsDrainsFinalStreamAfterReopenFailure(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("tail-final-after-reopen-failure")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	createTailTestPod(t, client, podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}})
+
+	var openCount atomic.Int32
+	engine.openLogStream = func(_ context.Context, _, _ string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+		switch openCount.Add(1) {
+		case 1:
+			return io.NopCloser(strings.NewReader("")), nil
+		case 2:
+			return nil, errors.New("temporary log stream failure")
+		default:
+			if opts.Follow {
+				return nil, errors.New("final log stream must not follow")
+			}
+			return io.NopCloser(strings.NewReader("2026-11-05T12:11:00.123Z final drain\n")), nil
+		}
+	}
+	var getCount atomic.Int32
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		state := kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}}
+		if getCount.Add(1) == 2 {
+			state = kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}}
+		}
+		return true, tailTestPod(podName, state), nil
+	})
+	engine.waitLogReopen = func(context.Context, time.Duration) error { return nil }
+
+	reader, err := engine.tailLogs(t.Context(), step, podName)
+	require.NoError(t, err)
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, "final drain\n", string(got))
+	assert.Equal(t, int32(3), openCount.Load())
+	assert.Equal(t, int32(2), getCount.Load())
+}
+
 func TestTailLogsFinishesWhenPodIsDeleted(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
@@ -362,7 +453,7 @@ func TestTailLogsReopensAfterMoreThanTwentyEarlyEOFs(t *testing.T) {
 	assert.Equal(t, "recovered\n", string(got))
 	assert.Greater(t, openCount.Load(), int32(emptyStreams))
 	assert.Equal(t, int32(2), openFailures.Load())
-	assert.Len(t, waits, emptyStreams+2)
+	assert.Len(t, waits, emptyStreams+1)
 	assert.Equal(t, initialLogReopenDelay, waits[0])
 	assert.Equal(t, maxLogReopenDelay, waits[emptyStreams-1])
 	assert.Equal(t, maxLogReopenDelay, waits[emptyStreams])
@@ -428,5 +519,39 @@ func tailTestPod(name string, state kube_core_v1.ContainerState) *kube_core_v1.P
 			Name:  name,
 			State: state,
 		}}},
+	}
+}
+
+func BenchmarkCopyTimestampedLogs(b *testing.B) {
+	const lineCount = 10_000
+	const line = "2026-11-05T12:10:00.123456789Z benchmark line\n"
+	logs := strings.Repeat(line, lineCount)
+	engine := &kube{}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(logs)))
+
+	for b.Loop() {
+		reader, writer := io.Pipe()
+		readDone := make(chan error, 1)
+		go func() {
+			_, readErr := io.Copy(io.Discard, reader)
+			closeErr := reader.Close()
+			readDone <- errors.Join(readErr, closeErr)
+		}()
+		last := time.Time{}
+		atLast := 0
+		skipping := false
+		skipAtLast := 0
+		delivered := false
+		copyErr := engine.copyTimestampedLogs(context.Background(), writer, strings.NewReader(logs), &last, &atLast, &skipping, &skipAtLast, &delivered)
+		if !errors.Is(copyErr, io.EOF) {
+			b.Fatalf("copyTimestampedLogs() error = %v, want EOF", copyErr)
+		}
+		if closeErr := writer.Close(); closeErr != nil {
+			b.Fatal(closeErr)
+		}
+		if readErr := <-readDone; readErr != nil {
+			b.Fatal(readErr)
+		}
 	}
 }
