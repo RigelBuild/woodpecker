@@ -46,6 +46,28 @@ import (
 
 type ctxKey struct{}
 
+var errNetrcMintFailed = errors.New("required read-only netrc mint failed")
+
+type netrcMintError struct {
+	err       error
+	retryable bool
+}
+
+func (e netrcMintError) Error() string        { return e.err.Error() }
+func (e netrcMintError) Unwrap() error        { return e.err }
+func (e netrcMintError) Is(target error) bool { return target == errNetrcMintFailed }
+
+func isRetryableNetrcMintError(err error) bool {
+	var mintErr netrcMintError
+	return errors.As(err, &mintErr) && mintErr.retryable
+}
+
+func netrcMintFailure(err error) error { return netrcMintError{err: err} }
+
+func netrcMintRetryableFailure(err error) error {
+	return netrcMintError{err: err, retryable: true}
+}
+
 // agentIDKey is a non imitable context key.
 var agentIDKey = &ctxKey{}
 
@@ -58,8 +80,9 @@ type RPC struct {
 	store         store.Store
 	pipelineTime  *prometheus.GaugeVec
 	pipelineCount *prometheus.CounterVec
-	// now is injectable so netrc lifetime decisions are deterministic in tests.
-	now func() time.Time
+	// now and wait are injectable so netrc timing is deterministic in tests.
+	now  func() time.Time
+	wait func(context.Context, time.Duration) error
 	// reportWG, when non-nil, tracks in-flight background forge reports so tests
 	// can await them deterministically. Nil in production (fire-and-forget).
 	reportWG *sync.WaitGroup
@@ -108,7 +131,25 @@ func (s *RPC) Next(c context.Context, agentFilter rpc.Filter) (*rpc.Workflow, er
 		return nil, err
 	}
 	if err := s.injectNetrcForWorkflow(c, rpcWorkflow); err != nil {
+		if c.Err() != nil {
+			return nil, c.Err()
+		}
+		if errors.Is(err, errNetrcMintFailed) {
+			log.Error().Err(err).Str("workflow", rpcWorkflow.ID).Msg("could not mint required read-only netrc; failing workflow")
+			finished := time.Now()
+			if s.now != nil {
+				finished = s.now()
+			}
+			stateError := err.Error()
+			if doneErr := s.Done(c, rpcWorkflow.ID, rpc.WorkflowState{Finished: finished.Unix(), Error: stateError}); doneErr != nil {
+				log.Error().Err(doneErr).Str("workflow", rpcWorkflow.ID).Msg("could not fail workflow after read-only netrc mint failure")
+			}
+			return nil, nil
+		}
 		log.Warn().Err(err).Str("workflow", rpcWorkflow.ID).Msg("could not inject read-only netrc")
+	}
+	if c.Err() != nil {
+		return nil, c.Err()
 	}
 
 	return rpcWorkflow, nil
@@ -125,18 +166,62 @@ func (s *RPC) injectNetrcForWorkflow(ctx context.Context, w *rpc.Workflow) error
 		stripNetrc(w)
 		return fmt.Errorf("could not load workflow %s: %w", w.ID, err)
 	}
-	pipeline, err := s.store.GetPipeline(workflow.PipelineID)
+	currentPipeline, err := s.store.GetPipeline(workflow.PipelineID)
 	if err != nil {
 		stripNetrc(w)
 		return fmt.Errorf("could not load pipeline %d: %w", workflow.PipelineID, err)
 	}
-	repo, err := s.store.GetRepo(pipeline.RepoID)
+	repo, err := s.store.GetRepo(currentPipeline.RepoID)
 	if err != nil {
 		stripNetrc(w)
-		return fmt.Errorf("could not load repo %d: %w", pipeline.RepoID, err)
+		return fmt.Errorf("could not load repo %d: %w", currentPipeline.RepoID, err)
 	}
-	return s.injectNetrc(ctx, w, repo)
+	var mintErr error
+	for attempt := range maxNetrcMintAttempts {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * time.Second
+			wait := s.wait
+			if wait == nil {
+				wait = waitForNetrcMintRetry
+			}
+			if err := wait(ctx, delay); err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		mintErr = s.injectNetrc(ctx, w, repo)
+		// A canceled poll must not fail the workflow; the queue lease recovers it.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !errors.Is(mintErr, errNetrcMintFailed) {
+			return mintErr
+		}
+		log.Warn().Err(mintErr).Str("workflow", w.ID).Int("attempt", attempt+1).Msg("read-only netrc mint attempt failed")
+		if !isRetryableNetrcMintError(mintErr) {
+			return netrcMintFailure(fmt.Errorf("could not mint read-only netrc for %s: %w", repo.FullName, mintErr))
+		}
+	}
+	return netrcMintFailure(fmt.Errorf("could not mint read-only netrc for %s: %w", repo.FullName, mintErr))
 }
+
+func waitForNetrcMintRetry(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+const maxNetrcMintAttempts = 3
 
 func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo) error {
 	stripNetrc(w)
@@ -146,23 +231,23 @@ func (s *RPC) injectNetrc(ctx context.Context, w *rpc.Workflow, repo *model.Repo
 
 	forgeClient, err := server.Config.Services.Manager.ForgeFromRepo(repo)
 	if err != nil {
-		return fmt.Errorf("could not load forge for repo %s: %w", repo.FullName, err)
+		return netrcMintFailure(fmt.Errorf("could not load forge for repo %s: %w", repo.FullName, err))
 	}
 	readOnlyNetrcer, ok := forgeClient.(forge.ReadOnlyNetrcer)
 	if !ok {
-		return fmt.Errorf("forge %q does not support read-only netrc", forgeClient.Name())
+		return netrcMintFailure(fmt.Errorf("forge %q does not support read-only netrc", forgeClient.Name()))
 	}
 	mintCtx, cancel := context.WithTimeout(ctx, forge.ReadOnlyNetrcMintTimeout)
 	defer cancel()
 	netrc, err := readOnlyNetrcer.ReadOnlyNetrc(mintCtx, repo)
 	if err != nil {
-		return fmt.Errorf("could not mint read-only netrc for repo %s: %w", repo.FullName, err)
+		return netrcMintRetryableFailure(err)
 	}
 	if netrc == nil {
-		return errors.New("forge returned an empty read-only netrc")
+		return netrcMintFailure(errors.New("forge returned an empty read-only netrc"))
 	}
 	if netrc.Machine == "" || netrc.Login == "" || netrc.Password == "" {
-		return errors.New("forge returned an incomplete read-only netrc")
+		return netrcMintFailure(errors.New("forge returned an incomplete read-only netrc"))
 	}
 	now := time.Now()
 	if s.now != nil {
