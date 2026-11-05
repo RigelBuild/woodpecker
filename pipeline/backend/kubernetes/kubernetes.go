@@ -63,6 +63,8 @@ type kube struct {
 	config              *config
 	goos                string
 	openLogStream       func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
+	logRetryNow         func() time.Time
+	logRetryTimeout     time.Duration
 	waitLogReopen       func(context.Context, time.Duration) error
 	nodes               sync.Map
 	workflowResourcesMu sync.RWMutex
@@ -752,16 +754,25 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 					}
 				}
 			}
-
 			nextOpts := &kube_core_v1.PodLogOptions{Container: podName, Timestamps: true, Follow: !terminated}
 			if !last.IsZero() {
 				since := kube_meta_v1.NewTime(last)
 				nextOpts.SinceTime = &since
 			}
+
+			var finalDrainDeadline time.Time
 			for {
+				if !finalDrainDeadline.IsZero() && !e.logRetryTime().Before(finalDrainDeadline) {
+					log.Warn().Err(err).Str("pod", podName).Dur("retry_duration", e.logRetryDuration()).Msg("final pod log drain retry duration expired; stopping log tail")
+					return
+				}
+
 				logs, err = e.openPodLogStream(tailCtx, e.config.GetNamespace(step.OrgID), podName, nextOpts)
 				if err == nil {
 					break
+				}
+				if finalDrainDeadline.IsZero() && !nextOpts.Follow {
+					finalDrainDeadline = e.logRetryTime().Add(e.logRetryDuration())
 				}
 				if tailCtx.Err() != nil {
 					return
@@ -770,7 +781,6 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 					log.Debug().Err(err).Str("pod", podName).Msg("pod log stream no longer exists; stopping log tail")
 					return
 				}
-
 				pod, getErr := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(tailCtx, podName, kube_meta_v1.GetOptions{})
 				if kube_errors.IsNotFound(getErr) {
 					log.Debug().Err(err).Str("pod", podName).Msg("pod deleted while reopening log stream; stopping log tail")
@@ -778,21 +788,24 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 				}
 				if getErr == nil {
 					container, found := stepContainerStatus(pod, podName)
-					if found && container.State.Terminated != nil {
-						if nextOpts.Follow {
-							log.Debug().Err(err).Str("pod", podName).Msg("step container terminated while reopening log stream; requesting final log drain")
-							terminated = true
-							nextOpts.Follow = false
-							continue
-						}
-						log.Debug().Err(err).Str("pod", podName).Msg("failed to open final pod log stream after container termination; retrying final log drain")
+					if found && container.State.Terminated != nil && !terminated {
+						terminated = true
+						nextOpts.Follow = false
+						continue
 					}
 				} else {
 					log.Warn().Err(getErr).Str("pod", podName).Msg("failed to check pod while reopening log stream")
 				}
 
 				log.Warn().Err(err).Str("pod", podName).Dur("backoff", reopenDelay).Msg("failed to reopen pod log stream, retrying with backoff")
-				if waitErr := e.waitBeforeLogReopen(tailCtx, reopenDelay); waitErr != nil {
+				waitDelay := reopenDelay
+				if !finalDrainDeadline.IsZero() {
+					remaining := finalDrainDeadline.Sub(e.logRetryTime())
+					if remaining < waitDelay {
+						waitDelay = remaining
+					}
+				}
+				if waitErr := e.waitBeforeLogReopen(tailCtx, waitDelay); waitErr != nil {
 					return
 				}
 				if reopenDelay < maxLogReopenDelay {
@@ -803,6 +816,7 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 				}
 			}
 			stream, ok = active.replace(logs)
+
 			if !ok {
 				return
 			}
@@ -822,6 +836,20 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 		}
 	}()
 	return &tailLogReadCloser{reader: reader, cancel: cancel, done: done}, nil
+}
+
+func (e *kube) logRetryTime() time.Time {
+	if e.logRetryNow != nil {
+		return e.logRetryNow()
+	}
+	return time.Now()
+}
+
+func (e *kube) logRetryDuration() time.Duration {
+	if e.logRetryTimeout > 0 {
+		return e.logRetryTimeout
+	}
+	return maxRetryDuration
 }
 
 func (e *kube) waitBeforeLogReopen(ctx context.Context, delay time.Duration) error {

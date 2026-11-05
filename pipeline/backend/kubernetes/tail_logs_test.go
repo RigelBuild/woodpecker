@@ -214,6 +214,48 @@ func TestTailLogsDrainsFinalStreamAfterReopenFailure(t *testing.T) {
 	assert.Equal(t, int32(3), getCount.Load())
 }
 
+func TestTailLogsStopsFinalDrainAfterRetryDeadline(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("tail-final-drain-deadline")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	createTailTestPod(t, client, podName, kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}})
+
+	var openCount atomic.Int32
+	engine.openLogStream = func(_ context.Context, _, _ string, _ *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+		if openCount.Add(1) == 1 {
+			return io.NopCloser(strings.NewReader("2026-11-05T12:12:00.123Z initial line\n")), nil
+		}
+		return nil, errors.New("temporary final log stream failure")
+	}
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		return true, tailTestPod(podName, kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}}), nil
+	})
+	startTime := time.Unix(1_800_000_000, 0)
+	var currentTime atomic.Int64
+	currentTime.Store(startTime.UnixNano())
+	engine.logRetryTimeout = 500 * time.Millisecond
+	engine.logRetryNow = func() time.Time { return time.Unix(0, currentTime.Load()) }
+	engine.waitLogReopen = func(ctx context.Context, delay time.Duration) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		currentTime.Add(int64(delay))
+		return nil
+	}
+
+	reader, err := engine.tailLogs(t.Context(), step, podName)
+	require.NoError(t, err)
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	finishedAt := time.Unix(0, currentTime.Load())
+	require.NoError(t, reader.Close())
+	assert.Equal(t, "initial line\n", string(got))
+	assert.Greater(t, openCount.Load(), int32(1))
+	assert.LessOrEqual(t, finishedAt.Sub(startTime), 500*time.Millisecond)
+}
+
 func TestTailLogsFinishesWhenPodIsDeleted(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
