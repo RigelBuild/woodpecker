@@ -124,10 +124,8 @@ func (c *client) requiredStatusClient(ctx context.Context, user *model.User, rep
 	return gh, err
 }
 
-// reconcileTerminalStatus prevents a terminal pipeline error from being hidden
-// by a successful workflow rollup when the pipeline was killed, errored, or
-// declined. Keep a rolled-up failure, and keep a failure pipeline's rollup so a
-// failure confined to the meta gates does not red the code aggregate.
+// reconcileTerminalStatus preserves terminal pipeline errors masked by a green
+// workflow rollup, without letting meta-only failures turn the code gate red.
 func reconcileTerminalStatus(rolled, pipelineStatus model.StatusValue) model.StatusValue {
 	if model.IsTerminalStatus(rolled) {
 		isUnsuccessfulPipeline := pipelineStatus == model.StatusKilled ||
@@ -143,12 +141,8 @@ func reconcileTerminalStatus(rolled, pipelineStatus model.StatusValue) model.Sta
 	return pipelineStatus
 }
 
-// codeStatus rolls up the code (non-meta) workflows. With none it falls back to
-// the pipeline status: a config-errored pipeline persists no tree, and rolling up
-// an empty set would post a vacuous success.
-// A success pipeline may contain skipped workflows that did not need to run.
-// A failure pipeline keeps its filtered rollup so meta-only failures do not red
-// the code aggregate; killed, errored, or declined pipelines must not be green.
+// codeStatus rolls up non-meta workflows, falling back to pipeline status when
+// no code workflow exists; killed, errored, and declined pipelines cannot pass.
 func codeStatus(p *model.Pipeline, workflows []*model.Workflow) model.StatusValue {
 	code := make([]*model.Workflow, 0, len(workflows))
 	for _, workflow := range workflows {

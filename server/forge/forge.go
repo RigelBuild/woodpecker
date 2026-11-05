@@ -223,8 +223,12 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 	}
 
 	canceledWithoutSuccessor := false
+	var later func() (bool, error)
 	if b.Event == model.EventPull && b.Status == model.StatusCanceled {
-		newer, err := hasLaterPullPipelineOnCommit(s, r, b)
+		later = func() (bool, error) {
+			return hasLaterPullPipelineOnCommit(s, r, b)
+		}
+		newer, err := later()
 		if err != nil {
 			return err
 		}
@@ -253,7 +257,7 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 		}
 	}
 
-	ctx = context.WithValue(ctx, refresherKey{}, newRefresher(s, b, nil))
+	ctx = context.WithValue(ctx, refresherKey{}, newRefresher(s, b, later))
 	return reporter.StatusAggregate(ctx, u, r, b, workflows)
 }
 

@@ -32,7 +32,6 @@
 
 ### 🐛 Bug Fixes
 
-- Keep killed pipeline aggregates red when code workflows are skipped (RIG-7551)
 - Fix step logs lost when pipeline ends with skipped workflows [[#7240](https://github.com/woodpecker-ci/woodpecker/pull/7240)]
 - Release agents waiting on long polls during server shutdown [[#7189](https://github.com/woodpecker-ci/woodpecker/pull/7189)]
 - Add version endpoint to API as per spec [[#7232](https://github.com/woodpecker-ci/woodpecker/pull/7232)]
