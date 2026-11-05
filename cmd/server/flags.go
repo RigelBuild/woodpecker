@@ -140,6 +140,12 @@ var flags = append([]cli.Flag{
 		Usage:   "maximum time a runnable pending workflow waits for a matching live agent; 0 disables",
 		Value:   6 * time.Hour,
 	},
+	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_PENDING_UNMATCHED_TIMEOUT"),
+		Name:    "pending-unmatched-timeout",
+		Usage:   "maximum time a runnable pending workflow waits when no live agent's labels match it; 0 disables",
+		Value:   15 * time.Minute,
+	},
 	&cli.StringFlag{
 		Sources: cli.EnvVars("WOODPECKER_GRPC_ADDR"),
 		Name:    "grpc-addr",

@@ -170,7 +170,7 @@ func run(ctx context.Context, c *cli.Command) error {
 			ticker := time.NewTicker(server.Config.Server.OrphanReapInterval)
 			defer ticker.Stop()
 			for {
-				if err := pipeline.ReapOrphanedWorkflows(ctx, _store, time.Now(), server.Config.Server.OrphanReapGrace, server.Config.Server.PendingTimeout); err != nil {
+				if err := pipeline.ReapOrphanedWorkflows(ctx, _store, time.Now(), server.Config.Server.OrphanReapGrace, server.Config.Server.PendingTimeout, server.Config.Server.PendingUnmatchedTimeout); err != nil {
 					log.Error().Err(err).Msg("orphan workflow reaper failed")
 				}
 				select {
