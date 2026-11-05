@@ -184,14 +184,14 @@ func TestTailLogsDrainsFinalStreamAfterReopenFailure(t *testing.T) {
 	engine.openLogStream = func(_ context.Context, _, _ string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
 		switch openCount.Add(1) {
 		case 1:
-			return io.NopCloser(strings.NewReader("")), nil
-		case 2:
+			return io.NopCloser(strings.NewReader("2026-11-05T12:11:00.123Z first line\n")), nil
+		case 2, 3:
 			return nil, errors.New("temporary log stream failure")
 		default:
 			if opts.Follow {
 				return nil, errors.New("final log stream must not follow")
 			}
-			return io.NopCloser(strings.NewReader("2026-11-05T12:11:00.123Z final drain\n")), nil
+			return io.NopCloser(strings.NewReader("2026-11-05T12:11:01.123Z second line\n2026-11-05T12:11:02.123Z third line\n")), nil
 		}
 	}
 	var getCount atomic.Int32
@@ -209,9 +209,9 @@ func TestTailLogsDrainsFinalStreamAfterReopenFailure(t *testing.T) {
 	got, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
-	assert.Equal(t, "final drain\n", string(got))
-	assert.Equal(t, int32(3), openCount.Load())
-	assert.Equal(t, int32(2), getCount.Load())
+	assert.Equal(t, "first line\nsecond line\nthird line\n", string(got))
+	assert.Equal(t, int32(4), openCount.Load())
+	assert.Equal(t, int32(3), getCount.Load())
 }
 
 func TestTailLogsFinishesWhenPodIsDeleted(t *testing.T) {

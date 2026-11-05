@@ -785,8 +785,7 @@ func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName strin
 							nextOpts.Follow = false
 							continue
 						}
-						log.Debug().Err(err).Str("pod", podName).Msg("failed to open final pod log stream after container termination")
-						return
+						log.Debug().Err(err).Str("pod", podName).Msg("failed to open final pod log stream after container termination; retrying final log drain")
 					}
 				} else {
 					log.Warn().Err(getErr).Str("pod", podName).Msg("failed to check pod while reopening log stream")
