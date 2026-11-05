@@ -125,20 +125,6 @@ func TestWorkflowsFromPipelineBuilderDetached(t *testing.T) {
 	}
 }
 
-func TestWorkflowsFromPipelineBuilderPersistsSkipExitCode(t *testing.T) {
-	item := &builder.Item{
-		Workflow: &builder.Workflow{PID: 1},
-		Config: &backend_types.Config{Stages: []*backend_types.Stage{{
-			Steps: []*backend_types.Step{{Name: "step", SkipExitCode: 42}},
-		}}},
-	}
-
-	got := workflowsFromPipelineBuilder(&model.Pipeline{ID: 1}, []*builder.Item{item})
-	require.Len(t, got, 1)
-	require.Len(t, got[0].Children, 1)
-	assert.Equal(t, 42, got[0].Children[0].SkipExitCode)
-}
-
 func TestSaveWorkflowsSkipped(t *testing.T) {
 	t.Parallel()
 

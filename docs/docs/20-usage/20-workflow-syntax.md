@@ -200,7 +200,7 @@ If you would like to cancel the full pipeline once the step fails, you can set `
 
 ### `skip_exit_code`
 
-Set `skip_exit_code` to a non-zero integer to mark a step skipped when its process exits with that exact code. Other non-zero exit codes still fail the step. A skipped step does not fail its workflow or pipeline.
+Set `skip_exit_code` to a non-zero integer to mark a step skipped when its process exits with that exact code. Other non-zero exit codes still fail the step; during a rolling upgrade, older agents report a matching exit code as a failure. A skipped step does not fail its workflow or pipeline.
 
 ```yaml
 steps:
@@ -209,8 +209,6 @@ steps:
     commands: ./deploy-check.sh
     skip_exit_code: 42
 ```
-
-The setting applies to individual steps. It does not change workflow conditions or workflow-level skipped statuses.
 
 ### `when` - Conditional Execution
 

@@ -61,9 +61,6 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			step.Error = state.Error
 
 			switch {
-			case shouldSkipOnExitCode(step, state):
-				step.State = model.StatusSkipped
-				step.Error = ""
 			case state.ExitCode == 0 && state.Error == "":
 				step.State = model.StatusSuccess
 			default:
@@ -87,9 +84,6 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			switch {
 			case state.Skipped:
 				step.State = model.StatusSkipped
-			case shouldSkipOnExitCode(step, state):
-				step.State = model.StatusSkipped
-				step.Error = ""
 			case state.ExitCode == 0 && state.Error == "":
 				step.State = model.StatusSuccess
 			default:
@@ -113,12 +107,6 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 	}
 
 	return &step, cancelPipelineFromStep, nil
-}
-
-// shouldSkipOnExitCode identifies a configured non-zero exit from either agent version.
-func shouldSkipOnExitCode(step model.Step, state rpc.StepState) bool {
-	return state.Exited && state.ExitCode != 0 &&
-		step.SkipExitCode != 0 && state.ExitCode == step.SkipExitCode
 }
 
 // UpdateStepStatus updates step status based on agent reports via RPC.

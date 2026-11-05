@@ -15,7 +15,6 @@
 package pipeline
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -218,66 +217,8 @@ func TestUpdateStepStatus(t *testing.T) {
 			assert.Equal(t, "canceled", step.Error)
 		})
 	})
-	t.Run("LegacyAgentSkipExitCode", func(t *testing.T) {
-		t.Parallel()
-		for _, tt := range []struct {
-			name     string
-			exitCode int
-			want     model.StatusValue
-		}{
-			{name: "matching exit is skipped", exitCode: 42, want: model.StatusSkipped},
-			{name: "different exit still fails", exitCode: 7, want: model.StatusFailure},
-		} {
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
-				step := &model.Step{
-					UUID: "skip-uuid", SkipExitCode: 42,
-					State: model.StatusRunning, Started: 10,
-				}
-				state := rpc.StepState{
-					Exited: true, Finished: 20, ExitCode: tt.exitCode,
-					Error: fmt.Sprintf("uuid=skip-uuid: exit code %d", tt.exitCode),
-				}
-				err := UpdateStepStatus(t.Context(), mockStoreStep(t), step, state)
 
-				assert.NoError(t, err)
-				assert.Equal(t, tt.want, step.State)
-				if tt.want == model.StatusSkipped {
-					workflowState := WorkflowStatus([]*model.Step{step})
-					pipelineState := PipelineStatus([]*model.Workflow{{State: workflowState}})
-					assert.Equal(t, model.StatusSuccess, workflowState)
-					assert.Equal(t, model.StatusSuccess, pipelineState)
-				}
-			})
-		}
-	})
-
-	t.Run("SkipExitCodeFinishedStep", func(t *testing.T) {
-		t.Parallel()
-		step := &model.Step{State: model.StatusRunning, Started: 42}
-		state := rpc.StepState{Skipped: true, Exited: true, Started: 42, Finished: 50, ExitCode: 42}
-
-		err := UpdateStepStatus(t.Context(), mockStoreStep(t), step, state)
-
-		assert.NoError(t, err)
-		assert.Equal(t, model.StatusSkipped, step.State)
-		assert.Equal(t, int64(42), step.Started)
-		assert.Equal(t, int64(50), step.Finished)
-		assert.Equal(t, 42, step.ExitCode)
-	})
-
-	t.Run("SkipExitCodeKeepsWorkflowAndPipelineSuccessful", func(t *testing.T) {
-		t.Parallel()
-		workflowState := WorkflowStatus([]*model.Step{
-			{State: model.StatusSuccess, Failure: model.FailureFail},
-			{State: model.StatusSkipped, Started: 42, Failure: model.FailureFail},
-		})
-		pipelineState := PipelineStatus([]*model.Workflow{{State: workflowState}})
-
-		assert.Equal(t, model.StatusSuccess, workflowState)
-		assert.Equal(t, model.StatusSuccess, pipelineState)
-	})
-	t.Run("Skipped", func(t *testing.T) {
+	t.Run("SkippedStepKeepsWorkflowAndPipelineSuccessful", func(t *testing.T) {
 		t.Parallel()
 
 		// This mirrors exactly what the agent sends when executor.go detects

@@ -395,11 +395,14 @@ func TestCompleteStep(t *testing.T) {
 			Return(&backend_types.State{Exited: true, OOMKilled: true, ExitCode: 137}, nil)
 		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("s1")
+		step.SkipExitCode = 137
 
-		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+		ws, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
 
 		var oomErr *pipeline_errors.OomError
-		assert.True(t, errors.As(err, &oomErr))
+		assert.ErrorAs(t, err, &oomErr)
+		assert.False(t, ws.Skipped)
 		assert.True(t, ws.OOMKilled)
 	})
 
