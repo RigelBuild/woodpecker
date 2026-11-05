@@ -307,6 +307,67 @@ func TestStatusAggregateAllMetaGatesFallsBackToPipelineStatus(t *testing.T) {
 		"with no code workflow, CI (pr) falls back to the stored pipeline status, not the meta gate's verdict")
 }
 
+// TestStatusAggregateTerminalStatusIsNotMaskedBySkippedCodeWorkflows ensures
+// unstarted code workflows cannot make a terminal unsuccessful pipeline green.
+func TestStatusAggregateTerminalStatusIsNotMaskedBySkippedCodeWorkflows(t *testing.T) {
+	tests := []struct {
+		name           string
+		pipelineStatus model.StatusValue
+		workflows      []*model.Workflow
+		want           string
+	}{
+		{
+			name:           "killed pipeline with skipped code workflows",
+			pipelineStatus: model.StatusKilled,
+			workflows: []*model.Workflow{
+				{Name: "build", State: model.StatusSuccess},
+				{Name: "test", State: model.StatusSkipped},
+				{Name: "lint", State: model.StatusSkipped},
+			},
+			want: statusFailure,
+		},
+		{
+			name:           "canceled pipeline with skipped code workflows",
+			pipelineStatus: model.StatusCanceled,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSkipped}},
+			want:           statusSuccess,
+		},
+		{
+			name:           "successful pipeline with skipped code workflows",
+			pipelineStatus: model.StatusSuccess,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSkipped}},
+			want:           statusSuccess,
+		},
+		{
+			name:           "killed pipeline with all code workflows successful",
+			pipelineStatus: model.StatusKilled,
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSuccess}},
+			want:           statusFailure,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var posted github.RepoStatus
+			c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+					t.Errorf("decode posted status: %v", err)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				if _, err := w.Write([]byte(`{}`)); err != nil {
+					t.Errorf("write response: %v", err)
+				}
+			})
+			pipeline.Status = tt.pipelineStatus
+
+			err := c.StatusAggregate(ctx, user, repo, pipeline, tt.workflows)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, posted.GetState())
+		})
+	}
+}
+
 // TestStatusAggregateCancelWhileRunningPostsTerminal is the terminal-never-pending
 // regression for the cancel path: a cancel sets a terminal pipeline status
 // (StatusKilled) but leaves the still-running workflows untouched (they finish on
@@ -354,6 +415,32 @@ func TestStatusMetaCancelWhileRunningPostsTerminal(t *testing.T) {
 	assert.Equal(t, statusFailure, posted.GetState(),
 		"a canceled pipeline with a still-running meta gate must post a terminal CI (meta), never pending")
 }
+
+// TestStatusMetaKilledPipelineWithSkippedGateDoesNotPostSuccess ensures the
+// meta aggregate applies the same terminal-pipeline protection as the code gate.
+func TestStatusMetaKilledPipelineWithSkippedGateDoesNotPostSuccess(t *testing.T) {
+	var posted github.RepoStatus
+	c, ctx, repo, user := statusMetaFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Errorf("decode posted status: %v", err)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		if _, err := w.Write([]byte(`{}`)); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	})
+	pipeline := &model.Pipeline{Commit: "abc123", Event: model.EventPull, Status: model.StatusKilled}
+	workflows := []*model.Workflow{
+		{Name: "spec-impact", State: model.StatusSuccess, OnMetadataEdit: true},
+		{Name: "required-checks", State: model.StatusSkipped, OnMetadataEdit: true},
+	}
+
+	err := c.StatusMeta(ctx, user, repo, pipeline, workflows)
+	require.NoError(t, err)
+	assert.Equal(t, statusFailure, posted.GetState())
+}
+
 
 // statusMetaFixture wires the meta-aggregate harness, mirroring
 // statusAggregateFixture: it sets the meta config (StatusContext "CI",
