@@ -15,6 +15,8 @@
 package kubernetes
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -61,9 +63,23 @@ type kube struct {
 	client              kubernetes.Interface
 	config              *config
 	goos                string
+	openLogStream       func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
 	nodes               sync.Map
 	workflowResourcesMu sync.RWMutex
 	workflowResources   map[string]Resources
+}
+
+func (e *kube) openPodLogStream(ctx context.Context, namespace, podName string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+	if e.openLogStream != nil {
+		return e.openLogStream(ctx, namespace, podName, opts)
+	}
+	return e.client.CoreV1().RESTClient().Get().
+		Namespace(namespace).
+		Name(podName).
+		Resource("pods").
+		SubResource("log").
+		VersionedParams(opts, scheme.ParameterCodec).
+		Stream(ctx)
 }
 
 func (e *kube) recordNode(pod *kube_core_v1.Pod) {
@@ -641,17 +657,103 @@ func (e *kube) TailStep(ctx context.Context, step *types.Step, taskUUID string) 
 }
 
 func (e *kube) tailLogs(ctx context.Context, step *types.Step, podName string) (io.ReadCloser, error) {
-	opts := &kube_core_v1.PodLogOptions{Follow: true, Container: podName}
-	logs, err := backoff.Retry(
+	return e.tailLogsFrom(ctx, step, podName, &kube_core_v1.PodLogOptions{
+		Follow:     true,
+		Timestamps: true,
+		Container:  podName,
+	})
+}
+
+const maxLogReopens = 20
+
+func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+	logs, err := e.openLogStreamWithRetry(ctx, step, podName, opts)
+	if err != nil {
+		return nil, err
+	}
+	reader, writer := io.Pipe()
+	go func() {
+		stopCancellationClose := context.AfterFunc(ctx, func() {
+			writer.CloseWithError(ctx.Err())
+		})
+		defer stopCancellationClose()
+		defer writer.Close()
+		var last time.Time
+		skipping := false
+		reopens := 0
+		for {
+			streamErr := e.copyTimestampedLogs(ctx, writer, logs, &last, &skipping)
+			var pipeWriteErr *podLogPipeWriteError
+			if errors.As(streamErr, &pipeWriteErr) {
+				logs.Close()
+				return
+			}
+			if closeErr := logs.Close(); streamErr == nil {
+				streamErr = closeErr
+			}
+			if ctx.Err() != nil {
+				return
+			}
+
+			pod, getErr := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(ctx, podName, kube_meta_v1.GetOptions{})
+			if kube_errors.IsNotFound(getErr) {
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended; pod no longer exists")
+				return
+			}
+			if getErr != nil {
+				log.Debug().Err(getErr).Str("pod", podName).Msg("failed to check pod after log stream ended")
+				return
+			}
+			container, found := stepContainerStatus(pod, podName)
+			if !found {
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended; step container status is unavailable")
+				return
+			}
+			terminated := container.State.Terminated != nil
+			if terminated {
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended after container termination; draining final logs")
+			} else if container.State.Running != nil || container.State.Waiting != nil {
+				log.Warn().Err(streamErr).Str("pod", podName).Msg("pod log stream ended while step container is active; reopening")
+			} else {
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended; step container state is unavailable")
+				return
+			}
+			if reopens >= maxLogReopens {
+				log.Warn().Str("pod", podName).Int("reopens", reopens).Msg("pod log stream reopen limit reached")
+				return
+			}
+			reopens++
+			nextOpts := &kube_core_v1.PodLogOptions{Container: podName, Timestamps: true, Follow: !terminated}
+			if !last.IsZero() {
+				since := kube_meta_v1.NewTime(last)
+				nextOpts.SinceTime = &since
+			}
+			logs, err = e.openLogStreamWithRetry(ctx, step, podName, nextOpts)
+			if err != nil {
+				log.Warn().Err(err).Str("pod", podName).Msg("failed to reopen pod log stream")
+				return
+			}
+			skipping = true
+			if terminated {
+				streamErr = e.copyTimestampedLogs(ctx, writer, logs, &last, &skipping)
+				if closeErr := logs.Close(); streamErr == nil {
+					streamErr = closeErr
+				}
+				if !errors.Is(streamErr, io.ErrClosedPipe) && ctx.Err() == nil {
+					log.Debug().Err(streamErr).Str("pod", podName).Msg("final pod log stream ended")
+				}
+				return
+			}
+		}
+	}()
+	return reader, nil
+}
+
+func (e *kube) openLogStreamWithRetry(ctx context.Context, step *types.Step, podName string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+	return backoff.Retry(
 		ctx,
 		func() (io.ReadCloser, error) {
-			return e.client.CoreV1().RESTClient().Get().
-				Namespace(e.config.GetNamespace(step.OrgID)).
-				Name(podName).
-				Resource("pods").
-				SubResource("log").
-				VersionedParams(opts, scheme.ParameterCodec).
-				Stream(ctx)
+			return e.openPodLogStream(ctx, e.config.GetNamespace(step.OrgID), podName, opts)
 		},
 		backoff.WithBackOff(backoff.NewExponentialBackOff()),
 		backoff.WithMaxElapsedTime(maxRetryDuration),
@@ -659,18 +761,77 @@ func (e *kube) tailLogs(ctx context.Context, step *types.Step, podName string) (
 			log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("failed to open pod log stream, retrying with backoff")
 		}),
 	)
-	if err != nil {
-		return nil, err
-	}
-	rc, wc := io.Pipe()
-	go func() {
-		defer logs.Close()
-		defer wc.Close()
-		if _, err := io.Copy(wc, logs); err != nil {
-			log.Debug().Err(err).Str("pod", podName).Msg("pod log stream ended")
+}
+
+func stepContainerStatus(pod *kube_core_v1.Pod, podName string) (kube_core_v1.ContainerStatus, bool) {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == podName {
+			return status, true
 		}
-	}()
-	return rc, nil
+	}
+	return kube_core_v1.ContainerStatus{}, false
+}
+
+func (e *kube) copyTimestampedLogs(ctx context.Context, writer *io.PipeWriter, logs io.Reader, last *time.Time, skipping *bool) error {
+	reader := bufio.NewReader(logs)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			timestamp, output, parseErr := parsePodLogLine(line)
+			if parseErr != nil {
+				output = line
+			} else if *skipping && !last.IsZero() && !timestamp.After(*last) {
+				if err != nil {
+					return err
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				continue
+			} else if *skipping {
+				*skipping = false
+			}
+			if _, writeErr := writer.Write(output); writeErr != nil {
+				return &podLogPipeWriteError{err: writeErr}
+			}
+			if parseErr == nil {
+				*last = timestamp
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return io.EOF
+			}
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+}
+
+type podLogPipeWriteError struct {
+	err error
+}
+
+func (e *podLogPipeWriteError) Error() string {
+	return fmt.Sprintf("writing pod log output: %v", e.err)
+}
+
+func (e *podLogPipeWriteError) Unwrap() error {
+	return e.err
+}
+
+func parsePodLogLine(line []byte) (time.Time, []byte, error) {
+	separator := bytes.IndexByte(line, ' ')
+	if separator < 0 {
+		return time.Time{}, nil, fmt.Errorf("invalid timestamped pod log line %q", line)
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, string(line[:separator]))
+	if err != nil {
+		return time.Time{}, nil, fmt.Errorf("parsing pod log timestamp: %w", err)
+	}
+	return timestamp, line[separator+1:], nil
 }
 
 func (e *kube) DestroyStep(ctx context.Context, step *types.Step, taskUUID string) error {
