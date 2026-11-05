@@ -22,7 +22,7 @@ type State struct {
 	ExitCode int `json:"exit_code"`
 	// Container exited, true or false
 	Exited bool `json:"exited"`
-	// Step was skipped by the runtime (OnSuccess/OnFailure filter)
+	// Step was skipped by the runtime (condition filter or skip_exit_code).
 	Skipped bool `json:"skipped"`
 	// Container is oom killed, true or false
 	// TODO (6024): well known errors as string enum into ./errors.go

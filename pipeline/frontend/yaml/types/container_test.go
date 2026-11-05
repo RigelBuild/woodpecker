@@ -26,6 +26,7 @@ import (
 
 var containerYaml = []byte(`
 image: golang:latest
+skip_exit_code: 42
 commands:
   - go build
   - go test
@@ -70,22 +71,24 @@ ports:
 `)
 
 func TestUnmarshalContainer(t *testing.T) {
+	skipExitCode := 42
 	want := Container{
-		Commands:    base.StringOrSlice{"go build", "go test"},
-		Detached:    true,
-		Devices:     []string{"/dev/ttyUSB0:/dev/ttyUSB0"},
-		Directory:   "example/",
-		DNS:         base.StringOrSlice{"8.8.8.8"},
-		DNSSearch:   base.StringOrSlice{"example.com"},
-		Entrypoint:  []string{"/bin/sh", "-c"},
-		Environment: map[string]any{"RACK_ENV": "development", "SHOW": true},
-		ExtraHosts:  []string{"somehost:162.242.195.82", "otherhost:50.31.209.229", "ipv6:2001:db8::10"},
-		Image:       "golang:latest",
-		Name:        "my-build-container",
-		NetworkMode: "bridge",
-		Pull:        true,
-		Privileged:  true,
-		Tmpfs:       base.StringOrSlice{"/var/lib/test"},
+		SkipExitCode: &skipExitCode,
+		Commands:     base.StringOrSlice{"go build", "go test"},
+		Detached:     true,
+		Devices:      []string{"/dev/ttyUSB0:/dev/ttyUSB0"},
+		Directory:    "example/",
+		DNS:          base.StringOrSlice{"8.8.8.8"},
+		DNSSearch:    base.StringOrSlice{"example.com"},
+		Entrypoint:   []string{"/bin/sh", "-c"},
+		Environment:  map[string]any{"RACK_ENV": "development", "SHOW": true},
+		ExtraHosts:   []string{"somehost:162.242.195.82", "otherhost:50.31.209.229", "ipv6:2001:db8::10"},
+		Image:        "golang:latest",
+		Name:         "my-build-container",
+		NetworkMode:  "bridge",
+		Pull:         true,
+		Privileged:   true,
+		Tmpfs:        base.StringOrSlice{"/var/lib/test"},
 		Volumes: Volumes{
 			Volumes: []*Volume{
 				{Source: "", Destination: "/var/lib/mysql"},

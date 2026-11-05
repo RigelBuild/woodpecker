@@ -301,6 +301,40 @@ func TestCompleteStep(t *testing.T) {
 		assert.True(t, ws.Exited)
 		assert.Equal(t, 0, ws.ExitCode)
 	})
+	t.Run("SkipExitCodeDoesNotSkipSuccess", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("success")
+		skipExitCode := 42
+		step.SkipExitCode = skipExitCode
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		require.NotNil(t, state)
+		assert.False(t, state.Skipped)
+		assert.Zero(t, state.ExitCode)
+	})
+
+	t.Run("SkipExitCodeWithWaitErrorFails", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		waitErr := errors.New("wait failed")
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 42}, waitErr)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("failure")
+		step.SkipExitCode = 42
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		assert.ErrorIs(t, err, waitErr)
+		assert.Nil(t, state)
+	})
 
 	t.Run("NonZeroExitCode", func(t *testing.T) {
 		t.Parallel()
@@ -317,6 +351,42 @@ func TestCompleteStep(t *testing.T) {
 		assert.Equal(t, 1, exitErr.Code)
 		assert.Equal(t, 1, ws.ExitCode)
 	})
+	t.Run("SkipExitCode", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 42}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("skip")
+		step.SkipExitCode = 42
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		require.NotNil(t, state)
+		assert.True(t, state.Skipped)
+		assert.Equal(t, 42, state.ExitCode)
+	})
+
+	t.Run("SkipExitCodeDoesNotMatch", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 7}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("fail")
+		step.SkipExitCode = 42
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		var exitErr *pipeline_errors.ExitError
+		assert.ErrorAs(t, err, &exitErr)
+		require.NotNil(t, state)
+		assert.False(t, state.Skipped)
+		assert.Equal(t, 7, exitErr.Code)
+	})
 
 	t.Run("OOMKilled", func(t *testing.T) {
 		t.Parallel()
@@ -325,11 +395,14 @@ func TestCompleteStep(t *testing.T) {
 			Return(&backend_types.State{Exited: true, OOMKilled: true, ExitCode: 137}, nil)
 		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("s1")
+		step.SkipExitCode = 137
 
-		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+		ws, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
 
 		var oomErr *pipeline_errors.OomError
-		assert.True(t, errors.As(err, &oomErr))
+		assert.ErrorAs(t, err, &oomErr)
+		assert.False(t, ws.Skipped)
 		assert.True(t, ws.OOMKilled)
 	})
 

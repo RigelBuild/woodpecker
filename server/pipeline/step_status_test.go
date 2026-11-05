@@ -218,7 +218,7 @@ func TestUpdateStepStatus(t *testing.T) {
 		})
 	})
 
-	t.Run("Skipped", func(t *testing.T) {
+	t.Run("SkippedStepKeepsWorkflowAndPipelineSuccessful", func(t *testing.T) {
 		t.Parallel()
 
 		// This mirrors exactly what the agent sends when executor.go detects

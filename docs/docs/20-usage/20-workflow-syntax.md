@@ -198,6 +198,18 @@ Some of the steps may be allowed to fail without causing the whole workflow and 
 
 If you would like to cancel the full pipeline once the step fails, you can set `failure: cancel`. For the default behaviour, use `failure: fail`.
 
+### `skip_exit_code`
+
+Set `skip_exit_code` to a non-zero integer to mark a step skipped when its process exits with that exact code. Other non-zero exit codes still fail the step; during a rolling upgrade, older agents report a matching exit code as a failure. A skipped step does not fail its workflow or pipeline.
+
+```yaml
+steps:
+  - name: deploy
+    image: alpine
+    commands: ./deploy-check.sh
+    skip_exit_code: 42
+```
+
 ### `when` - Conditional Execution
 
 Woodpecker supports defining a list of conditions for a step by using a `when` block. If at least one of the conditions in the `when` block evaluate to true the step is executed, otherwise it is skipped. A condition is evaluated to true if _all_ sub-conditions are true.

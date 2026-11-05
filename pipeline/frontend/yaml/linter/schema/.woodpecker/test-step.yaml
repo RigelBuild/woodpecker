@@ -48,3 +48,4 @@ steps:
       - docker build --rm -t octocat/hello-world .
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    skip_exit_code: 42

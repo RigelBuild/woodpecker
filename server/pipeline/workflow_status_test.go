@@ -173,6 +173,13 @@ func TestWorkflowStatus(t *testing.T) {
 			},
 			e: model.StatusRunning,
 		},
+		{
+			s: []*model.Step{
+				{State: model.StatusSuccess, Failure: model.FailureFail},
+				{State: model.StatusSkipped, Started: 42, Failure: model.FailureFail},
+			},
+			e: model.StatusSuccess,
+		},
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.e, WorkflowStatus(tt.s))

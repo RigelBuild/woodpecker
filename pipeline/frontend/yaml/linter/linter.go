@@ -233,6 +233,14 @@ func (l *Linter) lintContainers(config *WorkflowConfig, area string) error {
 		if err := l.lintDependsOn(config, container, area); err != nil {
 			linterErr = multierr.Append(linterErr, err)
 		}
+		if area == "steps" && container.SkipExitCode != nil && *container.SkipExitCode == 0 {
+			linterErr = multierr.Append(linterErr, newLinterError(
+				"`skip_exit_code` must be non-zero",
+				config.File,
+				fmt.Sprintf("%s.%s.skip_exit_code", area, container.Name),
+				false,
+			))
+		}
 	}
 
 	return linterErr
