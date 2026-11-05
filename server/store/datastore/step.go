@@ -54,14 +54,24 @@ func (s storage) stepListWorkflow(sess *xorm.Session, workflow *model.Workflow) 
 		Find(&stepList)
 }
 
+// stepListPipeline lists every step of a pipeline in the order stepListWorkflow uses.
+func (s storage) stepListPipeline(sess *xorm.Session, pipelineID int64) ([]*model.Step, error) {
+	stepList := make([]*model.Step, 0)
+	return stepList, sess.
+		Where("pipeline_id = ?", pipelineID).
+		OrderBy("pid").
+		Find(&stepList)
+}
+
 func (s storage) stepCreate(sess *xorm.Session, steps []*model.Step) error {
-	for i := range steps {
-		// only Insert on single object ref set auto created ID back to object
-		if err := wrapInsert(sess.Insert(steps[i])); err != nil {
-			return err
-		}
+	size, err := s.batchSize(new(model.Step))
+	if err != nil {
+		return err
 	}
-	return nil
+	return insertWithIDs(sess, "steps", steps, size,
+		func(step *model.Step) *int64 { return &step.ID },
+		func(step *model.Step) (int64, int) { return step.PipelineID, step.PID },
+	)
 }
 
 func (s storage) StepUpdate(step *model.Step) error {

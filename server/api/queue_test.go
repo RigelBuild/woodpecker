@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -37,6 +38,7 @@ import (
 	queue_mocks "go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore"
 )
 
 // installScheduler wires a scheduler backed by a mock queue into the global
@@ -256,6 +258,27 @@ func TestGetQueueInfoBatchesPipelineLookups(t *testing.T) {
 	assert.Equal(t, 1, s.getPipelinesByIDsCalls)
 	assert.ElementsMatch(t, []int64{first.ID, second.ID}, s.pipelineIDs)
 	assert.Zero(t, s.getPipelineCalls)
+}
+
+func TestQueryBudgetGetQueueInfo(t *testing.T) {
+	s := newTestStore(t)
+	repo, _ := cronFixture(t, s)
+	counter := datastore.CountQueries(t, s)
+	datastore.AssertQueryBudget(t, func(n int) int64 {
+		info := queue.InfoT{}
+		for i := range n {
+			pipe := seedPipeline(t, s, repo.ID)
+			info.Pending = append(info.Pending, &model.Task{ID: fmt.Sprintf("%d-%d", pipe.ID, i), PipelineID: pipe.ID})
+		}
+		q := installScheduler(t, s)
+		q.On("Info", mock.Anything).Return(info)
+
+		tc := newTestContext(t, s)
+		return counter.Count(func() {
+			GetQueueInfo(tc.Ctx)
+			require.Equal(t, http.StatusOK, tc.Recorder.Code)
+		})
+	})
 }
 
 func TestPauseResumeQueue(t *testing.T) {

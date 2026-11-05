@@ -15,6 +15,8 @@
 package datastore
 
 import (
+	"fmt"
+
 	"xorm.io/xorm"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -27,10 +29,19 @@ func (s storage) WorkflowGetTree(pipeline *model.Pipeline) ([]*model.Workflow, e
 		return nil, err
 	}
 
+	// one query for the whole pipeline; ordered by pid, as stepListWorkflow is
+	steps, err := s.stepListPipeline(sess, pipeline.ID)
+	if err != nil {
+		return nil, err
+	}
+	children := make(map[int][]*model.Step, len(wfList))
+	for _, step := range steps {
+		children[step.PPID] = append(children[step.PPID], step)
+	}
 	for _, wf := range wfList {
-		wf.Children, err = s.stepListWorkflow(sess, wf)
-		if err != nil {
-			return nil, err
+		wf.Children = children[wf.PID]
+		if wf.Children == nil {
+			wf.Children = make([]*model.Step, 0)
 		}
 	}
 
@@ -51,15 +62,64 @@ func (s storage) WorkflowsCreate(workflows []*model.Workflow) error {
 	return sess.Commit()
 }
 
+// workflowsCreate inserts all workflows, then all their steps, in multi-row
+// statements and back-fills the IDs the per-row inserts used to set.
 func (s storage) workflowsCreate(sess *xorm.Session, workflows []*model.Workflow) error {
-	for i := range workflows {
-		// only Insert on single object ref set auto created ID back to object
-		if err := s.stepCreate(sess, workflows[i].Children); err != nil {
-			return err
+	size, err := s.batchSize(new(model.Workflow))
+	if err != nil {
+		return err
+	}
+	if err := insertWithIDs(sess, "workflows", workflows, size,
+		func(w *model.Workflow) *int64 { return &w.ID },
+		func(w *model.Workflow) (int64, int) { return w.PipelineID, w.PID },
+	); err != nil {
+		return err
+	}
+
+	var steps []*model.Step
+	for _, wf := range workflows {
+		steps = append(steps, wf.Children...)
+	}
+	return s.stepCreate(sess, steps)
+}
+
+// insertWithIDs inserts rows in chunks and back-fills each auto-increment ID
+// with one (pipeline_id, pid) lookup per pipeline, since slice inserts leave it 0.
+func insertWithIDs[T any](sess *xorm.Session, table string, rows []*T, size int, id func(*T) *int64, key func(*T) (int64, int)) error {
+	var batch []*T
+	for _, row := range rows {
+		if *id(row) != 0 {
+			// a preset ID would change the column list of a multi-row insert
+			if err := wrapInsert(sess.Insert(row)); err != nil {
+				return err
+			}
+			continue
 		}
-		if err := wrapInsert(sess.Insert(workflows[i])); err != nil {
-			return err
+		batch = append(batch, row)
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := insertBatched(sess, batch, size); err != nil {
+		return err
+	}
+
+	idsByPipeline := make(map[int64]map[int]int64)
+	for _, row := range batch {
+		pipelineID, pid := key(row)
+		ids, ok := idsByPipeline[pipelineID]
+		if !ok {
+			var err error
+			if ids, err = idsByPID(sess, table, pipelineID); err != nil {
+				return err
+			}
+			idsByPipeline[pipelineID] = ids
 		}
+		rowID, ok := ids[pid]
+		if !ok {
+			return fmt.Errorf("%s: inserted row pipeline %d pid %d not found", table, pipelineID, pid)
+		}
+		*id(row) = rowID
 	}
 	return nil
 }

@@ -49,21 +49,21 @@ func TestCreatePersistenceFailuresMarkPipelineError(t *testing.T) {
 		{
 			name: "persist pipeline config",
 			setupFailure: func(store *store_mocks.MockStore) {
-				store.On("ConfigPersist", mock.Anything).Return(nil, failure).Once()
+				store.On("ConfigsPersist", int64(1), mock.Anything).Return(nil, failure).Once()
 			},
 		},
 		{
 			name: "link pipeline config",
 			setupFailure: func(store *store_mocks.MockStore) {
-				store.On("ConfigPersist", mock.Anything).Return(&model.Config{ID: 1}, nil).Once()
-				store.On("PipelineConfigCreate", mock.Anything).Return(failure).Once()
+				store.On("ConfigsPersist", int64(1), mock.Anything).Return([]*model.Config{{ID: 1}}, nil).Once()
+				store.On("PipelineConfigsCreate", mock.Anything).Return(failure).Once()
 			},
 		},
 		{
 			name: "create pipeline items",
 			setupFailure: func(store *store_mocks.MockStore) {
-				store.On("ConfigPersist", mock.Anything).Return(&model.Config{ID: 1}, nil).Once()
-				store.On("PipelineConfigCreate", mock.Anything).Return(nil).Once()
+				store.On("ConfigsPersist", int64(1), mock.Anything).Return([]*model.Config{{ID: 1}}, nil).Once()
+				store.On("PipelineConfigsCreate", mock.Anything).Return(nil).Once()
 				store.On("GetPipelineLastBefore", mock.Anything, mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 				store.On("WorkflowsCreate", mock.Anything).Return(failure).Once()
 			},

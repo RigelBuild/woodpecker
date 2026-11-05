@@ -17,9 +17,13 @@
 package datastore
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"xorm.io/xorm/contexts"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -61,4 +65,55 @@ func DispatchReportsForTest(t *testing.T, s store.Store) []*model.PipelineDispat
 	reports := make([]*model.PipelineDispatchReport, 0)
 	require.NoError(t, st.engine.Asc("id").Find(&reports))
 	return reports
+}
+
+// QueryCounter counts every statement a test store sends to its database,
+// including BEGIN and COMMIT: each one is a round trip.
+type QueryCounter struct {
+	n atomic.Int64
+}
+
+func (c *QueryCounter) BeforeProcess(h *contexts.ContextHook) (context.Context, error) {
+	c.n.Add(1)
+	return h.Ctx, nil
+}
+
+func (c *QueryCounter) AfterProcess(*contexts.ContextHook) error {
+	return nil
+}
+
+// Count returns the number of statements fn sends.
+func (c *QueryCounter) Count(fn func()) int64 {
+	before := c.n.Load()
+	fn()
+	return c.n.Load() - before
+}
+
+// CountQueries hooks a counter into a store created by NewTestStore.
+func CountQueries(t *testing.T, s store.Store) *QueryCounter {
+	t.Helper()
+
+	st, ok := s.(*storage)
+	require.True(t, ok, "store must come from NewTestStore")
+	c := new(QueryCounter)
+	st.engine.AddHook(c)
+	return c
+}
+
+// Query budget sizes: a hot path may send at most queryBudgetSlack more
+// statements for queryBudgetLarge items than for queryBudgetSmall.
+const (
+	queryBudgetSmall = 10
+	queryBudgetLarge = 100
+	queryBudgetSlack = 2
+)
+
+// AssertQueryBudget runs measure for a small and a large n and fails if the
+// larger run sends more than queryBudgetSlack statements beyond the smaller.
+func AssertQueryBudget(t *testing.T, measure func(n int) int64) {
+	t.Helper()
+
+	small, large := measure(queryBudgetSmall), measure(queryBudgetLarge)
+	t.Logf("queries: n=%d %d, n=%d %d", queryBudgetSmall, small, queryBudgetLarge, large)
+	assert.LessOrEqual(t, large-small, int64(queryBudgetSlack), "query count must not grow with n")
 }

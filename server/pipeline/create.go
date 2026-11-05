@@ -92,15 +92,11 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 	}
 
 	// persist the pipeline config for historical correctness, restarts, etc
-	var configs []*model.Config
-	for _, forgeYamlConfig := range forgeYamlConfigs {
-		config, err := findOrPersistPipelineConfig(_store, pipeline, forgeYamlConfig)
-		if err != nil {
-			msg := fmt.Sprintf("failed to find or persist pipeline config for %s", repo.FullName)
-			log.Error().Err(err).Msg(msg)
-			return nil, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, fmt.Errorf("%s: %w", msg, err))
-		}
-		configs = append(configs, config)
+	configs, err := findOrPersistPipelineConfigs(_store, pipeline, forgeYamlConfigs)
+	if err != nil {
+		msg := fmt.Sprintf("failed to find or persist pipeline config for %s", repo.FullName)
+		log.Error().Err(err).Msg(msg)
+		return nil, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, fmt.Errorf("%s: %w", msg, err))
 	}
 	// link pipeline to persisted configs
 	if err := linkPipelineConfigs(_store, configs, pipeline.ID); err != nil {

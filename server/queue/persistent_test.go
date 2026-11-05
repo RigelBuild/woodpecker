@@ -135,7 +135,7 @@ func TestPersistentQueueRequeuePersistsBeforePoll(t *testing.T) {
 	defer cancel(nil)
 	store := store_mocks.NewMockStore(t)
 	task := genDummyTask()
-	store.EXPECT().TaskInsert(task).Return(nil).Once()
+	store.EXPECT().TaskInsertBatch([]*model.Task{task}).Return(nil).Once()
 	store.EXPECT().TaskDelete("1").Return(nil).Once()
 	store.EXPECT().WorkflowLoad(int64(1)).Return(&model.Workflow{ID: 1, State: model.StatusPending}, nil).Once()
 	store.EXPECT().TaskInsert(task).Run(func(*model.Task) {

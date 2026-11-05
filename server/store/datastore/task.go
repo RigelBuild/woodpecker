@@ -28,6 +28,27 @@ func (s storage) TaskInsert(task *model.Task) error {
 	return wrapInsert(s.engine.Insert(task))
 }
 
+// TaskInsertBatch inserts tasks in multi-row statements. The string primary
+// key is set by the caller, so no ID back-fill is needed.
+func (s storage) TaskInsertBatch(tasks []*model.Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	size, err := s.batchSize(new(model.Task))
+	if err != nil {
+		return err
+	}
+	sess := s.engine.NewSession()
+	defer sess.Close()
+	if err := sess.Begin(); err != nil {
+		return err
+	}
+	if err := insertBatched(sess, tasks, size); err != nil {
+		return err
+	}
+	return sess.Commit()
+}
+
 func (s storage) TaskDelete(id string) error {
 	return wrapDelete(s.engine.Where("id = ?", id).Delete(new(model.Task)))
 }

@@ -328,9 +328,9 @@ func TestCreatePipeline(t *testing.T) {
 		mockStore.On("GetUser", int64(1)).Return(fakeUser, nil)
 		mockStore.On("CreatePipeline", mock.Anything).Return(nil)
 		mockStore.On("GetPipelineLastBefore", fakeRepo, "main", mock.Anything).Return(nil, types.ErrRecordNotExist).Maybe()
-		mockStore.On("ConfigPersist", mock.Anything).Return(&model.Config{ID: 1}, nil).Maybe()
+		mockStore.On("ConfigsPersist", mock.Anything, mock.Anything).Return([]*model.Config{{ID: 1}}, nil).Maybe()
 		mockStore.On("ConfigFindIdentical", mock.Anything, mock.Anything).Return(nil, nil).Maybe()
-		mockStore.On("PipelineConfigCreate", mock.Anything).Return(nil).Maybe()
+		mockStore.On("PipelineConfigsCreate", mock.Anything).Return(nil).Maybe()
 		mockStore.On("WorkflowsCreate", mock.Anything).Return(nil)
 		mockStore.On("UpdatePipeline", mock.Anything).Return(nil).Maybe()
 
@@ -400,9 +400,9 @@ func TestCreatePipeline(t *testing.T) {
 		mockStore.On("GetUser", int64(1)).Return(fakeUser, nil)
 		mockStore.On("CreatePipeline", mock.Anything).Return(nil)
 		mockStore.On("GetPipelineLastBefore", fakeRepo, "main", mock.Anything).Return(&model.Pipeline{}, nil).Maybe()
-		mockStore.On("ConfigPersist", mock.Anything).Return(&model.Config{ID: 1}, nil).Maybe()
+		mockStore.On("ConfigsPersist", mock.Anything, mock.Anything).Return([]*model.Config{{ID: 1}}, nil).Maybe()
 		mockStore.On("ConfigFindIdentical", mock.Anything, mock.Anything).Return(nil, nil).Maybe()
-		mockStore.On("PipelineConfigCreate", mock.Anything).Return(nil).Maybe()
+		mockStore.On("PipelineConfigsCreate", mock.Anything).Return(nil).Maybe()
 		mockStore.On("WorkflowsCreate", mock.Anything).Return(nil)
 		mockStore.On("UpdatePipeline", mock.Anything).Return(nil).Maybe()
 
@@ -531,9 +531,9 @@ func TestPostPipeline(t *testing.T) {
 		mockStore.On("CreatePipeline", mock.Anything).Return(nil)
 		mockStore.On("GetPipelineLastBefore", fakeRepo, "main", mock.Anything).Return(nil, types.ErrRecordNotExist).Maybe()
 		mockStore.On("GetActivePipelineList", fakeRepo).Return([]*model.Pipeline{}, nil).Maybe()
-		mockStore.On("ConfigPersist", mock.Anything).Return(&model.Config{ID: 1}, nil).Maybe()
+		mockStore.On("ConfigsPersist", mock.Anything, mock.Anything).Return([]*model.Config{{ID: 1}}, nil).Maybe()
 		mockStore.On("ConfigFindIdentical", mock.Anything, mock.Anything).Return(nil, nil).Maybe()
-		mockStore.On("PipelineConfigCreate", mock.Anything).Return(nil).Maybe()
+		mockStore.On("PipelineConfigsCreate", mock.Anything).Return(nil).Maybe()
 		mockStore.On("WorkflowsCreate", mock.Anything).Return(nil).Maybe()
 		mockStore.On("UpdatePipeline", mock.Anything).Return(nil).Maybe()
 
@@ -562,8 +562,8 @@ func TestPostPipeline(t *testing.T) {
 		}
 		// The config must be compiled into real work, not just fetched.
 		assert.NotEmpty(t, got.Workflows, "restart should produce workflows from the fetched config")
-		mockStore.AssertCalled(t, "ConfigPersist", mock.Anything)
-		mockStore.AssertCalled(t, "PipelineConfigCreate", mock.Anything)
+		mockStore.AssertCalled(t, "ConfigsPersist", mock.Anything, mock.Anything)
+		mockStore.AssertCalled(t, "PipelineConfigsCreate", mock.Anything)
 		mockStore.AssertCalled(t, "WorkflowsCreate", mock.Anything)
 	})
 
