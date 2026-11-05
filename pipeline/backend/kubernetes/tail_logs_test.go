@@ -16,8 +16,12 @@ package kubernetes
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -245,11 +249,169 @@ func TestCopyTimestampedLogsReturnsWhenOutputReaderCloses(t *testing.T) {
 
 	engine := &kube{}
 	last := time.Time{}
+	atLast := 0
 	skipping := false
-	err := engine.copyTimestampedLogs(t.Context(), writer, strings.NewReader("2026-11-05T12:05:00.100Z line\n"), &last, &skipping)
+	skipAtLast := 0
+	delivered := false
+	err := engine.copyTimestampedLogs(t.Context(), writer, strings.NewReader("2026-11-05T12:05:00.100Z line\n"), &last, &atLast, &skipping, &skipAtLast, &delivered)
 	var pipeWriteErr *podLogPipeWriteError
 	assert.ErrorAs(t, err, &pipeWriteErr)
 	assert.ErrorIs(t, err, io.ErrClosedPipe)
+}
+
+func TestTailLogsRecoversEqualTimestampLinesAfterBoundary(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("tail-equal-boundary")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	createTailTestPod(t, client, podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}})
+	line1 := "2026-11-05T12:06:00.123456789Z first\n"
+	line2 := "2026-11-05T12:06:00.123456789Z second\n"
+	streams := []string{line1, line1 + line2, line1 + line2}
+	var opened []*kube_core_v1.PodLogOptions
+	engine.openLogStream = func(_ context.Context, _, _ string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+		opened = append(opened, opts.DeepCopy())
+		return io.NopCloser(strings.NewReader(streams[len(opened)-1])), nil
+	}
+	getCount := 0
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		getCount++
+		state := kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}}
+		if getCount == 2 {
+			state = kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}}
+		}
+		return true, tailTestPod(podName, state), nil
+	})
+
+	reader, err := engine.tailLogs(t.Context(), step, podName)
+	require.NoError(t, err)
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, "first\nsecond\n", string(got))
+	assert.Len(t, opened, 3)
+}
+
+func TestTailLogsStreamsLargeLineWithFixedBuffer(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("tail-large-line")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	createTailTestPod(t, client, podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}})
+	body := strings.Repeat("x", 5<<20)
+	line := "2026-11-05T12:07:00.123456789Z " + body
+	engine.openLogStream = func(_ context.Context, _, _ string, _ *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(line)), nil
+	}
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		return true, tailTestPod(podName, kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}}), nil
+	})
+
+	reader, err := engine.tailLogs(t.Context(), step, podName)
+	require.NoError(t, err)
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Len(t, got, len(body))
+	assert.Equal(t, sha256.Sum256([]byte(body)), sha256.Sum256(got))
+	assert.Equal(t, logReadBufferSize, newPodLogReader(strings.NewReader(line)).Size())
+}
+
+func TestTailLogsReopensAfterMoreThanTwentyEarlyEOFs(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("tail-many-reopens")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	createTailTestPod(t, client, podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}})
+	const emptyStreams = 21
+	var openCount atomic.Int32
+	var openFailures atomic.Int32
+	engine.openLogStream = func(_ context.Context, _, _ string, _ *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+		count := openCount.Add(1)
+		if count <= emptyStreams {
+			return io.NopCloser(strings.NewReader("")), nil
+		}
+		if count <= emptyStreams+2 {
+			openFailures.Add(1)
+			return nil, errors.New("temporary stream open failure")
+		}
+		return io.NopCloser(strings.NewReader("2026-11-05T12:08:00.123456789Z recovered\n")), nil
+	}
+	var waits []time.Duration
+	engine.waitLogReopen = func(_ context.Context, delay time.Duration) error {
+		waits = append(waits, delay)
+		return nil
+	}
+	getCount := atomic.Int32{}
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		count := getCount.Add(1)
+		state := kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}}
+		if count == emptyStreams+1 {
+			state = kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: 0}}
+		}
+		return true, tailTestPod(podName, state), nil
+	})
+	reader, err := engine.tailLogs(t.Context(), step, podName)
+	require.NoError(t, err)
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, "recovered\n", string(got))
+	assert.Greater(t, openCount.Load(), int32(emptyStreams))
+	assert.Equal(t, int32(2), openFailures.Load())
+	assert.Len(t, waits, emptyStreams+2)
+	assert.Equal(t, initialLogReopenDelay, waits[0])
+	assert.Equal(t, maxLogReopenDelay, waits[emptyStreams-1])
+	assert.Equal(t, maxLogReopenDelay, waits[emptyStreams])
+	assert.Equal(t, maxLogReopenDelay, waits[len(waits)-1])
+}
+
+func TestTailLogsReaderCloseClosesSourceAndStopsTailGoroutine(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("tail-close-source")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	createTailTestPod(t, client, podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}})
+	source := &blockingLogStream{closed: make(chan struct{})}
+	opened := make(chan struct{})
+	engine.openLogStream = func(_ context.Context, _, _ string, _ *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+		close(opened)
+		return source, nil
+	}
+	var getCount atomic.Int32
+	client.PrependReactor("get", "pods", func(kube_testing.Action) (bool, kube_runtime.Object, error) {
+		getCount.Add(1)
+		return true, tailTestPod(podName, kube_core_v1.ContainerState{Running: &kube_core_v1.ContainerStateRunning{}}), nil
+	})
+	reader, err := engine.tailLogs(t.Context(), step, podName)
+	require.NoError(t, err)
+	<-opened
+	require.NoError(t, reader.Close())
+	select {
+	case <-source.closed:
+	default:
+		t.Fatal("closing the returned reader did not close the source stream")
+	}
+	assert.Zero(t, getCount.Load(), "closed reader must stop before pod lookup or reopen")
+}
+
+type blockingLogStream struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (s *blockingLogStream) Read([]byte) (int, error) {
+	<-s.closed
+	return 0, io.EOF
+}
+
+func (s *blockingLogStream) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
 }
 
 func createTailTestPod(t *testing.T, client *fake.Clientset, name string, state kube_core_v1.ContainerState) {
@@ -259,8 +421,9 @@ func createTailTestPod(t *testing.T, client *fake.Clientset, name string, state 
 }
 
 func tailTestPod(name string, state kube_core_v1.ContainerState) *kube_core_v1.Pod {
+	metadata := kube_meta_v1.ObjectMeta{Name: name, Namespace: "test-ns"}
 	return &kube_core_v1.Pod{
-		ObjectMeta: kube_meta_v1.ObjectMeta{Name: name, Namespace: "test-ns"},
+		ObjectMeta: metadata,
 		Status: kube_core_v1.PodStatus{ContainerStatuses: []kube_core_v1.ContainerStatus{{
 			Name:  name,
 			State: state,
