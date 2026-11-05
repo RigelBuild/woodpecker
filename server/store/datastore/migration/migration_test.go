@@ -164,6 +164,12 @@ func TestMigrateAddsStepSkipExitCode(t *testing.T) {
 	}
 
 	require.NoError(t, Migrate(t.Context(), engine, true))
+	_, columns, err = engine.Dialect().GetColumns(engine.DB(), t.Context(), "steps")
+	require.NoError(t, err)
+	skipExitCodeColumn, exists := columns["step_skip_exit_code"]
+	require.True(t, exists)
+	assert.True(t, skipExitCodeColumn.Nullable)
+	assert.Equal(t, "0", skipExitCodeColumn.Default)
 
 	result, err := engine.QueryString("SELECT step_skip_exit_code FROM steps LIMIT 1")
 	require.NoError(t, err)

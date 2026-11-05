@@ -24,7 +24,7 @@ import (
 var addStepSkipExitCode = xormigrate.Migration{
 	ID: "add-step-skip-exit-code",
 	MigrateSession: func(sess *xorm.Session) error {
-		if _, err := sess.Exec("ALTER TABLE steps ADD COLUMN step_skip_exit_code INTEGER NOT NULL DEFAULT 0"); err != nil {
+		if _, err := sess.Exec("ALTER TABLE steps ADD COLUMN step_skip_exit_code INTEGER DEFAULT 0"); err != nil {
 			return fmt.Errorf("add step skip exit code column: %w", err)
 		}
 		return nil
