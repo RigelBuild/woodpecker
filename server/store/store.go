@@ -80,6 +80,8 @@ type Store interface {
 	GetPipelineList(*model.Repo, *model.ListOptionsWithAll, *model.PipelineFilter) ([]*model.Pipeline, error)
 	// GetRepoLatestPipelines gets the latest pipelines for the given repo IDs.
 	GetRepoLatestPipelines([]int64) ([]*model.Pipeline, error)
+	// GetPipelinesByIDs gets pipelines by their unique IDs.
+	GetPipelinesByIDs([]int64) ([]*model.Pipeline, error)
 	// GetActivePipelineList gets a list of the active pipelines for the repository
 	GetActivePipelineList(repo *model.Repo) ([]*model.Pipeline, error)
 	// GetPipelineQueue gets a list of pipelines in queue.

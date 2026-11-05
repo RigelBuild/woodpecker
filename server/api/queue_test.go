@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"sync"
@@ -64,6 +65,33 @@ func seedPipeline(t *testing.T, s store.Store, repoID int64) *model.Pipeline {
 	p := &model.Pipeline{RepoID: repoID, Status: model.StatusRunning}
 	require.NoError(t, s.CreatePipeline(p))
 	return p
+}
+
+type pipelineLookupCountingStore struct {
+	store.Store
+	getPipelinesByIDsCalls int
+	getPipelineCalls       int
+	pipelineIDs            []int64
+}
+
+func (s *pipelineLookupCountingStore) GetPipelinesByIDs(ids []int64) ([]*model.Pipeline, error) {
+	s.getPipelinesByIDsCalls++
+	s.pipelineIDs = append([]int64(nil), ids...)
+	return s.Store.GetPipelinesByIDs(ids)
+}
+
+func (s *pipelineLookupCountingStore) GetPipeline(id int64) (*model.Pipeline, error) {
+	s.getPipelineCalls++
+	return s.Store.GetPipeline(id)
+}
+
+type failingPipelinesStore struct {
+	store.Store
+	err error
+}
+
+func (s *failingPipelinesStore) GetPipelinesByIDs([]int64) ([]*model.Pipeline, error) {
+	return nil, s.err
 }
 
 func TestGetQueueInfo(t *testing.T) {
@@ -169,6 +197,65 @@ func TestGetQueueInfo(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, tc.Recorder.Code)
 		assert.Contains(t, tc.Recorder.Body.String(), "pipeline not found")
 	})
+}
+
+func TestGetQueueInfoPipelineLookupError(t *testing.T) {
+	baseStore := newTestStore(t)
+	repo, _ := cronFixture(t, baseStore)
+	pipe := seedPipeline(t, baseStore, repo.ID)
+	s := &failingPipelinesStore{Store: baseStore, err: errors.New("pipeline lookup unavailable")}
+
+	q := installScheduler(t, s)
+	q.On("Info", mock.Anything).Return(queue.InfoT{Running: []*model.Task{
+		{ID: "1", PipelineID: pipe.ID, RepoID: repo.ID},
+	}})
+
+	tc := newTestContext(t, s)
+	GetQueueInfo(tc.Ctx)
+
+	assert.Equal(t, http.StatusInternalServerError, tc.Recorder.Code)
+	assert.Contains(t, tc.Recorder.Body.String(), "pipeline lookup unavailable")
+}
+
+func TestGetQueueInfoBatchesPipelineLookups(t *testing.T) {
+	baseStore := newTestStore(t)
+	repo, _ := cronFixture(t, baseStore)
+	s := &pipelineLookupCountingStore{Store: baseStore}
+	first := seedPipeline(t, s, repo.ID)
+	second := seedPipeline(t, s, repo.ID)
+
+	info := queue.InfoT{
+		Pending: []*model.Task{
+			{ID: "pending-1", PipelineID: first.ID},
+			{ID: "pending-2", PipelineID: second.ID},
+		},
+		WaitingOnDeps: []*model.Task{
+			{ID: "waiting", PipelineID: first.ID},
+		},
+		Running: []*model.Task{
+			{ID: "running", PipelineID: second.ID},
+		},
+	}
+
+	q := installScheduler(t, s)
+	q.On("Info", mock.Anything).Return(info)
+
+	tc := newTestContext(t, s)
+	GetQueueInfo(tc.Ctx)
+
+	require.Equal(t, http.StatusOK, tc.Recorder.Code)
+	var got model.QueueInfo
+	tc.decodeJSON(t, &got)
+	require.Len(t, got.Pending, 2)
+	require.Len(t, got.WaitingOnDeps, 1)
+	require.Len(t, got.Running, 1)
+	assert.Equal(t, first.Number, got.Pending[0].PipelineNumber)
+	assert.Equal(t, second.Number, got.Pending[1].PipelineNumber)
+	assert.Equal(t, first.Number, got.WaitingOnDeps[0].PipelineNumber)
+	assert.Equal(t, second.Number, got.Running[0].PipelineNumber)
+	assert.Equal(t, 1, s.getPipelinesByIDsCalls)
+	assert.ElementsMatch(t, []int64{first.ID, second.ID}, s.pipelineIDs)
+	assert.Zero(t, s.getPipelineCalls)
 }
 
 func TestPauseResumeQueue(t *testing.T) {

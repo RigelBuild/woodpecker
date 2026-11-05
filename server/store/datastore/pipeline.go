@@ -137,6 +137,26 @@ func (s storage) GetRepoLatestPipelines(repoIDs []int64) ([]*model.Pipeline, err
 	return pipelines, s.engine.Where(cond).Find(&pipelines)
 }
 
+func (s storage) GetPipelinesByIDs(ids []int64) ([]*model.Pipeline, error) {
+	pipelines := make([]*model.Pipeline, 0, len(ids))
+	if len(ids) == 0 {
+		return pipelines, nil
+	}
+
+	const maxIDsPerQuery = 1000
+	for start := 0; start < len(ids); start += maxIDsPerQuery {
+		end := min(start+maxIDsPerQuery, len(ids))
+
+		batch := make([]*model.Pipeline, 0, end-start)
+		if err := s.engine.Where(builder.In("id", ids[start:end])).Find(&batch); err != nil {
+			return nil, err
+		}
+		pipelines = append(pipelines, batch...)
+	}
+
+	return pipelines, nil
+}
+
 // GetActivePipelineList get all pipelines that are pending, running or blocked.
 func (s storage) GetActivePipelineList(repo *model.Repo) ([]*model.Pipeline, error) {
 	pipelines := make([]*model.Pipeline, 0)

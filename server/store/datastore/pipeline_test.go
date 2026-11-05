@@ -377,6 +377,54 @@ func TestGetRepoLatestPipelinesUsesNumber(t *testing.T) {
 	assert.EqualValues(t, model.StatusKilled, latest[2].Status)
 }
 
+func TestGetPipelinesByIDs(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	expected := []*model.Pipeline{
+		{ID: 10, RepoID: 1, Number: 1, Status: model.StatusSuccess},
+		{ID: 20, RepoID: 1, Number: 2, Status: model.StatusRunning},
+	}
+	require.NoError(t, wrapInsert(store.engine.Insert(expected)))
+
+	pipelines, err := store.GetPipelinesByIDs([]int64{20, 999, 10})
+	require.NoError(t, err)
+	require.Len(t, pipelines, 2)
+
+	got := make(map[int64]int64, len(pipelines))
+	for _, pipeline := range pipelines {
+		got[pipeline.ID] = pipeline.Number
+	}
+	assert.Equal(t, map[int64]int64{10: 1, 20: 2}, got)
+}
+
+// Rows on both sides of the 1000-ID chunk boundary must come back.
+func TestGetPipelinesByIDsSpansChunks(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	require.NoError(t, wrapInsert(store.engine.Insert([]*model.Pipeline{
+		{ID: 1, RepoID: 1, Number: 1, Status: model.StatusSuccess},
+		{ID: 1001, RepoID: 1, Number: 2, Status: model.StatusSuccess},
+	})))
+
+	ids := make([]int64, 0, 1001)
+	for id := int64(1); id <= 1001; id++ {
+		ids = append(ids, id)
+	}
+	pipelines, err := store.GetPipelinesByIDs(ids)
+	require.NoError(t, err)
+	got := make([]int64, 0, len(pipelines))
+	for _, pipeline := range pipelines {
+		got = append(got, pipeline.ID)
+	}
+	assert.ElementsMatch(t, []int64{1, 1001}, got)
+
+	empty, err := store.GetPipelinesByIDs(nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
 // TestGetPipelineLastBeforeUsesNumber checks the preceding pipeline is found
 // by number, in the case where the two sequences disagree: the pipelines are
 // created in number order while their ids run the other way. TiDB can produce

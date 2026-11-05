@@ -2532,6 +2532,68 @@ func (_c *MockStore_GetPipelineQueue_Call) RunAndReturn(run func() ([]*model.Fee
 	return _c
 }
 
+// GetPipelinesByIDs provides a mock function for the type MockStore
+func (_mock *MockStore) GetPipelinesByIDs(int64s []int64) ([]*model.Pipeline, error) {
+	ret := _mock.Called(int64s)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetPipelinesByIDs")
+	}
+
+	var r0 []*model.Pipeline
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func([]int64) ([]*model.Pipeline, error)); ok {
+		return returnFunc(int64s)
+	}
+	if returnFunc, ok := ret.Get(0).(func([]int64) []*model.Pipeline); ok {
+		r0 = returnFunc(int64s)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*model.Pipeline)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func([]int64) error); ok {
+		r1 = returnFunc(int64s)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetPipelinesByIDs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetPipelinesByIDs'
+type MockStore_GetPipelinesByIDs_Call struct {
+	*mock.Call
+}
+
+// GetPipelinesByIDs is a helper method to define mock.On call
+//   - int64s []int64
+func (_e *MockStore_Expecter) GetPipelinesByIDs(int64s any) *MockStore_GetPipelinesByIDs_Call {
+	return &MockStore_GetPipelinesByIDs_Call{Call: _e.mock.On("GetPipelinesByIDs", int64s)}
+}
+
+func (_c *MockStore_GetPipelinesByIDs_Call) Run(run func(int64s []int64)) *MockStore_GetPipelinesByIDs_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 []int64
+		if args[0] != nil {
+			arg0 = args[0].([]int64)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetPipelinesByIDs_Call) Return(pipelines []*model.Pipeline, err error) *MockStore_GetPipelinesByIDs_Call {
+	_c.Call.Return(pipelines, err)
+	return _c
+}
+
+func (_c *MockStore_GetPipelinesByIDs_Call) RunAndReturn(run func(int64s []int64) ([]*model.Pipeline, error)) *MockStore_GetPipelinesByIDs_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetRepo provides a mock function for the type MockStore
 func (_mock *MockStore) GetRepo(n int64) (*model.Repo, error) {
 	ret := _mock.Called(n)
