@@ -673,6 +673,37 @@ func TestReportCanceledAggregateFailsWithoutSameCommitSuccessor(t *testing.T) {
 	assert.Equal(t, []string{statusFailure}, *states)
 }
 
+type countingAggregateReporter struct {
+	forge.Forge
+	calls int
+}
+
+func (r *countingAggregateReporter) StatusAggregate(context.Context, *model.User, *model.Repo, *model.Pipeline, []*model.Workflow) error {
+	r.calls++
+	return nil
+}
+
+func TestReportCanceledAggregateDoesNotCallReporterWithInitialSuccessor(t *testing.T) {
+	reporter := &countingAggregateReporter{}
+	p := &model.Pipeline{
+		ID:        20,
+		Number:    5,
+		Event:     model.EventPull,
+		Status:    model.StatusCanceled,
+		Commit:    "abc123",
+		Ref:       "refs/pull/7/head",
+		Workflows: []*model.Workflow{{Name: "build", State: model.StatusSuccess}},
+	}
+	successor := &model.Pipeline{Number: 6, Event: model.EventPull, Commit: p.Commit, Ref: p.Ref}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p, successor}, nil).Maybe()
+
+	err := forge.ReportAggregateStatus(context.Background(), reporter, s, &model.User{}, &model.Repo{}, p)
+	require.NoError(t, err)
+	assert.Zero(t, reporter.calls, "initial same-commit successor must prevent aggregate reporting")
+}
+
 func TestReportCanceledAggregateDefersToSameCommitSuccessor(t *testing.T) {
 	states, handler := postedStates(t, 0)
 	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
