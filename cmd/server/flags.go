@@ -135,6 +135,12 @@ var flags = append([]cli.Flag{
 		Value:   10 * time.Minute,
 	},
 	&cli.DurationFlag{
+		Sources: cli.EnvVars("WOODPECKER_CREATION_DRAIN_TIMEOUT"),
+		Name:    "creation-drain-timeout",
+		Usage:   "maximum time to wait for in-flight webhook pipeline creations during shutdown",
+		Value:   25 * time.Second,
+	},
+	&cli.DurationFlag{
 		Sources: cli.EnvVars("WOODPECKER_PENDING_TIMEOUT"),
 		Name:    "pending-timeout",
 		Usage:   "maximum time a runnable pending workflow waits for a matching live agent; 0 disables",
