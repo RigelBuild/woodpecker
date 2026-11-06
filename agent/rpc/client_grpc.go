@@ -183,6 +183,24 @@ func retryRPC[T any](ctx context.Context, c *client, opName string, op backoff.O
 	return zero, err
 }
 
+// retryLongPollRPC starts the retry timeout after the first failure.
+// Next and Wait can block in a healthy long poll longer than that timeout.
+func retryLongPollRPC[T any](ctx context.Context, c *client, opName string, op backoff.Operation[T]) (T, error) {
+	res, err := op()
+	if err == nil {
+		return res, nil
+	}
+
+	firstAttempt := true
+	return retryRPC(ctx, c, opName, func() (T, error) {
+		if firstAttempt {
+			firstAttempt = false
+			return res, err
+		}
+		return op()
+	})
+}
+
 // classifyRPCErr inspects a gRPC error and returns either the same error (for
 // retryable codes) or a backoff.Permanent wrapping it (for fatal codes). It is
 // the single source of truth for which gRPC codes are worth retrying.
@@ -226,7 +244,7 @@ func (c *client) Version(ctx context.Context) (*rpc.Version, error) {
 func (c *client) Next(ctx context.Context, filter rpc.Filter) (*rpc.Workflow, error) {
 	req := &proto.NextRequest{Filter: &proto.Filter{Labels: filter.Labels}}
 
-	res, err := retryRPC(ctx, c, "next", func() (*proto.NextResponse, error) {
+	res, err := retryLongPollRPC(ctx, c, "next", func() (*proto.NextResponse, error) {
 		if !c.IsConnected() {
 			return nil, errNotConnected
 		}
@@ -255,7 +273,7 @@ func (c *client) Next(ctx context.Context, filter rpc.Filter) (*rpc.Workflow, er
 func (c *client) Wait(ctx context.Context, workflowID string) (canceled bool, err error) {
 	req := &proto.WaitRequest{Id: workflowID}
 
-	resp, err := retryRPC(ctx, c, "wait", func() (*proto.WaitResponse, error) {
+	resp, err := retryLongPollRPC(ctx, c, "wait", func() (*proto.WaitResponse, error) {
 		if !c.IsConnected() {
 			return nil, errNotConnected
 		}
