@@ -260,6 +260,95 @@ func TestRetryRPCUnauthenticatedRetriesUntilContextCancellation(t *testing.T) {
 	assert.Equal(t, 3, attempts)
 }
 
+func TestRetryLongPollRPCMatchesRetryRPCOutcomes(t *testing.T) {
+	tests := []struct {
+		name            string
+		cancelContext   bool
+		firstError      func(context.Context) error
+		timeout         time.Duration
+		wantErr         error
+		wantPermanent   bool
+		wantMinAttempts int32
+	}{
+		{
+			name: "server cancellation is returned",
+			firstError: func(ctx context.Context) error {
+				return classifyRPCErr(ctx, status.Error(codes.Canceled, "server canceled"))
+			},
+			wantPermanent:   true,
+			wantMinAttempts: 1,
+		},
+		{
+			name:          "caller cancellation returns zero result",
+			cancelContext: true,
+			firstError: func(ctx context.Context) error {
+				return classifyRPCErr(ctx, status.Error(codes.Unavailable, "server unavailable"))
+			},
+			wantMinAttempts: 1,
+		},
+		{
+			name: "connection loss exhausts retry timeout",
+			firstError: func(context.Context) error {
+				return errNotConnected
+			},
+			timeout:         time.Second,
+			wantErr:         ErrConnectionLost,
+			wantMinAttempts: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				run := func(useLongPoll bool) (struct{}, int32, error) {
+					ctx := t.Context()
+					if tt.cancelContext {
+						var cancel context.CancelCauseFunc
+						ctx, cancel = context.WithCancelCause(ctx)
+						cancel(context.Canceled)
+					}
+					c := &client{connectionRetryTimeout: tt.timeout}
+					var callCount atomic.Int32
+					op := func() (struct{}, error) {
+						callCount.Add(1)
+						return struct{}{}, tt.firstError(ctx)
+					}
+					var (
+						result struct{}
+						err    error
+					)
+					if useLongPoll {
+						result, err = retryLongPollRPC(ctx, c, "test", op)
+					} else {
+						result, err = retryRPC(ctx, c, "test", op)
+					}
+					return result, callCount.Load(), err
+				}
+
+				longPollResult, longPollAttempts, longPollErr := run(true)
+				retryResult, retryAttempts, retryErr := run(false)
+				assert.Equal(t, retryResult, longPollResult)
+				assert.GreaterOrEqual(t, longPollAttempts, tt.wantMinAttempts)
+				assert.GreaterOrEqual(t, retryAttempts, tt.wantMinAttempts)
+				if tt.wantErr != nil {
+					assert.ErrorIs(t, longPollErr, tt.wantErr)
+					assert.ErrorIs(t, retryErr, tt.wantErr)
+					return
+				}
+				if tt.wantPermanent {
+					assert.ErrorIs(t, longPollErr, backoff.ErrPermanent)
+					assert.ErrorIs(t, retryErr, backoff.ErrPermanent)
+					assert.Equal(t, codes.Canceled, status.Code(backoff.AsRetryError(longPollErr).LastErr))
+					assert.Equal(t, codes.Canceled, status.Code(backoff.AsRetryError(retryErr).LastErr))
+					return
+				}
+				assert.NoError(t, longPollErr)
+				assert.NoError(t, retryErr)
+			})
+		})
+	}
+}
+
 type logRecorderClient struct {
 	proto.WoodpeckerClient
 
