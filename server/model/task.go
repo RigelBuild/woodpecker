@@ -43,6 +43,10 @@ type Task struct {
 	// Created is the unix timestamp the task's pipeline was created at. It
 	// defines the queue ordering across pipelines.
 	Created int64 `json:"created" xorm:"NOT NULL DEFAULT 0 'created'"`
+	// Enqueued is the unix timestamp when this task first entered the queue.
+	Enqueued int64 `json:"enqueued,omitempty" xorm:"NOT NULL DEFAULT 0 'enqueued'"`
+	// Started is the unix timestamp when this task was most recently assigned to an agent.
+	Started int64 `json:"started,omitempty" xorm:"NOT NULL DEFAULT 0 'started'"`
 	// BlockedCount is the number of tasks in the same pipeline that transitively
 	// depend on this one. It is set at push and breaks Created ties, highest first.
 	BlockedCount int `json:"blocked_count" xorm:"NOT NULL DEFAULT 0 'blocked_count'"`

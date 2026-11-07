@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -99,6 +100,11 @@ func isTerminalWorkflowState(state model.StatusValue) bool {
 // PushAtOnce persists multiple tasks and pushes them to this queue, each into
 // its creation-order position among the tasks already pending.
 func (q *persistentQueue) PushAtOnce(c context.Context, tasks []*model.Task) error {
+	for _, task := range tasks {
+		if task.Enqueued == 0 {
+			task.Enqueued = time.Now().Unix()
+		}
+	}
 	if err := q.store.TaskInsertBatch(tasks); err != nil {
 		return err
 	}
@@ -122,6 +128,7 @@ func (q *persistentQueue) Requeue(c context.Context, id string) error {
 	if task == nil {
 		return ErrNotFound
 	}
+	task.Started = 0
 	if err := q.store.TaskInsert(task); err != nil {
 		if !errors.Is(err, types.ErrInsertDuplicateDetected) {
 			qf.retryReserved(id)

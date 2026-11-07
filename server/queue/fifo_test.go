@@ -1073,6 +1073,38 @@ func TestFifoLeaseManagement(t *testing.T) {
 	})
 }
 
+func TestFifoTaskStartAndRequeueTimes(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	task := &model.Task{ID: "started-and-requeued"}
+	require.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+
+	worker := &worker{agentID: 1, filter: filterFnTrue, channel: make(chan *model.Task, 1)}
+	q.Lock()
+	q.workers[worker] = struct{}{}
+	q.Unlock()
+	waitForProcess()
+	got := <-worker.channel
+	require.NotNil(t, got)
+	assert.NotZero(t, got.Started)
+	assert.GreaterOrEqual(t, got.Started, time.Now().Unix()-1)
+
+	assert.Same(t, task, q.Info(ctx).Running[0])
+
+	require.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+	require.NoError(t, q.Requeue(ctx, got.ID))
+
+	var requeued *model.Task
+	for _, candidate := range q.Info(ctx).Pending {
+		if candidate.ID == task.ID {
+			requeued = candidate
+		}
+	}
+	require.NotNil(t, requeued)
+	assert.Zero(t, requeued.Started)
+}
+
 func TestFifoReserveAndRequeue(t *testing.T) {
 	ctx, cancel, q := setupTestQueue(t)
 	defer cancel(nil)

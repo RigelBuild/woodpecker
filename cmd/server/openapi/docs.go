@@ -5914,6 +5914,10 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "enqueued": {
+                    "description": "Enqueued is the unix timestamp when this task first entered the queue.",
+                    "type": "integer"
+                },
                 "id": {
                     "type": "string"
                 },
@@ -5940,6 +5944,10 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                },
+                "started": {
+                    "description": "Started is the unix timestamp when this task was most recently assigned to an agent.",
+                    "type": "integer"
                 }
             }
         },
@@ -6434,6 +6442,10 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "enqueued": {
+                    "description": "Enqueued is the unix timestamp when this task first entered the queue.",
+                    "type": "integer"
+                },
                 "id": {
                     "type": "string"
                 },
@@ -6463,6 +6475,10 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                },
+                "started": {
+                    "description": "Started is the unix timestamp when this task was most recently assigned to an agent.",
+                    "type": "integer"
                 }
             }
         },

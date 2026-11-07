@@ -201,6 +201,24 @@ func (e *requeueEnv) queued(id int64) bool {
 	})
 }
 
+func (e *requeueEnv) assertRequeuedTimes(id int64) {
+	e.t.Helper()
+	idString := strconv.FormatInt(id, 10)
+	info := e.sched.Info(e.t.Context())
+	queued := slices.Concat(info.Pending, info.WaitingOnDeps)
+	i := slices.IndexFunc(queued, func(task *model.Task) bool { return task.ID == idString })
+	require.NotEqual(e.t, -1, i)
+	assert.NotZero(e.t, queued[i].Enqueued)
+	assert.Zero(e.t, queued[i].Started)
+	enqueued := queued[i].Enqueued
+	tasks, err := e.store.TaskList()
+	require.NoError(e.t, err)
+	i = slices.IndexFunc(tasks, func(task *model.Task) bool { return task.ID == idString })
+	require.NotEqual(e.t, -1, i)
+	assert.Equal(e.t, enqueued, tasks[i].Enqueued)
+	assert.Zero(e.t, tasks[i].Started)
+}
+
 func (e *requeueEnv) nextExpired() queue.ExpiredTask {
 	e.t.Helper()
 	select {
@@ -317,6 +335,7 @@ func TestDoneAgentShutdownRequeue(t *testing.T) {
 		e.start(wf, 1, 0, model.StatusSuccess, model.StatusRunning)
 
 		require.NoError(t, e.shutdownDone(wf))
+		e.assertRequeuedTimes(wf.ID)
 
 		row := e.workflow(wf.ID)
 		assert.Equal(t, model.StatusPending, row.State)
@@ -483,6 +502,7 @@ func TestHandleExpired(t *testing.T) {
 		require.Equal(t, int64(1), ev.AgentID)
 
 		require.NoError(t, e.rpc.HandleExpired(t.Context(), ev))
+		e.assertRequeuedTimes(wf.ID)
 
 		row := e.workflow(wf.ID)
 		assert.Equal(t, model.StatusPending, row.State)

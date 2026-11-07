@@ -19,10 +19,14 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
@@ -138,7 +142,9 @@ func TestPersistentQueueRequeuePersistsBeforePoll(t *testing.T) {
 	store.EXPECT().TaskInsertBatch([]*model.Task{task}).Return(nil).Once()
 	store.EXPECT().TaskDelete("1").Return(nil).Once()
 	store.EXPECT().WorkflowLoad(int64(1)).Return(&model.Workflow{ID: 1, State: model.StatusPending}, nil).Once()
-	store.EXPECT().TaskInsert(task).Run(func(*model.Task) {
+	store.EXPECT().TaskInsert(mock.MatchedBy(func(snapshot *model.Task) bool {
+		return snapshot.ID == task.ID && snapshot.Enqueued == task.Enqueued && snapshot.Started == 0
+	})).Run(func(*model.Task) {
 		assert.Equal(t, 1, q.Info(ctx).Stats.Running, "requeued task must remain reserved until its backup row is inserted")
 	}).Return(nil).Once()
 	store.EXPECT().TaskDelete("1").Return(nil).Once()
@@ -435,3 +441,137 @@ func TestWithTaskStoreRestoresPausedStateAfterRestart(t *testing.T) {
 	restored := WithTaskStore(ctx2, q2, store)
 	assert.True(t, restored.Info(ctx2).Paused)
 }
+
+func TestPersistentQueueEnqueueAndReloadTimes(t *testing.T) {
+	s := newQueueSQLiteStore(t)
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	task := &model.Task{ID: "queued-at"}
+	pq := WithTaskStore(ctx, q, s)
+	require.NoError(t, pq.PushAtOnce(ctx, []*model.Task{task}))
+
+	stored, err := s.TaskList()
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.NotZero(t, stored[0].Enqueued)
+	enqueued := stored[0].Enqueued
+
+	ctx2, cancel2, q2 := setupTestQueue(t)
+	defer cancel2(nil)
+	reloaded := WithTaskStore(ctx2, q2, s)
+	reloadedTask := findQueuedTask(t, reloaded.Info(ctx2), task.ID)
+	assert.Equal(t, enqueued, reloadedTask.Enqueued)
+	assert.Zero(t, reloadedTask.Started)
+
+	stored, err = s.TaskList()
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Equal(t, enqueued, stored[0].Enqueued)
+}
+
+func TestPersistentQueueLegacyTaskKeepsUnknownEnqueueTimeAfterReload(t *testing.T) {
+	s := newQueueSQLiteStore(t)
+	legacy := &model.Task{ID: "legacy-zero"}
+	require.NoError(t, s.TaskInsert(legacy))
+
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	reloaded := WithTaskStore(ctx, q, s)
+	assert.Zero(t, findQueuedTask(t, reloaded.Info(ctx), legacy.ID).Enqueued)
+
+	stored, err := s.TaskList()
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Zero(t, stored[0].Enqueued)
+
+	ctx2, cancel2, q2 := setupTestQueue(t)
+	defer cancel2(nil)
+	reloadedAgain := WithTaskStore(ctx2, q2, s)
+	assert.Zero(t, findQueuedTask(t, reloadedAgain.Info(ctx2), legacy.ID).Enqueued)
+}
+
+func TestPersistentQueueRequeueClearsStartedInInfoAndStore(t *testing.T) {
+	s := newQueueSQLiteStore(t)
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	task := &model.Task{ID: "requeued-times", Enqueued: 123}
+	pq := WithTaskStore(ctx, q, s)
+	require.NoError(t, pq.PushAtOnce(ctx, []*model.Task{task}))
+
+	got, err := pq.Poll(ctx, 1, filterFnTrue)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotZero(t, got.Started)
+
+	require.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+	require.NoError(t, pq.Requeue(ctx, got.ID))
+	assert.Zero(t, findQueuedTask(t, pq.Info(ctx), task.ID).Started)
+
+	stored, err := s.TaskList()
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Zero(t, stored[0].Started)
+	assert.Equal(t, int64(123), stored[0].Enqueued)
+}
+
+func TestPersistentQueueExpiryRequeueClearsStartedInInfoAndStore(t *testing.T) {
+	s := newQueueSQLiteStore(t)
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	task := &model.Task{ID: "expired-times", Enqueued: 123}
+	pq := WithTaskStore(ctx, q, s)
+	require.NoError(t, pq.PushAtOnce(ctx, []*model.Task{task}))
+
+	got, err := pq.Poll(ctx, 1, filterFnTrue)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotZero(t, got.Started)
+
+	q.Lock()
+	q.running[got.ID].deadline = time.Now().Add(-time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+
+	event := receiveExpiredTask(t, q)
+	require.NoError(t, pq.Reserve(ctx, event.ID, event.AgentID, true))
+	require.NoError(t, pq.Requeue(ctx, event.ID))
+	assert.Zero(t, findQueuedTask(t, pq.Info(ctx), task.ID).Started)
+
+	stored, err := s.TaskList()
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Zero(t, stored[0].Started)
+	assert.Equal(t, int64(123), stored[0].Enqueued)
+}
+
+func newQueueSQLiteStore(t *testing.T) store.Store {
+	t.Helper()
+	s, err := datastore.NewEngine(&store.Opts{
+		Driver: "sqlite3",
+		Config: ":memory:",
+		XORM: store.XORM{MaxOpenConns: 1, MaxIdleConns: 1},
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate(t.Context(), true))
+	t.Cleanup(func() {
+		require.NoError(t, s.Close())
+	})
+	return s
+}
+
+func findQueuedTask(t *testing.T, info InfoT, id string) *model.Task {
+	t.Helper()
+	for _, tasks := range [][]*model.Task{info.Pending, info.WaitingOnDeps} {
+		for _, task := range tasks {
+			if task.ID == id {
+				return task
+			}
+		}
+	}
+	require.FailNowf(t, "task not queued", "task %s not in %s", id, info.String())
+	return nil
+}
+

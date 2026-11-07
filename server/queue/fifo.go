@@ -115,6 +115,7 @@ func (q *fifo) Requeue(_ context.Context, id string) error {
 		return ErrNotFound
 	}
 	delete(q.running, id)
+	entry.item.Started = 0
 	q.pushPendingFront(entry.item)
 	return nil
 }
@@ -354,6 +355,7 @@ func (q *fifo) process() {
 		q.filterWaiting()
 		for pending, worker := q.assignToWorker(); pending != nil && worker != nil; pending, worker = q.assignToWorker() {
 			task, _ := pending.Value.(*model.Task)
+			task.Started = time.Now().Unix()
 			task.AgentID = worker.agentID
 			delete(q.workers, worker)
 			q.pending.Remove(pending)

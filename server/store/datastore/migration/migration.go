@@ -63,6 +63,7 @@ var migrationTasks = []*xormigrate.Migration{
 	&addSecretApprovalAndBranches,
 	&addSecretVersion,
 	&addPipelineEventOverridden,
+	&addTaskQueueTimestamps,
 }
 
 var allBeans = []any{
