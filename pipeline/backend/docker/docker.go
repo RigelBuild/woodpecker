@@ -357,6 +357,8 @@ func (e *docker) WaitStep(ctx context.Context, step *backend_types.Step, taskUUI
 		if err := archive.Content.Close(); err != nil {
 			log.Warn().Err(err).Msg("closing step output archive")
 		}
+	} else if !errdefs.IsNotFound(err) {
+		log.Warn().Err(err).Msg("reading step output archive")
 	}
 	return state, nil
 }

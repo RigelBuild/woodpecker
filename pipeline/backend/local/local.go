@@ -232,16 +232,21 @@ func (e *local) WaitStep(ctx context.Context, step *types.Step, taskUUID string)
 		entry := state.cmd.Env[i]
 		if strings.HasPrefix(entry, "CI_STEP_OUTPUT=") {
 			path := strings.TrimPrefix(entry, "CI_STEP_OUTPUT=")
-			info, err := os.Lstat(path)
+			file, err := openStepOutput(path)
 			if err != nil {
+				if errors.Is(err, errOutputSymlink) {
+					stepState.OutputsState = "invalid"
+				}
 				break
 			}
-			if !info.Mode().IsRegular() {
-				stepState.OutputsState = "invalid"
-				break
-			}
-			file, err := os.Open(path)
-			if err != nil {
+			info, statErr := file.Stat()
+			if statErr != nil || !info.Mode().IsRegular() {
+				if closeErr := file.Close(); closeErr != nil {
+					log.Warn().Err(closeErr).Msg("closing step output file")
+				}
+				if statErr == nil {
+					stepState.OutputsState = "invalid"
+				}
 				break
 			}
 			data, readErr := io.ReadAll(io.LimitReader(file, types.MaxStepOutputBytes+1))
