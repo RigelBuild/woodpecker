@@ -96,6 +96,26 @@ func newWaitRetryClient(t *testing.T, service proto.WoodpeckerServer, timeout ti
 	}
 }
 
+type extendNotFoundServer struct {
+	proto.UnimplementedWoodpeckerServer
+	calls atomic.Int32
+}
+
+func (s *extendNotFoundServer) Extend(context.Context, *proto.ExtendRequest) (*proto.Empty, error) {
+	s.calls.Add(1)
+	return nil, status.Error(codes.NotFound, "queue: task not found")
+}
+
+func TestClientExtendNotFoundIsNotRetried(t *testing.T) {
+	service := &extendNotFoundServer{}
+	c := newWaitRetryClient(t, service, time.Second)
+
+	err := c.Extend(t.Context(), "workflow-id")
+	require.Error(t, err)
+	assert.Equal(t, codes.NotFound, status.Code(err))
+	assert.Equal(t, int32(1), service.calls.Load())
+}
+
 func TestWaitRetryTimeoutStartsAfterLongPollFailure(t *testing.T) {
 	tests := []struct {
 		name            string
