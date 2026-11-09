@@ -7389,6 +7389,69 @@ func (_c *MockStore_WorkflowResetForRequeue_Call) RunAndReturn(run func(workflow
 	return _c
 }
 
+// WorkflowSupersedePending provides a mock function for the type MockStore
+func (_mock *MockStore) WorkflowSupersedePending(pipelineID int64, ids []int64, by int64) error {
+	ret := _mock.Called(pipelineID, ids, by)
+
+	if len(ret) == 0 {
+		panic("no return value specified for WorkflowSupersedePending")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(int64, []int64, int64) error); ok {
+		r0 = returnFunc(pipelineID, ids, by)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_WorkflowSupersedePending_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'WorkflowSupersedePending'
+type MockStore_WorkflowSupersedePending_Call struct {
+	*mock.Call
+}
+
+// WorkflowSupersedePending is a helper method to define mock.On call
+//   - pipelineID int64
+//   - ids []int64
+//   - by int64
+func (_e *MockStore_Expecter) WorkflowSupersedePending(pipelineID any, ids any, by any) *MockStore_WorkflowSupersedePending_Call {
+	return &MockStore_WorkflowSupersedePending_Call{Call: _e.mock.On("WorkflowSupersedePending", pipelineID, ids, by)}
+}
+
+func (_c *MockStore_WorkflowSupersedePending_Call) Run(run func(pipelineID int64, ids []int64, by int64)) *MockStore_WorkflowSupersedePending_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 int64
+		if args[0] != nil {
+			arg0 = args[0].(int64)
+		}
+		var arg1 []int64
+		if args[1] != nil {
+			arg1 = args[1].([]int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_WorkflowSupersedePending_Call) Return(err error) *MockStore_WorkflowSupersedePending_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_WorkflowSupersedePending_Call) RunAndReturn(run func(pipelineID int64, ids []int64, by int64) error) *MockStore_WorkflowSupersedePending_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // WorkflowUpdate provides a mock function for the type MockStore
 func (_mock *MockStore) WorkflowUpdate(workflow *model.Workflow) error {
 	ret := _mock.Called(workflow)

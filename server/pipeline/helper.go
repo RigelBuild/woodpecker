@@ -96,3 +96,8 @@ func updatePipelineStatus(ctx context.Context, _forge forge.Forge, _store store.
 		}
 	}
 }
+
+// UpdatePipelineStatus refreshes per-workflow and aggregate forge statuses.
+func UpdatePipelineStatus(ctx context.Context, f forge.Forge, s store.Store, pipeline *model.Pipeline, repo *model.Repo, user *model.User) {
+	updatePipelineStatus(ctx, f, s, pipeline, repo, user)
+}

@@ -31,9 +31,11 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server"
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline/metadata"
+	"go.woodpecker-ci.org/woodpecker/v3/server/queue"
 	"go.woodpecker-ci.org/woodpecker/v3/server/router/middleware/session"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
@@ -438,7 +440,178 @@ func GetPipelineMetadata(c *gin.Context) {
 	c.JSON(http.StatusOK, m)
 }
 
-// CancelPipeline
+// CancelPendingWorkflowsRequest selects pending workflows to supersede.
+type CancelPendingWorkflowsRequest struct {
+	WorkflowIDs  []int64 `json:"workflow_ids"`
+	SupersededBy int64   `json:"superseded_by"`
+}
+
+// CancelPendingWorkflows cancels only the selected pending workflows.
+//
+//	@Summary	Cancel pending workflows in a pipeline
+//	@Router		/repos/{repo_id}/pipelines/{pipeline_number}/workflows/cancel [post]
+//	@Produce	json
+//	@Success	200	{object}	Pipeline
+//	@Failure	409	{string}	string	"Pending assignment or dependent closure changed"
+//	@Tags		Pipelines
+//	@Param		Authorization	header	string							true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param		repo_id			path	int								true	"the repository id"
+//	@Param		pipeline_number	path	int								true	"the number of the pipeline"
+//	@Param		request			body	CancelPendingWorkflowsRequest	true	"workflows and successor pipeline number"
+func CancelPendingWorkflows(c *gin.Context) {
+	const maxBodyBytes = 64 << 10
+	const maxWorkflowIDs = 512
+
+	var request CancelPendingWorkflowsRequest
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+		} else {
+			c.AbortWithStatus(http.StatusBadRequest)
+		}
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+		} else {
+			c.AbortWithStatus(http.StatusBadRequest)
+		}
+		return
+	}
+	if len(request.WorkflowIDs) == 0 || len(request.WorkflowIDs) > maxWorkflowIDs || request.SupersededBy <= 0 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	selected := make(map[int64]struct{}, len(request.WorkflowIDs))
+	workflowTaskIDs := make([]string, len(request.WorkflowIDs))
+	for i, id := range request.WorkflowIDs {
+		if id <= 0 {
+			c.AbortWithStatus(http.StatusBadRequest)
+			return
+		}
+		if _, duplicate := selected[id]; duplicate {
+			c.AbortWithStatus(http.StatusBadRequest)
+			return
+		}
+		selected[id] = struct{}{}
+		workflowTaskIDs[i] = strconv.FormatInt(id, 10)
+	}
+
+	_store := store.FromContext(c)
+	repo := session.Repo(c)
+	currentPipeline := session.Pipeline(c)
+	if repo == nil || currentPipeline == nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	successor, err := _store.GetPipelineNumber(repo, request.SupersededBy)
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+	if successor.RepoID != repo.ID {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if successor.ID == currentPipeline.ID || successor.Number == currentPipeline.Number {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	unlock := pipeline.LockPipeline(currentPipeline.ID)
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+	currentPipeline, err = _store.GetPipeline(currentPipeline.ID)
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+	workflows, err := _store.WorkflowGetTree(currentPipeline)
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+	workflowByID := make(map[int64]*model.Workflow, len(workflows))
+	for _, workflow := range workflows {
+		workflowByID[workflow.ID] = workflow
+	}
+	for _, id := range request.WorkflowIDs {
+		if _, exists := workflowByID[id]; !exists {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+	}
+
+	if err := server.Config.Services.Scheduler.CancelPending(c, workflowTaskIDs, func() error {
+		return _store.WorkflowSupersedePending(currentPipeline.ID, request.WorkflowIDs, successor.Number)
+	}); err != nil {
+		if errors.Is(err, queue.ErrPendingConflict) || errors.Is(err, store.ErrPendingConflict) {
+			c.AbortWithStatus(http.StatusConflict)
+			return
+		}
+		_ = c.AbortWithError(http.StatusInternalServerError, err)
+		return
+	}
+
+	currentPipeline.Workflows, err = _store.WorkflowGetTree(currentPipeline)
+	if err != nil {
+		_ = c.AbortWithError(http.StatusInternalServerError, err)
+		return
+	}
+	if !model.IsThereRunningStage(currentPipeline.Workflows) &&
+		(currentPipeline.Status == model.StatusRunning || currentPipeline.Status == model.StatusPending) {
+		currentPipeline, err = pipeline.UpdateStatusToDone(_store, *currentPipeline, pipeline.PipelineStatus(currentPipeline.Workflows), time.Now().Unix())
+		if err != nil {
+			_ = c.AbortWithError(http.StatusInternalServerError, err)
+			return
+		}
+		currentPipeline.Workflows, err = _store.WorkflowGetTree(currentPipeline)
+		if err != nil {
+			_ = c.AbortWithError(http.StatusInternalServerError, err)
+			return
+		}
+	}
+	unlock()
+	locked = false
+	if err := server.Config.Services.Scheduler.PublishPipelineEvent(c, repo, currentPipeline); err != nil {
+		log.Error().Err(err).Msg("could not publish partial workflow cancellation")
+	}
+	reportUnlock := pipeline.LockReport(currentPipeline.ID)
+	defer reportUnlock()
+	reportPipeline, err := _store.GetPipeline(currentPipeline.ID)
+	if err != nil {
+		log.Error().Err(err).Msg("could not load pipeline for partial workflow cancellation status")
+		c.JSON(http.StatusOK, currentPipeline.ToAPIModel())
+		return
+	}
+	reportPipeline.Workflows, err = _store.WorkflowGetTree(reportPipeline)
+	if err != nil {
+		log.Error().Err(err).Msg("could not load workflows for partial workflow cancellation status")
+		c.JSON(http.StatusOK, currentPipeline.ToAPIModel())
+		return
+	}
+	user, err := _store.GetUser(repo.UserID)
+	if err != nil {
+		log.Error().Err(err).Msg("could not load user for partial workflow cancellation status")
+	} else if f, forgeErr := server.Config.Services.Manager.ForgeFromRepo(repo); forgeErr != nil {
+		log.Error().Err(forgeErr).Msg("could not load forge for partial workflow cancellation status")
+	} else {
+		forge.Refresh(c, f, _store, user)
+		pipeline.UpdatePipelineStatus(c, f, _store, reportPipeline, repo, user)
+	}
+	c.JSON(http.StatusOK, currentPipeline.ToAPIModel())
+}
+
+// CancelPipeline cancels a pipeline.
 //
 //	@Summary	Cancel a pipeline
 //	@Router		/repos/{repo_id}/pipelines/{pipeline_number}/cancel [post]

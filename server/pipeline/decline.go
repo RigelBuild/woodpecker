@@ -29,7 +29,7 @@ import (
 
 // Decline updates the status to declined for blocked pipelines.
 func Decline(ctx context.Context, store store.Store, pipeline *model.Pipeline, user *model.User, repo *model.Repo) (*model.Pipeline, error) {
-	unlock := pipelineLocks.lock(pipeline.ID)
+	unlock := LockPipeline(pipeline.ID)
 	defer unlock()
 
 	forge, err := server.Config.Services.Manager.ForgeFromRepo(repo)

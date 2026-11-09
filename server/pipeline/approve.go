@@ -41,7 +41,7 @@ func Approve(
 	approval *Approval,
 ) (*model.Pipeline, error) {
 	// Held through enqueue so a cancel either precedes the claim or sees the queued run.
-	unlock := pipelineLocks.lock(currentPipeline.ID)
+	unlock := LockPipeline(currentPipeline.ID)
 	defer unlock()
 
 	if currentPipeline.Status != model.StatusBlocked {

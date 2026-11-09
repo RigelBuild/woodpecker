@@ -19,9 +19,21 @@ import (
 	"sync/atomic"
 )
 
-// pipelineLocks serializes Approve, Cancel and Decline per pipeline.
+// pipelineLocks serializes workflow and pipeline mutations per pipeline.
 // Process-local: serializes within one replica; multi-replica deployments are documented as not covered.
 var pipelineLocks = keyedMutex{entries: map[int64]*keyedEntry{}}
+
+// LockPipeline serializes work that can change the workflow tree for one pipeline.
+func LockPipeline(pipelineID int64) func() {
+	return pipelineLocks.lock(pipelineID)
+}
+
+var reportLocks = keyedMutex{entries: map[int64]*keyedEntry{}}
+
+// LockReport serializes forge reports without blocking pipeline mutations.
+func LockReport(pipelineID int64) func() {
+	return reportLocks.lock(pipelineID)
+}
 
 // lockWaitHook, when set, runs when a caller finds a pipeline lock held and is
 // about to wait, so tests can order a concurrent Cancel without sleeping.

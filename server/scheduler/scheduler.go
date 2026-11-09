@@ -66,6 +66,8 @@ type Scheduler interface {
 	// queue and signals the cancellation to any agents waiting on them. This is
 	// the entry point for the scheduler to later own the full cancel cleanup.
 	CancelWorkflows(c context.Context, workflowIDs []string) error
+	// CancelPending commits a pending-set cancellation under the queue mutex.
+	CancelPending(ctx context.Context, ids []string, commit func() error) error
 }
 
 func NewScheduler(ctx context.Context, store store.Store, q queue.Queue, ps pubsub.PubSub) Scheduler {

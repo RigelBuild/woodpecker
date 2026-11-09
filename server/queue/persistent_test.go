@@ -15,7 +15,9 @@
 package queue
 
 import (
+	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -442,6 +444,92 @@ func TestWithTaskStoreRestoresPausedStateAfterRestart(t *testing.T) {
 	assert.True(t, restored.Info(ctx2).Paused)
 }
 
+func TestPersistentQueueCancelConflictPreservesStore(t *testing.T) {
+	for _, mode := range []string{"assignment before init", "reserved", "expired", "missing", "transaction failure"} {
+		t.Run(mode, func(t *testing.T) {
+			s := newQueueSQLiteStore(t)
+			ctx, _, q := setupTestQueue(t)
+			workflows := []*model.Workflow{
+				{PipelineID: 1, PID: 1, Name: "pending", State: model.StatusPending},
+				{PipelineID: 1, PID: 2, Name: "other", State: model.StatusPending},
+			}
+			require.NoError(t, s.WorkflowsCreate(workflows))
+			ids := []string{strconv.FormatInt(workflows[0].ID, 10), strconv.FormatInt(workflows[1].ID, 10)}
+			pq := WithTaskStore(ctx, q, s)
+			require.NoError(t, pq.PushAtOnce(ctx, []*model.Task{{ID: ids[0]}, {ID: ids[1]}}))
+			if mode == "assignment before init" || mode == "reserved" || mode == "expired" {
+				task, err := pq.Poll(ctx, 7, func(task *model.Task) (bool, int) { return task.ID == ids[1], 1 })
+				require.NoError(t, err)
+				require.Equal(t, ids[1], task.ID)
+				if mode == "reserved" {
+					require.NoError(t, pq.Reserve(ctx, ids[1], 7, false))
+				}
+				if mode == "expired" {
+					q.Lock()
+					q.running[ids[1]].expired = true
+					q.Unlock()
+				}
+			}
+			if mode == "missing" {
+				ids[1] = "999999"
+			}
+			beforeQueue := pq.Info(ctx)
+			beforeTasks, err := s.TaskList()
+			require.NoError(t, err)
+			injected := errors.New("transaction failure")
+			err = pq.CancelPending(ctx, ids, func() error {
+				if mode == "transaction failure" {
+					return injected
+				}
+				return s.WorkflowSupersedePending(1, []int64{workflows[0].ID, workflows[1].ID}, 2)
+			})
+			if mode == "transaction failure" {
+				require.ErrorIs(t, err, injected)
+			} else {
+				require.ErrorIs(t, err, ErrPendingConflict)
+			}
+			assert.Equal(t, beforeQueue, pq.Info(ctx))
+			afterTasks, err := s.TaskList()
+			require.NoError(t, err)
+			assert.Equal(t, beforeTasks, afterTasks)
+			for _, wf := range workflows {
+				got, err := s.WorkflowLoad(wf.ID)
+				require.NoError(t, err)
+				assert.Equal(t, model.StatusPending, got.State)
+				assert.Nil(t, got.SupersededBy)
+			}
+		})
+	}
+}
+
+func TestPersistentQueueCancelPendingSurvivesReload(t *testing.T) {
+	s := newQueueSQLiteStore(t)
+	ctx, _, q := setupTestQueue(t)
+	workflows := []*model.Workflow{
+		{PipelineID: 1, PID: 1, Name: "producer", State: model.StatusPending},
+		{PipelineID: 1, PID: 2, Name: "consumer", State: model.StatusPending, DependsOn: []string{"producer"}},
+	}
+	require.NoError(t, s.WorkflowsCreate(workflows))
+	ids := []string{strconv.FormatInt(workflows[0].ID, 10), strconv.FormatInt(workflows[1].ID, 10)}
+	pq := WithTaskStore(ctx, q, s)
+	require.NoError(t, pq.PushAtOnce(ctx, []*model.Task{{ID: ids[0]}, {ID: ids[1], Dependencies: []string{ids[0]}}}))
+	require.NoError(t, pq.CancelPending(ctx, ids, func() error {
+		return s.WorkflowSupersedePending(1, []int64{workflows[0].ID, workflows[1].ID}, 2)
+	}))
+	stored, err := s.TaskList()
+	require.NoError(t, err)
+	assert.Empty(t, stored)
+	ctx2, _, q2 := setupTestQueue(t)
+	reloaded := WithTaskStore(ctx2, q2, s)
+	for _, candidate := range []Queue{pq, reloaded} {
+		pollCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		task, err := candidate.Poll(pollCtx, 1, filterFnTrue)
+		cancel()
+		assert.Nil(t, task)
+		assert.Error(t, err)
+	}
+}
+
 func TestPersistentQueueEnqueueAndReloadTimes(t *testing.T) {
 	s := newQueueSQLiteStore(t)
 	ctx, cancel, q := setupTestQueue(t)
@@ -552,7 +640,7 @@ func newQueueSQLiteStore(t *testing.T) store.Store {
 	s, err := datastore.NewEngine(&store.Opts{
 		Driver: "sqlite3",
 		Config: ":memory:",
-		XORM: store.XORM{MaxOpenConns: 1, MaxIdleConns: 1},
+		XORM:   store.XORM{MaxOpenConns: 1, MaxIdleConns: 1},
 	})
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(t.Context(), true))

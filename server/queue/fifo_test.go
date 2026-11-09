@@ -63,6 +63,72 @@ func receiveExpiredTask(t *testing.T, q *fifo) ExpiredTask {
 	}
 }
 
+func TestFifoCancelPendingCommitsBeforeRemoval(t *testing.T) {
+	ctx, _, q := setupTestQueue(t)
+	selected := []*model.Task{{ID: "first"}, {ID: "second", Dependencies: []string{"first"}}}
+	require.NoError(t, q.PushAtOnce(ctx, selected))
+	waitForProcess()
+
+	commitCalled := false
+	err := q.CancelPending(ctx, []string{"first", "second"}, func() error {
+		commitCalled = true
+		info := q.pending.Len() + q.waitingOnDeps.Len()
+		assert.Equal(t, 2, info)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, commitCalled)
+	assert.Empty(t, q.Info(ctx).Pending)
+	assert.Empty(t, q.Info(ctx).WaitingOnDeps)
+
+	err = q.CancelPending(ctx, []string{"missing"}, func() error {
+		t.Fatal("commit must not run when any task is missing")
+		return nil
+	})
+	assert.ErrorIs(t, err, ErrPendingConflict)
+}
+
+func TestFifoCancelPendingConflictsPreserveQueue(t *testing.T) {
+	for _, state := range []string{"assigned", "reserved", "expired", "missing", "commit failure"} {
+		t.Run(state, func(t *testing.T) {
+			ctx, _, q := setupTestQueue(t)
+			require.NoError(t, q.PushAtOnce(ctx, []*model.Task{{ID: "pending"}, {ID: "other"}}))
+			ids := []string{"pending", "other"}
+			switch state {
+			case "assigned", "reserved", "expired":
+				task, err := q.Poll(ctx, 7, func(task *model.Task) (bool, int) { return task.ID == "other", 1 })
+				require.NoError(t, err)
+				require.Equal(t, "other", task.ID)
+				if state == "reserved" {
+					require.NoError(t, q.Reserve(ctx, "other", 7, false))
+				}
+				if state == "expired" {
+					q.Lock()
+					q.running["other"].expired = true
+					q.Unlock()
+				}
+			case "missing":
+				ids[1] = "missing"
+			}
+			before := q.Info(ctx)
+			injected := errors.New("injected transaction failure")
+			called := false
+			err := q.CancelPending(ctx, ids, func() error {
+				called = true
+				return injected
+			})
+			if state == "commit failure" {
+				require.ErrorIs(t, err, injected)
+				assert.True(t, called)
+			} else {
+				require.ErrorIs(t, err, ErrPendingConflict)
+				assert.False(t, called)
+			}
+			assert.Equal(t, before, q.Info(ctx))
+		})
+	}
+}
+
 func TestFifoBasicOperations(t *testing.T) {
 	ctx, cancel, q := setupTestQueue(t)
 	defer cancel(nil)

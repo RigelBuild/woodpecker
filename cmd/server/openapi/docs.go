@@ -3453,6 +3453,64 @@ const docTemplate = `{
                 }
             }
         },
+        "/repos/{repo_id}/pipelines/{pipeline_number}/workflows/cancel": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Pipelines"
+                ],
+                "summary": "Cancel pending workflows in a pipeline",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "Bearer \u003cpersonal access token\u003e",
+                        "description": "Insert your personal access token",
+                        "name": "Authorization",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "the repository id",
+                        "name": "repo_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "the number of the pipeline",
+                        "name": "pipeline_number",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "workflows and successor pipeline number",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.CancelPendingWorkflowsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/Pipeline"
+                        }
+                    },
+                    "409": {
+                        "description": "Pending assignment or dependent closure changed",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/repos/{repo_id}/pull_requests": {
             "get": {
                 "produces": [
@@ -5840,6 +5898,15 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "outputs": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "outputs_state": {
+                    "type": "string"
+                },
                 "pid": {
                     "type": "integer"
                 },
@@ -6013,6 +6080,20 @@ const docTemplate = `{
                 "EventCron",
                 "EventManual"
             ]
+        },
+        "api.CancelPendingWorkflowsRequest": {
+            "type": "object",
+            "properties": {
+                "superseded_by": {
+                    "type": "integer"
+                },
+                "workflow_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                }
+            }
         },
         "errors.PipelineError": {
             "type": "object",
@@ -6566,6 +6647,9 @@ const docTemplate = `{
                 },
                 "state": {
                     "$ref": "#/definitions/StatusValue"
+                },
+                "superseded_by": {
+                    "type": "integer"
                 }
             }
         }

@@ -16,13 +16,19 @@
 package datastore
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"xorm.io/xorm"
+	"xorm.io/xorm/contexts"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore/migration"
 )
 
@@ -208,6 +214,88 @@ func TestWorkflowGetTree(t *testing.T) {
 	assert.Equal(t, 3, workflowGet.Children[1].PID)
 	assert.Equal(t, []string{"test"}, workflowGet.Children[1].DependsOn)
 }
+
+func TestWorkflowSupersedePendingValidatesClosureAndRollsBack(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow), new(model.Task))
+	defer closer()
+	workflows := []*model.Workflow{
+		{PipelineID: 1, PID: 1, Name: "producer", State: model.StatusPending, Children: []*model.Step{{PipelineID: 1, PID: 2, PPID: 1, Name: "producer-step", State: model.StatusPending}}},
+		{PipelineID: 1, PID: 2, Name: "consumer", State: model.StatusPending, DependsOn: []string{"producer"}, Children: []*model.Step{{PipelineID: 1, PID: 3, PPID: 2, Name: "consumer-step", State: model.StatusPending}}},
+		{PipelineID: 1, PID: 3, Name: "unrelated", State: model.StatusRunning},
+	}
+	require.NoError(t, s.WorkflowsCreate(workflows))
+	require.NoError(t, s.TaskInsertBatch([]*model.Task{{ID: "1"}, {ID: "2"}}))
+	assert.ErrorIs(t, s.WorkflowSupersedePending(1, []int64{workflows[0].ID}, 99), store.ErrPendingConflict)
+	require.NoError(t, s.WorkflowSupersedePending(1, []int64{workflows[0].ID, workflows[1].ID}, 99))
+	for _, id := range []int64{workflows[0].ID, workflows[1].ID} {
+		got, err := s.WorkflowLoad(id)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusSkipped, got.State)
+		require.NotNil(t, got.SupersededBy)
+		assert.Equal(t, int64(99), *got.SupersededBy)
+	}
+	steps, err := s.StepList(1)
+	require.NoError(t, err)
+	for _, step := range steps {
+		assert.Equal(t, model.StatusCanceled, step.State)
+	}
+	tasks, err := s.TaskList()
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+
+	failed := &model.Workflow{
+		PipelineID: 2, PID: 1, Name: "failed", State: model.StatusPending,
+		Children: []*model.Step{{PipelineID: 2, PID: 1, PPID: 1, Name: "step", State: model.StatusPending}},
+	}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{failed}))
+	require.NoError(t, s.TaskInsert(&model.Task{ID: fmt.Sprint(failed.ID)}))
+	hook := &failWorkflowUpdateHook{}
+	s.engine.AddHook(hook)
+	err = s.WorkflowSupersedePending(2, []int64{failed.ID}, 100)
+	assert.Error(t, err)
+	hook.disabled = true
+	got, err := s.WorkflowLoad(failed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, got.State)
+	steps, err = s.StepList(2)
+	require.NoError(t, err)
+	require.Len(t, steps, 1)
+	assert.Equal(t, model.StatusPending, steps[0].State)
+	tasks, err = s.TaskList()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, fmt.Sprint(failed.ID), tasks[0].ID)
+}
+
+func TestWorkflowSupersedePendingAllowsLeaf(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow), new(model.Task))
+	defer closer()
+	workflows := []*model.Workflow{
+		{PipelineID: 1, PID: 1, Name: "root", State: model.StatusPending},
+		{PipelineID: 1, PID: 2, Name: "leaf", State: model.StatusPending, DependsOn: []string{"root"}},
+	}
+	require.NoError(t, s.WorkflowsCreate(workflows))
+	require.NoError(t, s.WorkflowSupersedePending(1, []int64{workflows[1].ID}, 2))
+	root, err := s.WorkflowLoad(workflows[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, root.State)
+	assert.Nil(t, root.SupersededBy)
+	leaf, err := s.WorkflowLoad(workflows[1].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSkipped, leaf.State)
+	assert.Equal(t, int64(2), *leaf.SupersededBy)
+}
+
+type failWorkflowUpdateHook struct{ disabled bool }
+
+func (hook *failWorkflowUpdateHook) BeforeProcess(h *contexts.ContextHook) (context.Context, error) {
+	if !hook.disabled && strings.Contains(strings.ToLower(h.SQL), "update") && strings.Contains(strings.ToLower(h.SQL), "workflows") {
+		return h.Ctx, errors.New("injected workflow update failure")
+	}
+	return h.Ctx, nil
+}
+
+func (*failWorkflowUpdateHook) AfterProcess(*contexts.ContextHook) error { return nil }
 
 func TestWorkflowUpdate(t *testing.T) {
 	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))

@@ -39,6 +39,8 @@ var (
 
 	// ErrWorkerKicked worker of an agent got kicked.
 	ErrWorkerKicked = errors.New("worker was kicked")
+	// ErrPendingConflict means one or more tasks are no longer safely pending.
+	ErrPendingConflict = errors.New("queue: pending task conflict")
 )
 
 type ExpiredTask struct {
@@ -141,6 +143,8 @@ type Queue interface {
 	// ErrorAtOnce signals multiple tasks are done and complete with an error.
 	// If still pending they will just get removed from the queue.
 	ErrorAtOnce(c context.Context, ids []string, err error) error
+	// CancelPending commits and removes a complete pending set while holding the queue mutex.
+	CancelPending(ctx context.Context, ids []string, commit func() error) error
 
 	// Wait waits until the task is complete.
 	// Also signals via error ErrCancel if workflow got canceled.
