@@ -729,6 +729,54 @@ func TestWaitStepReturnsOnAlreadyTerminatedPod(t *testing.T) {
 	assert.Equal(t, 1, state.ExitCode)
 }
 
+func TestWaitStepOutputs(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		message   string
+		exitCode  int32
+		wantState string
+	}{
+		{name: "success", message: "key=value\n", wantState: "reported"},
+		{name: "failure", message: "key=value\n", exitCode: 1, wantState: "reported"},
+		{name: "empty", wantState: "reported"},
+		{name: "below cap", message: "a=" + strings.Repeat("x", 1000) + "\nb=" + strings.Repeat("x", 1000) + "\nc=" + strings.Repeat("x", 999), wantState: "reported"},
+		{name: "at cap", message: "a=" + strings.Repeat("x", 1000) + "\nb=" + strings.Repeat("x", 1000) + "\nc=" + strings.Repeat("x", 1000), wantState: "invalid"},
+		{name: "above cap", message: "a=" + strings.Repeat("x", 1000) + "\nb=" + strings.Repeat("x", 1000) + "\nc=" + strings.Repeat("x", 1001), wantState: "invalid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientset()
+			engine := makeEngine(client)
+			step := makeStep("outputs-01")
+			name, err := stepToPodName(step)
+			require.NoError(t, err)
+			_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), &kube_core_v1.Pod{
+				Name: name, Namespace: "test-ns", Status: kube_core_v1.PodStatus{
+					Phase:                      kube_core_v1.PodFailed,
+					InitContainerStatuses:      make([]kube_core_v1.ContainerStatus, 1),
+					EphemeralContainerStatuses: make([]kube_core_v1.ContainerStatus, 1),
+					ContainerStatuses: []kube_core_v1.ContainerStatus{
+						{State: kube_core_v1.ContainerState{Terminated: &kube_core_v1.ContainerStateTerminated{ExitCode: tt.exitCode, Message: tt.message}}},
+						{},
+					},
+				},
+			}, kube_meta_v1.CreateOptions{})
+			require.NoError(t, err)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			state, err := engine.WaitStep(ctx, step, "task")
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantState, state.OutputsState)
+			assert.Equal(t, int(tt.exitCode), state.ExitCode)
+			if tt.message == "key=value\n" {
+				assert.Equal(t, map[string]string{"key": "value"}, state.Outputs)
+			}
+			if tt.wantState == "invalid" {
+				assert.Nil(t, state.Outputs)
+			}
+		})
+	}
+}
+
 func TestWaitStepDetectsPodLoss(t *testing.T) {
 	tests := []struct {
 		name                   string

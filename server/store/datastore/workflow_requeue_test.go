@@ -47,6 +47,9 @@ func TestWorkflowResetForRequeue(t *testing.T) {
 		s, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
 		defer closer()
 		wf := seedRequeueWorkflow(t, s, model.StatusRunning, 7)
+		wf.Children[0].Outputs = map[string]string{"key": "value"}
+		wf.Children[0].OutputsState = "reported"
+		require.NoError(t, s.StepUpdate(wf.Children[0]))
 
 		ok, err := s.WorkflowResetForRequeue(wf, wf.Children, 7)
 		require.NoError(t, err)
@@ -67,6 +70,8 @@ func TestWorkflowResetForRequeue(t *testing.T) {
 			assert.Zero(t, step.Finished, step.Name)
 			assert.Zero(t, step.ExitCode, step.Name)
 			assert.Empty(t, step.Error, step.Name)
+			assert.Nil(t, step.Outputs)
+			assert.Empty(t, step.OutputsState)
 		}
 		assert.Equal(t, 2, wf.Attempts)
 		assert.Equal(t, model.StatusPending, wf.Children[1].State)

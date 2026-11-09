@@ -16,12 +16,15 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -29,7 +32,7 @@ import (
 )
 
 func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancelPipelineFromStep bool, _ error) {
-	log.Debug().Str("StepUUID", step.UUID).Msgf("Update step %#v state %#v", step, state)
+	log.Debug().Str("StepUUID", step.UUID).Msg("calculate step status")
 
 	switch step.State {
 	case model.StatusPending:
@@ -39,6 +42,9 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 			step.Finished = state.Finished
 			step.ExitCode = state.ExitCode
 			step.Error = state.Error
+			if state.Exited || state.Error != "" {
+				storeStepOutputs(&step, state)
+			}
 			return &step, false, nil
 		}
 
@@ -106,12 +112,55 @@ func CalcStepStatus(step model.Step, state rpc.StepState) (_ *model.Step, cancel
 		}
 	}
 
+	if state.Exited || state.Error != "" {
+		storeStepOutputs(&step, state)
+	}
+
 	return &step, cancelPipelineFromStep, nil
+}
+
+func storeStepOutputs(step *model.Step, state rpc.StepState) {
+	if state.OutputsState == "" && state.Outputs == nil {
+		return
+	}
+	step.Outputs = nil
+	step.OutputsState = "invalid"
+	if state.OutputsState == "invalid" {
+		return
+	}
+	if state.OutputsState != "reported" {
+		log.Warn().Str("step_uuid", step.UUID).Msg("invalid step output state")
+		return
+	}
+	var data bytes.Buffer
+	for key, value := range state.Outputs {
+		separator := 0
+		if data.Len() > 0 {
+			separator = 1
+		}
+		if data.Len()+separator+len(key)+len(value)+1 > types.MaxStepOutputBytes {
+			log.Warn().Str("step_uuid", step.UUID).Msg("invalid step outputs")
+			return
+		}
+		if separator != 0 {
+			data.WriteByte('\n')
+		}
+		data.WriteString(key)
+		data.WriteByte('=')
+		data.WriteString(value)
+	}
+	outputs, err := types.ParseStepOutputs(data.Bytes())
+	if err != nil || !maps.Equal(outputs, state.Outputs) {
+		log.Warn().Str("step_uuid", step.UUID).Msg("invalid step outputs")
+		return
+	}
+	step.Outputs = outputs
+	step.OutputsState = "reported"
 }
 
 // UpdateStepStatus updates step status based on agent reports via RPC.
 func UpdateStepStatus(ctx context.Context, store store.Store, step *model.Step, state rpc.StepState) error {
-	log.Debug().Str("StepUUID", step.UUID).Msgf("Update step %#v state %#v", *step, state)
+	log.Debug().Str("StepUUID", step.UUID).Msg("update step status")
 
 	updatedStep, shouldCancelPipelineFromStep, err := CalcStepStatus(*step, state)
 	if err != nil {

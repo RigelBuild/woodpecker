@@ -44,6 +44,21 @@ Please note that the environment section is not able to expand environment varia
        - go test
 ```
 
+## Step outputs
+
+Each step can append UTF-8 `key=value` lines to the file at `CI_STEP_OUTPUT`.
+For example, `echo 'result=ready' >> "$CI_STEP_OUTPUT"` reports `result` when the step ends.
+Keys match `^[a-z0-9][a-z0-9_.-]{0,63}$`; values are single lines of at most 1024 bytes.
+The last line for a repeated key wins. File backends accept at most 4000 bytes.
+
+Step JSON includes `outputs_state: reported` and `outputs` after a valid read, including an empty object for an empty file.
+Malformed or oversized input is `invalid` with no outputs. An absent state means no output was observed.
+Kubernetes uses a dedicated termination message and rejects messages at or above `min(4000, floor(12288 / N)) - 64` bytes, where N is the number of observed init, regular and ephemeral containers.
+
+Never put secrets in outputs. The agent masks known secrets before sending them, but Kubernetes pod status exposes the unmasked termination message to anyone who can read the pod.
+Secrets of 3 bytes or fewer are not masked.
+This fork adds optional RPC fields without changing its protocol version. An upstream contribution requires a version bump and does not support mixed agent and server versions.
+
 ## Built-in environment variables
 
 This is the reference list of all environment variables available to your pipeline containers. These are injected into your pipeline step and plugins containers, at runtime.
@@ -110,6 +125,7 @@ Most variables are available in both scopes. Variables scoped only to `runtime` 
 |                                    |                   | **Current workflow**                                                                                                                             |                                                                                                                                 |
 | `CI_WORKFLOW_NAME`                 | `config, runtime` | workflow name                                                                                                                                    | `release`                                                                                                                       |
 |                                    |                   | **Current step**                                                                                                                                 |                                                                                                                                 |
+| `CI_STEP_OUTPUT`                   | `runtime`         | path for step output lines                                                                                                                       | `/tmp/woodpecker-step-output`                                                                                                   |
 | `CI_STEP_NAME`                     | `runtime`         | step name                                                                                                                                        | `build package`                                                                                                                 |
 | `CI_STEP_TYPE`                     | `runtime`         | step type (`commands`, `plugin`, `service`, `clone` or `cache`)                                                                                  | `commands`                                                                                                                      |
 | `CI_STEP_NUMBER`                   | `runtime`         | step number                                                                                                                                      | `0`                                                                                                                             |

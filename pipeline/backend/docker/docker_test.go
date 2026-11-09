@@ -15,6 +15,8 @@
 package docker
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"io"
 	"iter"
@@ -22,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
@@ -61,6 +64,8 @@ type fakeClient struct {
 	pullBody   func() client.ImagePullResponse
 	createErrs []error // returned in sequence, one per ContainerCreate call
 	createN    int
+	copyErr    error
+	started    bool
 }
 
 func (f *fakeClient) ImagePull(_ context.Context, _ string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
@@ -78,7 +83,11 @@ func (f *fakeClient) ContainerCreate(_ context.Context, _ client.ContainerCreate
 	return client.ContainerCreateResult{}, err
 }
 
+func (f *fakeClient) CopyToContainer(context.Context, string, client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
+	return client.CopyToContainerResult{}, f.copyErr
+}
 func (f *fakeClient) ContainerStart(_ context.Context, _ string, _ client.ContainerStartOptions) (client.ContainerStartResult, error) {
+	f.started = true
 	return client.ContainerStartResult{}, nil
 }
 
@@ -89,6 +98,72 @@ func newTestStep() *backend_types.Step {
 		Image: "ghcr.io/x/y:pr-1",
 		Pull:  true,
 	}
+}
+
+type outputClient struct {
+	client.APIClient
+	data     string
+	typeflag byte
+}
+
+func (c *outputClient) ContainerWait(context.Context, string, client.ContainerWaitOptions) client.ContainerWaitResult {
+	result := make(chan container.WaitResponse, 1)
+	result <- container.WaitResponse{}
+	return client.ContainerWaitResult{Result: result}
+}
+
+func (c *outputClient) ContainerInspect(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+	return client.ContainerInspectResult{Container: container.InspectResponse{State: &container.State{}}}, nil
+}
+
+func (c *outputClient) CopyFromContainer(_ context.Context, _ string, options client.CopyFromContainerOptions) (client.CopyFromContainerResult, error) {
+	if options.SourcePath != "/tmp/woodpecker-step-output" {
+		return client.CopyFromContainerResult{}, assert.AnError
+	}
+	var buf bytes.Buffer
+	w := tar.NewWriter(&buf)
+	if err := w.WriteHeader(&tar.Header{Name: "woodpecker-step-output", Mode: 0o600, Size: int64(len(c.data)), Typeflag: c.typeflag}); err != nil {
+		return client.CopyFromContainerResult{}, err
+	}
+	if _, err := w.Write([]byte(c.data)); err != nil {
+		return client.CopyFromContainerResult{}, err
+	}
+	if err := w.Close(); err != nil {
+		return client.CopyFromContainerResult{}, err
+	}
+	return client.CopyFromContainerResult{Content: io.NopCloser(&buf)}, nil
+}
+
+func TestDockerStepOutputs(t *testing.T) {
+	for _, tt := range []struct {
+		name, data, state string
+		outputs           map[string]string
+		typeflag          byte
+	}{
+		{name: "valid", data: "key=value\n", state: "reported", outputs: map[string]string{"key": "value"}},
+		{name: "empty", state: "reported", outputs: map[string]string{}},
+		{name: "malformed", data: "bad", state: "invalid"},
+		{name: "oversize", data: strings.Repeat("x", 4001), state: "invalid"},
+		{name: "directory", typeflag: tar.TypeDir, state: "invalid"},
+		{name: "symlink", typeflag: tar.TypeSymlink, state: "invalid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			engine := &docker{client: &outputClient{data: tt.data, typeflag: tt.typeflag}}
+			state, err := engine.WaitStep(t.Context(), newTestStep(), "task")
+			require.NoError(t, err)
+			assert.Equal(t, tt.state, state.OutputsState)
+			assert.Equal(t, tt.outputs, state.Outputs)
+		})
+	}
+}
+
+func TestStartStepOutputSeedFailure(t *testing.T) {
+	fake := &fakeClient{copyErr: assert.AnError}
+	step := newTestStep()
+	step.Pull = false
+	err := (&docker{client: fake}).StartStep(t.Context(), step, "task")
+	require.NoError(t, err)
+	assert.True(t, fake.started)
 }
 
 // TestStartStep_SurfacesPullStreamError defends the regression: when the initial

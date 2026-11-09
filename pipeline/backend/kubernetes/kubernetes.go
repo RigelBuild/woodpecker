@@ -638,7 +638,20 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 		}
 	}
 	cs := pod.Status.ContainerStatuses[0]
-	return &types.State{ExitCode: int(cs.State.Terminated.ExitCode), Exited: true, OOMKilled: false}, nil
+	state := &types.State{ExitCode: int(cs.State.Terminated.ExitCode), Exited: true, OOMKilled: false}
+	count := len(pod.Status.InitContainerStatuses) + len(pod.Status.ContainerStatuses) + len(pod.Status.EphemeralContainerStatuses)
+	cap := min(types.MaxStepOutputBytes, 12288/count) - 64
+	message := []byte(cs.State.Terminated.Message)
+	if cap <= 0 || len(message) >= cap {
+		state.OutputsState = "invalid"
+	} else {
+		state.Outputs, err = types.ParseStepOutputs(message)
+		state.OutputsState = "reported"
+		if err != nil {
+			state.OutputsState = "invalid"
+		}
+	}
+	return state, nil
 }
 
 // TailStep tails the pipeline step logs.

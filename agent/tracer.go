@@ -15,13 +15,16 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
 
 	"github.com/rs/zerolog"
 
+	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/shared"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/state"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/tracing"
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
@@ -50,6 +53,36 @@ func (r *Runner) createTracer(ctxMeta context.Context, logger zerolog.Logger, wo
 		}
 		if state.CurrStepState.Exited {
 			stepState.Finished = time.Now().Unix()
+		}
+		if state.CurrStepState.OutputsState != "" && (state.CurrStepState.Exited || state.CurrStepState.Error != nil) {
+			stepState.OutputsState = state.CurrStepState.OutputsState
+			if stepState.OutputsState == "reported" {
+				secrets := make([]string, 0, len(workflow.Config.Secrets))
+				for _, secret := range workflow.Config.Secrets {
+					secrets = append(secrets, secret.Value)
+				}
+				stepState.Outputs = make(map[string]string, len(state.CurrStepState.Outputs))
+				size := 0
+				for key, value := range state.CurrStepState.Outputs {
+					var masked bytes.Buffer
+					writer := shared.NewSecretsReplaceWriter(&masked, secrets)
+					if _, err := writer.Write([]byte(value)); err != nil {
+						return err
+					}
+					if err := writer.Close(); err != nil {
+						return err
+					}
+					stepState.Outputs[key] = masked.String()
+					size += len(key) + 1 + len(stepState.Outputs[key])
+					if size > backend_types.MaxStepOutputBytes {
+						stepLogger.Warn().Msg("masked step outputs exceed size limit")
+						stepState.OutputsState = "invalid"
+						stepState.Outputs = nil
+						break
+					}
+					size++
+				}
+			}
 		}
 
 		stepLogger.Debug().Msg("update step status")

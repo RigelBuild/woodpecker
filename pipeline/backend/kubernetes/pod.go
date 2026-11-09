@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -261,11 +262,13 @@ func podSpec(step *types.Step, config *config, options BackendOptions, nsp nativ
 func podContainer(step *types.Step, podName, goos string, options BackendOptions, nsp nativeSecretsProcessor) (kube_core_v1.Container, error) {
 	var err error
 	container := kube_core_v1.Container{
-		Name:            podName,
-		Image:           step.Image,
-		WorkingDir:      step.WorkingDir,
-		Ports:           containerPorts(step.Ports),
-		SecurityContext: containerSecurityContext(options.SecurityContext, step.Privileged),
+		Name:                     podName,
+		Image:                    step.Image,
+		WorkingDir:               step.WorkingDir,
+		Ports:                    containerPorts(step.Ports),
+		SecurityContext:          containerSecurityContext(options.SecurityContext, step.Privileged),
+		TerminationMessagePath:   "/run/woodpecker/step-output",
+		TerminationMessagePolicy: kube_core_v1.TerminationMessageReadFile,
 	}
 
 	if step.Pull {
@@ -294,6 +297,8 @@ func podContainer(step *types.Step, podName, goos string, options BackendOptions
 
 	// filter environment variables to non-secrets and secrets, refer secrets from step secrets
 	envs, secs := filterSecrets(step.Environment, stepSecretData(step))
+	delete(envs, "CI_STEP_OUTPUT")
+	secs = slices.DeleteFunc(secs, func(key string) bool { return key == "CI_STEP_OUTPUT" })
 	envsFromSecrets := mapToEnvVarsFromStepSecrets(secs, stepSecret)
 	container.Env = append(mapToEnvVars(envs), envsFromSecrets...)
 
@@ -309,6 +314,8 @@ func podContainer(step *types.Step, podName, goos string, options BackendOptions
 
 	container.EnvFrom = append(container.EnvFrom, nsp.envFromSources...)
 	container.Env = append(container.Env, nsp.envVars...)
+	container.Env = slices.DeleteFunc(container.Env, func(env kube_core_v1.EnvVar) bool { return env.Name == "CI_STEP_OUTPUT" })
+	container.Env = append(container.Env, kube_core_v1.EnvVar{Name: "CI_STEP_OUTPUT", Value: "/run/woodpecker/step-output"})
 	container.VolumeMounts = append(container.VolumeMounts, nsp.mounts...)
 
 	return container, nil

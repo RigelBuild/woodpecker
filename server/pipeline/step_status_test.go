@@ -15,6 +15,7 @@
 package pipeline
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,6 +32,36 @@ func mockStoreStep(t *testing.T) store.Store {
 	s := mocks.NewMockStore(t)
 	s.On("StepUpdate", mock.Anything).Return(nil)
 	return s
+}
+
+func TestStepOutputsValidation(t *testing.T) {
+	tests := []struct {
+		name         string
+		state        rpc.StepState
+		outputs      map[string]string
+		outputsState string
+	}{
+		{name: "absent", state: rpc.StepState{Exited: true}},
+		{name: "empty", state: rpc.StepState{Exited: true, OutputsState: "reported"}, outputs: map[string]string{}, outputsState: "reported"},
+		{name: "valid", state: rpc.StepState{Exited: true, OutputsState: "reported", Outputs: map[string]string{"deploy.state": "completed"}}, outputs: map[string]string{"deploy.state": "completed"}, outputsState: "reported"},
+		{name: "invalid key", state: rpc.StepState{Exited: true, OutputsState: "reported", Outputs: map[string]string{"Bad": "value"}}, outputsState: "invalid"},
+		{name: "injected line", state: rpc.StepState{Exited: true, OutputsState: "reported", Outputs: map[string]string{"a": "x\nb=y"}}, outputsState: "invalid"},
+		{name: "long value", state: rpc.StepState{Exited: true, OutputsState: "reported", Outputs: map[string]string{"a": strings.Repeat("x", 1025)}}, outputsState: "invalid"},
+		{name: "oversize", state: rpc.StepState{Exited: true, OutputsState: "reported", Outputs: map[string]string{"a": strings.Repeat("x", 1000), "b": strings.Repeat("x", 1000), "c": strings.Repeat("x", 1000), "d": strings.Repeat("x", 1000)}}, outputsState: "invalid"},
+		{name: "invalid utf8", state: rpc.StepState{Exited: true, OutputsState: "reported", Outputs: map[string]string{"a": "\xff"}}, outputsState: "invalid"},
+		{name: "nonterminal", state: rpc.StepState{OutputsState: "reported", Outputs: map[string]string{"a": "b"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step, _, err := CalcStepStatus(model.Step{State: model.StatusRunning}, tt.state)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.outputs, step.Outputs)
+			assert.Equal(t, tt.outputsState, step.OutputsState)
+			if tt.state.Exited {
+				assert.Equal(t, model.StatusSuccess, step.State)
+			}
+		})
+	}
 }
 
 func TestUpdateStepStatus(t *testing.T) {

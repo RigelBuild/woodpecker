@@ -29,6 +29,26 @@ import (
 
 const taskUUID = "11301"
 
+func podWithoutStepOutput(t *testing.T, pod *kube_core_v1.Pod) *kube_core_v1.Pod {
+	t.Helper()
+	pod = pod.DeepCopy()
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		assert.Equal(t, "/run/woodpecker/step-output", container.TerminationMessagePath)
+		assert.Equal(t, kube_core_v1.TerminationMessageReadFile, container.TerminationMessagePolicy)
+		container.TerminationMessagePath = ""
+		container.TerminationMessagePolicy = ""
+		for j, env := range container.Env {
+			if env.Name == "CI_STEP_OUTPUT" {
+				assert.Equal(t, "/run/woodpecker/step-output", env.Value)
+				container.Env = append(container.Env[:j], container.Env[j+1:]...)
+				break
+			}
+		}
+	}
+	return pod
+}
+
 func TestPodName(t *testing.T) {
 	name, err := podName(&types.Step{UUID: "01he8bebctabr3kgk0qj36d2me-0"})
 	assert.NoError(t, err)
@@ -357,7 +377,7 @@ func TestTinyPod(t *testing.T) {
 	}, "wp-01he8bebctabr3kgk0qj36d2me-0", "linux/amd64", BackendOptions{}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -632,7 +652,7 @@ func TestFullPod(t *testing.T) {
 		}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -875,7 +895,7 @@ func TestScratchPod(t *testing.T) {
 	}, "wp-01he8bebctabr3kgk0qj36d2me-0", "linux/amd64", BackendOptions{}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -1001,7 +1021,7 @@ func TestSecrets(t *testing.T) {
 	}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -1066,7 +1086,7 @@ func TestPodTolerations(t *testing.T) {
 	}, "wp-01he8bebctabr3kgk0qj36d2me-0", "linux/amd64", BackendOptions{}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -1156,7 +1176,7 @@ func TestPodTolerationsAllowFromStep(t *testing.T) {
 	}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -1170,7 +1190,7 @@ func TestPodTolerationsAllowFromStep(t *testing.T) {
 	}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err = json.Marshal(pod)
+	podJSON, err = json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja = jsonassert.New(t)
@@ -1329,7 +1349,7 @@ func TestPodAffinity(t *testing.T) {
 	}, "wp-01he8bebctabr3kgk0qj36d2me-0", "linux/amd64", BackendOptions{}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -1444,7 +1464,7 @@ func TestPodAffinityAllowFromStep(t *testing.T) {
 	}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)
@@ -1459,7 +1479,7 @@ func TestPodAffinityAllowFromStep(t *testing.T) {
 	}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err = json.Marshal(pod)
+	podJSON, err = json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja = jsonassert.New(t)
@@ -1562,7 +1582,7 @@ func TestPodAffinityStepOverridesAgent(t *testing.T) {
 	}, taskUUID)
 	assert.NoError(t, err)
 
-	podJSON, err := json.Marshal(pod)
+	podJSON, err := json.Marshal(podWithoutStepOutput(t, pod))
 	assert.NoError(t, err)
 
 	ja := jsonassert.New(t)

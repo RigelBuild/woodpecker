@@ -15,16 +15,15 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStepStatus(t *testing.T) {
-	step := &Step{
-		State: StatusPending,
-	}
-
+	step := &Step{State: StatusPending}
 	assert.Equal(t, step.Running(), true)
 	step.State = StatusRunning
 	assert.Equal(t, step.Running(), true)
@@ -43,4 +42,28 @@ func TestStepStatus(t *testing.T) {
 	assert.Equal(t, step.Failing(), false)
 	step.State = StatusSuccess
 	assert.Equal(t, step.Failing(), false)
+}
+
+func TestStepOutputsJSON(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		outputs map[string]string
+		want    string
+	}{
+		{name: "absent"},
+		{name: "empty", outputs: map[string]string{}, want: `{}`},
+		{name: "present", outputs: map[string]string{"key": "value"}, want: `{"key":"value"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(Step{Outputs: tt.outputs})
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &fields))
+			if tt.outputs == nil {
+				assert.NotContains(t, fields, "outputs")
+			} else {
+				assert.JSONEq(t, tt.want, string(fields["outputs"]))
+			}
+		})
+	}
 }
