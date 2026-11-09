@@ -34,11 +34,11 @@ func openStepOutput(path string) (*os.File, error) {
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		windows.CloseHandle(handle)
+		_ = windows.CloseHandle(handle) // rejected handle; close error is not actionable
 		return nil, err
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		windows.CloseHandle(handle)
+		_ = windows.CloseHandle(handle) // rejected handle; close error is not actionable
 		return nil, errOutputSymlink
 	}
 	return os.NewFile(uintptr(handle), path), nil
