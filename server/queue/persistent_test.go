@@ -574,4 +574,3 @@ func findQueuedTask(t *testing.T, info InfoT, id string) *model.Task {
 	require.FailNowf(t, "task not queued", "task %s not in %s", id, info.String())
 	return nil
 }
-
