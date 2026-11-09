@@ -231,7 +231,16 @@ func (e *local) WaitStep(ctx context.Context, step *types.Step, taskUUID string)
 	for i := len(state.cmd.Env) - 1; i >= 0; i-- {
 		entry := state.cmd.Env[i]
 		if strings.HasPrefix(entry, "CI_STEP_OUTPUT=") {
-			file, err := os.Open(strings.TrimPrefix(entry, "CI_STEP_OUTPUT="))
+			path := strings.TrimPrefix(entry, "CI_STEP_OUTPUT=")
+			info, err := os.Lstat(path)
+			if err != nil {
+				break
+			}
+			if !info.Mode().IsRegular() {
+				stepState.OutputsState = "invalid"
+				break
+			}
+			file, err := os.Open(path)
 			if err != nil {
 				break
 			}

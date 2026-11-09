@@ -181,6 +181,8 @@ func TestLocalStepOutputs(t *testing.T) {
 		{name: "reported", command: `echo key=value >> "$CI_STEP_OUTPUT"`, state: "reported", outputs: map[string]string{"key": "value"}},
 		{name: "empty", command: "true", state: "reported", outputs: map[string]string{}},
 		{name: "malformed", command: `echo malformed >> "$CI_STEP_OUTPUT"`, state: "invalid"},
+		{name: "directory", command: `rm "$CI_STEP_OUTPUT"; mkdir "$CI_STEP_OUTPUT"`, state: "invalid"},
+		{name: "symlink", command: `rm "$CI_STEP_OUTPUT"; ln -s /dev/null "$CI_STEP_OUTPUT"`, state: "invalid"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			step := &types.Step{UUID: tt.name, Name: tt.name, Type: types.StepTypeCommands, Image: "sh", Commands: []string{tt.command}}

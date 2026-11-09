@@ -1,10 +1,10 @@
-// Copyright 2026 Woodpecker Authors
+// Copyright 2023 Woodpecker Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,6 +21,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestStepStatus(t *testing.T) {
+	step := &Step{State: StatusPending}
+	assert.Equal(t, step.Running(), true)
+	step.State = StatusRunning
+	assert.Equal(t, step.Running(), true)
+
+	step.Failure = FailureIgnore
+	step.State = StatusError
+	assert.Equal(t, step.Failing(), true)
+	step.State = StatusFailure
+	assert.Equal(t, step.Failing(), true)
+	step.Failure = FailureFail
+	step.State = StatusError
+	assert.Equal(t, step.Failing(), true)
+	step.State = StatusFailure
+	assert.Equal(t, step.Failing(), true)
+	step.State = StatusPending
+	assert.Equal(t, step.Failing(), false)
+	step.State = StatusSuccess
+	assert.Equal(t, step.Failing(), false)
+}
 
 func TestStepOutputsJSON(t *testing.T) {
 	for _, tt := range []struct {
