@@ -15,6 +15,8 @@
 package docker
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -257,6 +259,19 @@ func (e *docker) StartStep(ctx context.Context, step *backend_types.Step, taskUU
 	if err != nil {
 		return err
 	}
+	var outputArchive bytes.Buffer
+	tarWriter := tar.NewWriter(&outputArchive)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "woodpecker-step-output", Mode: 0o666}); err != nil {
+		return err
+	}
+	if err := tarWriter.Close(); err != nil {
+		return err
+	}
+	if _, err := e.client.CopyToContainer(ctx, containerName, client.CopyToContainerOptions{
+		DestinationPath: "/tmp", Content: &outputArchive,
+	}); err != nil {
+		log.Debug().Err(err).Msg("seeding step output file")
+	}
 
 	if len(step.NetworkMode) == 0 {
 		for _, net := range step.Networks {
@@ -317,11 +332,33 @@ func (e *docker) WaitStep(ctx context.Context, step *backend_types.Step, taskUUI
 		exitCode = -1
 	}
 
-	return &backend_types.State{
+	state := &backend_types.State{
 		Exited:    true,
 		ExitCode:  exitCode,
 		OOMKilled: info.Container.State.OOMKilled,
-	}, nil
+	}
+	archive, err := e.client.CopyFromContainer(ctx, containerName, client.CopyFromContainerOptions{
+		SourcePath: "/tmp/woodpecker-step-output",
+	})
+	if err == nil {
+		reader := tar.NewReader(archive.Content)
+		if hdr, err := reader.Next(); err == nil && hdr.Typeflag != tar.TypeReg {
+			state.OutputsState = "invalid"
+		} else if err == nil {
+			data, err := io.ReadAll(io.LimitReader(reader, backend_types.MaxStepOutputBytes+1))
+			if err == nil {
+				state.Outputs, err = backend_types.ParseStepOutputs(data)
+				state.OutputsState = "reported"
+				if err != nil {
+					state.OutputsState = "invalid"
+				}
+			}
+		}
+		if err := archive.Content.Close(); err != nil {
+			log.Warn().Err(err).Msg("closing step output archive")
+		}
+	}
+	return state, nil
 }
 
 func (e *docker) TailStep(ctx context.Context, step *backend_types.Step, taskUUID string) (io.ReadCloser, error) {

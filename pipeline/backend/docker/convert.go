@@ -50,6 +50,7 @@ func (e *docker) toConfig(step *types.Step, options BackendOptions) (*container.
 	}
 	configEnv := make(map[string]string)
 	maps.Copy(configEnv, step.Environment)
+	configEnv["CI_STEP_OUTPUT"] = "/tmp/woodpecker-step-output"
 
 	if len(step.Commands) > 0 {
 		env, entry, err := common.GenerateContainerConf(step.Commands, e.info.OSType, step.WorkingDir)

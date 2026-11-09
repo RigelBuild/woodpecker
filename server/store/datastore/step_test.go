@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
@@ -84,6 +85,23 @@ func TestStepUpdate(t *testing.T) {
 	updated, err := store.StepByUUID(uuid)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StatusRunning, updated.State)
+}
+
+func TestStepOutputsStorageRoundTrip(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline))
+	defer closer()
+	step := &model.Step{UUID: "outputs", PipelineID: 1, PID: 1}
+	sess := store.engine.NewSession()
+	defer sess.Close()
+	require.NoError(t, store.stepCreate(sess, []*model.Step{step}))
+	require.NoError(t, sess.Commit())
+	for _, outputs := range []map[string]string{nil, {}, {"deploy.state": "completed"}} {
+		step.Outputs = outputs
+		require.NoError(t, store.StepUpdate(step))
+		got, err := store.StepByUUID(step.UUID)
+		require.NoError(t, err)
+		assert.Equal(t, outputs, got.Outputs)
+	}
 }
 
 func TestStepIndexes(t *testing.T) {

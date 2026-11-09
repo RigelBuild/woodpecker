@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -161,6 +162,15 @@ func (e *local) StartStep(ctx context.Context, step *types.Step, taskUUID string
 		env = append(env, "USERPROFILE="+state.homeDir)
 	}
 
+	outputFile, err := os.CreateTemp(state.baseDir, "step-output-*")
+	if err != nil {
+		return err
+	}
+	if err := outputFile.Close(); err != nil {
+		return err
+	}
+	env = append(env, "CI_STEP_OUTPUT="+outputFile.Name())
+
 	env = append(env, "CI_WORKSPACE="+state.workspaceDir)
 
 	switch step.Type {
@@ -217,6 +227,26 @@ func (e *local) WaitStep(ctx context.Context, step *types.Step, taskUUID string)
 		}
 	} else {
 		stepState.ExitCode = state.cmd.ProcessState.ExitCode()
+	}
+	for i := len(state.cmd.Env) - 1; i >= 0; i-- {
+		entry := state.cmd.Env[i]
+		if strings.HasPrefix(entry, "CI_STEP_OUTPUT=") {
+			file, err := os.Open(strings.TrimPrefix(entry, "CI_STEP_OUTPUT="))
+			if err != nil {
+				break
+			}
+			data, readErr := io.ReadAll(io.LimitReader(file, types.MaxStepOutputBytes+1))
+			closeErr := file.Close()
+			if readErr != nil || closeErr != nil {
+				break
+			}
+			stepState.Outputs, err = types.ParseStepOutputs(data)
+			stepState.OutputsState = "reported"
+			if err != nil {
+				stepState.OutputsState = "invalid"
+			}
+			break
+		}
 	}
 
 	return stepState, err

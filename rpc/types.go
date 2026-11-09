@@ -26,14 +26,16 @@ type (
 
 	// StepState defines the step state.
 	StepState struct {
-		StepUUID string `json:"step_uuid"`
-		Started  int64  `json:"started"`
-		Finished int64  `json:"finished"`
-		Exited   bool   `json:"exited"`
-		ExitCode int    `json:"exit_code"`
-		Error    string `json:"error"`
-		Canceled bool   `json:"canceled"`
-		Skipped  bool   `json:"skipped"`
+		StepUUID     string            `json:"step_uuid"`
+		Started      int64             `json:"started"`
+		Finished     int64             `json:"finished"`
+		Exited       bool              `json:"exited"`
+		ExitCode     int               `json:"exit_code"`
+		Error        string            `json:"error"`
+		Canceled     bool              `json:"canceled"`
+		Skipped      bool              `json:"skipped"`
+		Outputs      map[string]string `json:"outputs,omitempty"`
+		OutputsState string            `json:"outputs_state,omitempty"`
 	}
 
 	// WorkflowState defines the workflow state.

@@ -163,6 +163,37 @@ func prepairEnv(t *testing.T) {
 	})
 }
 
+func TestLocalStepOutputs(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires a POSIX shell")
+	}
+	backend := New().(*local)
+	backend.tempDir = t.TempDir()
+	ctx := t.Context()
+	require.NoError(t, backend.SetupWorkflow(ctx, &types.Config{}, "task"))
+	t.Cleanup(func() { assert.NoError(t, backend.DestroyWorkflow(ctx, &types.Config{}, "task")) })
+	for _, tt := range []struct {
+		name    string
+		command string
+		state   string
+		outputs map[string]string
+	}{
+		{name: "reported", command: `echo key=value >> "$CI_STEP_OUTPUT"`, state: "reported", outputs: map[string]string{"key": "value"}},
+		{name: "empty", command: "true", state: "reported", outputs: map[string]string{}},
+		{name: "malformed", command: `echo malformed >> "$CI_STEP_OUTPUT"`, state: "invalid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			step := &types.Step{UUID: tt.name, Name: tt.name, Type: types.StepTypeCommands, Image: "sh", Commands: []string{tt.command}}
+			require.NoError(t, backend.StartStep(ctx, step, "task"))
+			state, err := backend.WaitStep(ctx, step, "task")
+			require.NoError(t, err)
+			assert.Equal(t, tt.state, state.OutputsState)
+			assert.Equal(t, tt.outputs, state.Outputs)
+			require.NoError(t, backend.DestroyStep(ctx, step, "task"))
+		})
+	}
+}
+
 func TestRunStep(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("skipping on non linux due to shell availability and symlink capability")
@@ -260,8 +291,9 @@ func TestRunStep(t *testing.T) {
 			gotBeforeEnvs := outputLines[:len(wantBeforeEnvs)]
 			assert.Equal(t, wantBeforeEnvs, gotBeforeEnvs)
 			// we filter out nixos specific stuff catched up in env output
+			assert.Contains(t, strings.Join(outputLines, "\n"), "CI_STEP_OUTPUT="+state.baseDir+"/step-output-")
 			gotEnvs := slices.DeleteFunc(outputLines[len(wantBeforeEnvs):], func(s string) bool {
-				return strings.HasPrefix(s, "_=") || strings.HasPrefix(s, "SHLVL=")
+				return strings.HasPrefix(s, "_=") || strings.HasPrefix(s, "SHLVL=") || strings.HasPrefix(s, "CI_STEP_OUTPUT=")
 			})
 			assert.ElementsMatch(t, []string{
 				"PWD=" + state.baseDir + "/workspace",

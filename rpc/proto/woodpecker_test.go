@@ -37,3 +37,26 @@ func TestWorkflowStateAgentShutdownWireField(t *testing.T) {
 	require.NoError(t, proto.Unmarshal(encoded, &decoded))
 	assert.True(t, decoded.GetAgentShutdown())
 }
+
+func TestStepStateOutputsWireCompatibility(t *testing.T) {
+	oldAgent := []byte{0x0a, 0x01, 's', 0x20, 0x01}
+	var old StepState
+	require.NoError(t, proto.Unmarshal(oldAgent, &old))
+	assert.True(t, old.Exited)
+	assert.Empty(t, old.OutputsState)
+	assert.Nil(t, old.Outputs)
+
+	for _, state := range []*StepState{
+		{OutputsState: "reported", Outputs: map[string]string{}},
+		{OutputsState: "reported", Outputs: map[string]string{"key": "value"}},
+		{OutputsState: "invalid"},
+	} {
+		encoded, err := proto.Marshal(state)
+		require.NoError(t, err)
+		var decoded StepState
+		require.NoError(t, proto.Unmarshal(encoded, &decoded))
+		assert.Equal(t, state.OutputsState, decoded.OutputsState)
+		assert.Equal(t, len(state.Outputs), len(decoded.Outputs))
+		assert.Equal(t, state.Outputs["key"], decoded.Outputs["key"])
+	}
+}

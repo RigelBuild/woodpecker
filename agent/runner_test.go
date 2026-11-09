@@ -17,6 +17,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -29,6 +30,7 @@ import (
 
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/state"
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	rpc_mocks "go.woodpecker-ci.org/woodpecker/v3/rpc/mocks"
 )
@@ -50,6 +52,41 @@ func TestCreateLoggerClosesMaskedOutputWithoutTrailingNewline(t *testing.T) {
 	if assert.Len(t, entries, 1) {
 		assert.Equal(t, "prefix ********", string(entries[0].Data))
 	}
+}
+
+func TestTracerMasksStepOutputs(t *testing.T) {
+	peer := rpc_mocks.NewMockPeer(t)
+	peer.EXPECT().Update(mock.Anything, "1", mock.Anything).Run(func(_ context.Context, _ string, got rpc.StepState) {
+		assert.Equal(t, "reported", got.OutputsState)
+		assert.Equal(t, map[string]string{"result": "prefix ********"}, got.Outputs)
+	}).Return(nil).Once()
+	runner := Runner{client: peer}
+	workflow := &rpc.Workflow{ID: "1", Config: &backend_types.Config{Secrets: []*backend_types.Secret{{Value: "supersecret"}}}}
+	err := runner.createTracer(t.Context(), zerolog.Nop(), workflow)(&state.State{
+		CurrStep:      &backend_types.Step{UUID: "step"},
+		CurrStepState: backend_types.State{Exited: true, OutputsState: "reported", Outputs: map[string]string{"result": "prefix supersecret"}},
+	})
+	assert.NoError(t, err)
+}
+
+func TestTracerRejectsOversizedMaskedOutputs(t *testing.T) {
+	var logs bytes.Buffer
+	peer := rpc_mocks.NewMockPeer(t)
+	peer.EXPECT().Update(mock.Anything, "1", mock.Anything).Run(func(_ context.Context, _ string, got rpc.StepState) {
+		assert.Equal(t, "invalid", got.OutputsState)
+		assert.Nil(t, got.Outputs)
+	}).Return(nil).Once()
+	runner := Runner{client: peer}
+	workflow := &rpc.Workflow{ID: "1", Config: &backend_types.Config{Secrets: []*backend_types.Secret{{Value: "abcd"}}}}
+	value := strings.Repeat("abcdx", 600)
+	err := runner.createTracer(t.Context(), zerolog.New(&logs), workflow)(&state.State{
+		CurrStep:      &backend_types.Step{UUID: "step"},
+		CurrStepState: backend_types.State{Exited: true, OutputsState: "reported", Outputs: map[string]string{"result": value}},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, logs.String(), "masked step outputs exceed size limit")
+	assert.Contains(t, logs.String(), `"level":"warn"`)
+	assert.NotContains(t, logs.String(), value)
 }
 
 func dummyWorkflow() *rpc.Workflow {

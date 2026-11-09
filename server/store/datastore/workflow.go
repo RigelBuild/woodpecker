@@ -228,7 +228,7 @@ func (s storage) WorkflowResetForRequeue(workflow *model.Workflow, steps []*mode
 		}
 		for _, step := range steps {
 			if _, err := sess.ID(step.ID).
-				Cols("state", "started", "finished", "exit_code", "error").
+				Cols("state", "started", "finished", "exit_code", "error", "outputs", "outputs_state").
 				Update(&model.Step{State: model.StatusPending}); err != nil {
 				return false, err
 			}
@@ -240,6 +240,7 @@ func (s storage) WorkflowResetForRequeue(workflow *model.Workflow, steps []*mode
 		workflow.AgentID, workflow.Attempts = 0, reset.Attempts
 		for _, step := range steps {
 			step.State, step.Started, step.Finished, step.ExitCode, step.Error = model.StatusPending, 0, 0, 0, ""
+			step.Outputs, step.OutputsState = nil, ""
 		}
 		return true, nil
 
