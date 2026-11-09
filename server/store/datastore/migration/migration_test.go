@@ -169,3 +169,38 @@ func TestMigrate(t *testing.T) {
 	assert.NoError(t, Migrate(t.Context(), engine, true))
 	closeDB()
 }
+
+type taskBeforeQueueTimestamps struct {
+	ID string `xorm:"PK UNIQUE 'id'"`
+}
+
+func (taskBeforeQueueTimestamps) TableName() string { return "tasks" }
+
+type taskQueueTimestampsV034 struct {
+	ID       string `xorm:"PK UNIQUE 'id'"`
+	Enqueued int64  `xorm:"NOT NULL DEFAULT 0 'enqueued'"`
+	Started  int64  `xorm:"NOT NULL DEFAULT 0 'started'"`
+}
+
+func (taskQueueTimestampsV034) TableName() string { return "tasks" }
+
+func TestAddTaskQueueTimestampsPreservesLegacyRows(t *testing.T) {
+	engine, closeDB := testDB(t, true)
+	defer closeDB()
+
+	require.NoError(t, engine.Sync(new(taskBeforeQueueTimestamps)))
+	_, err := engine.Insert(&taskBeforeQueueTimestamps{ID: "legacy-task"})
+	require.NoError(t, err)
+
+	sess := engine.NewSession()
+	defer sess.Close()
+	require.NoError(t, addTaskQueueTimestamps.MigrateSession(sess))
+	require.NoError(t, sess.Commit())
+
+	var got taskQueueTimestampsV034
+	has, err := engine.ID("legacy-task").Get(&got)
+	require.NoError(t, err)
+	require.True(t, has)
+	assert.Zero(t, got.Enqueued)
+	assert.Zero(t, got.Started)
+}

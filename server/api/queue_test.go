@@ -104,23 +104,28 @@ func TestGetQueueInfo(t *testing.T) {
 		agent := seedAgent(t, s, "BUILDSERVER-restricted_D")
 		pipe := seedPipeline(t, s, repo.ID)
 
-		// Mirrors a real queue state: one task waiting on deps (no agent yet)
-		// and one running task assigned to an agent.
+		// The response embeds Task, so timestamps must survive the queue info mapping.
+		pending := &model.Task{
+			ID: "76053", Name: "pending", PipelineID: pipe.ID, RepoID: repo.ID,
+			Enqueued: 100,
+		}
 		waiting := &model.Task{
 			ID: "76054", Name: "build", PipelineID: pipe.ID, RepoID: repo.ID,
-			Dependencies: []string{"76057"},
+			Dependencies: []string{"76057"}, Enqueued: 200,
 		}
 		running := &model.Task{
 			ID: "76057", Name: "check_preconditions", PipelineID: pipe.ID, RepoID: repo.ID,
-			AgentID: agent.ID,
+			AgentID: agent.ID, Enqueued: 300, Started: 400,
 		}
 
 		info := queue.InfoT{
+			Pending:       []*model.Task{pending},
 			WaitingOnDeps: []*model.Task{waiting},
 			Running:       []*model.Task{running},
 			Paused:        false,
 		}
 		info.Stats.Workers = 13
+		info.Stats.Pending = 1
 		info.Stats.WaitingOnDeps = 1
 		info.Stats.Running = 1
 
@@ -136,18 +141,28 @@ func TestGetQueueInfo(t *testing.T) {
 
 		assert.False(t, got.Paused)
 		assert.Equal(t, 13, got.Stats.WorkerCount)
+		assert.Equal(t, 1, got.Stats.PendingCount)
 		assert.Equal(t, 1, got.Stats.WaitingOnDepsCount)
 		assert.Equal(t, 1, got.Stats.RunningCount)
+
+		require.Len(t, got.Pending, 1)
+		assert.Equal(t, "76053", got.Pending[0].ID)
+		assert.Equal(t, int64(100), got.Pending[0].Enqueued)
+		assert.Zero(t, got.Pending[0].Started)
 
 		require.Len(t, got.WaitingOnDeps, 1)
 		assert.Equal(t, "76054", got.WaitingOnDeps[0].ID)
 		assert.Empty(t, got.WaitingOnDeps[0].AgentName) // no agent assigned
 		assert.Equal(t, pipe.Number, got.WaitingOnDeps[0].PipelineNumber)
+		assert.Equal(t, int64(200), got.WaitingOnDeps[0].Enqueued)
+		assert.Zero(t, got.WaitingOnDeps[0].Started)
 
 		require.Len(t, got.Running, 1)
 		assert.Equal(t, "76057", got.Running[0].ID)
 		assert.Equal(t, "BUILDSERVER-restricted_D", got.Running[0].AgentName)
 		assert.Equal(t, pipe.Number, got.Running[0].PipelineNumber)
+		assert.Equal(t, int64(300), got.Running[0].Enqueued)
+		assert.Equal(t, int64(400), got.Running[0].Started)
 	})
 
 	t.Run("empty queue returns empty lists", func(t *testing.T) {
