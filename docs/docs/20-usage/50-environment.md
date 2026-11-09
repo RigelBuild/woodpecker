@@ -59,7 +59,6 @@ Never put secrets in outputs. The agent masks known secrets before sending them,
 Secrets of 3 bytes or fewer are not masked.
 This fork adds optional RPC fields without changing its protocol version. An upstream contribution requires a version bump and does not support mixed agent and server versions.
 
-
 ## Built-in environment variables
 
 This is the reference list of all environment variables available to your pipeline containers. These are injected into your pipeline step and plugins containers, at runtime.
@@ -126,7 +125,7 @@ Most variables are available in both scopes. Variables scoped only to `runtime` 
 |                                    |                   | **Current workflow**                                                                                                                             |                                                                                                                                 |
 | `CI_WORKFLOW_NAME`                 | `config, runtime` | workflow name                                                                                                                                    | `release`                                                                                                                       |
 |                                    |                   | **Current step**                                                                                                                                 |                                                                                                                                 |
-| `CI_STEP_OUTPUT`                   | `runtime`         | path for step output lines                                                                                                                       | `/tmp/woodpecker-step-output`                                                                                                  |
+| `CI_STEP_OUTPUT`                   | `runtime`         | path for step output lines                                                                                                                       | `/tmp/woodpecker-step-output`                                                                                                   |
 | `CI_STEP_NAME`                     | `runtime`         | step name                                                                                                                                        | `build package`                                                                                                                 |
 | `CI_STEP_TYPE`                     | `runtime`         | step type (`commands`, `plugin`, `service`, `clone` or `cache`)                                                                                  | `commands`                                                                                                                      |
 | `CI_STEP_NUMBER`                   | `runtime`         | step number                                                                                                                                      | `0`                                                                                                                             |

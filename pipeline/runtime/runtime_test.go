@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -391,10 +392,10 @@ func TestWorkflowWithServiceStep(t *testing.T) {
 	// reported its exit — i.e. test was running in parallel with db, not
 	// queued behind it.
 	dbExitIdx := indexOfTrace(traces, func(s state.State) bool {
-		return s == *findLastTraceByName(traces, "db")
+		return reflect.DeepEqual(s, *findLastTraceByName(traces, "db"))
 	})
 	testStartedIdx := indexOfTrace(traces, func(s state.State) bool {
-		return s == *findFirstTraceByName(traces, "test")
+		return reflect.DeepEqual(s, *findFirstTraceByName(traces, "test"))
 	})
 	assert.Less(t, testStartedIdx, dbExitIdx,
 		"test (next stage) must start before db (service) exits — otherwise db blocked stage 2")
