@@ -23,16 +23,21 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/state"
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	rpc_mocks "go.woodpecker-ci.org/woodpecker/v3/rpc/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
 )
 
 func TestCreateLoggerClosesMaskedOutputWithoutTrailingNewline(t *testing.T) {
@@ -153,6 +158,114 @@ func TestRunReportsCancelWithoutError(t *testing.T) {
 
 	assert.True(t, done.Canceled, "the workflow must be reported as canceled")
 	assert.Empty(t, done.Error, "a cancellation is not a workflow error")
+}
+
+func TestRunCancelsWhenLeaseIsNotFound(t *testing.T) {
+	originalTimeout := constant.TaskTimeout
+	constant.TaskTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { constant.TaskTimeout = originalTimeout })
+
+	tests := []struct {
+		name       string
+		err        error
+		wantCancel bool
+	}{
+		{
+			name:       "server no longer knows workflow",
+			err:        status.Error(codes.NotFound, "queue: task not found"),
+			wantCancel: true,
+		},
+		{
+			name: "transient error",
+			err:  status.Error(codes.Unavailable, "server unavailable"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stepCtxCh := make(chan context.Context, 1)
+			engine := mocks.NewMockBackend(t)
+			engine.On("SetupWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).
+				Run(func(args mock.Arguments) {
+					ctx := args.Get(0).(context.Context)
+					stepCtxCh <- ctx
+					<-ctx.Done()
+				}).Return(errors.New("step interrupted"))
+
+			extendCalls := make(chan struct{}, 4)
+			peer := rpc_mocks.NewMockPeer(t)
+			peer.On("Next", mock.Anything, mock.Anything).Return(dummyWorkflow(), nil)
+			peer.On("Init", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			peer.On("Wait", mock.Anything, mock.Anything).Return(false, nil)
+			peer.On("Extend", mock.Anything, "1").Run(func(mock.Arguments) {
+				select {
+				case extendCalls <- struct{}{}:
+				default:
+				}
+			}).Return(tt.err)
+			peer.On("Update", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			peer.On("Done", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+			runner := NewRunner(peer, rpc.Filter{}, "test-agent", 1, &State{Metadata: map[string]Info{}}, engine)
+			runnerCtx, cancelRunner := context.WithCancelCause(t.Context())
+			runDone := make(chan error, 1)
+			go func() { runDone <- runner.Run(runnerCtx) }()
+
+			finished := false
+			defer func() {
+				if !finished {
+					cancelRunner(nil)
+					select {
+					case <-runDone:
+					case <-time.After(time.Second):
+						t.Error("runner did not stop after test cleanup")
+					}
+				}
+			}()
+
+			var stepCtx context.Context
+			select {
+			case stepCtx = <-stepCtxCh:
+			case <-time.After(time.Second):
+				t.Fatal("workflow step did not start")
+			}
+			waitForExtend := func() {
+				t.Helper()
+				select {
+				case <-extendCalls:
+				case <-time.After(time.Second):
+					t.Fatal("workflow lease was not extended")
+				}
+			}
+			waitForExtend()
+
+			if tt.wantCancel {
+				select {
+				case <-stepCtx.Done():
+				case <-time.After(time.Second):
+					t.Fatal("workflow context was not canceled after lease not found")
+				}
+			} else {
+				select {
+				case <-stepCtx.Done():
+					t.Fatal("transient lease error canceled the workflow")
+				case <-time.After(50 * time.Millisecond):
+				}
+				waitForExtend()
+				cancelRunner(nil)
+			}
+
+			select {
+			case err := <-runDone:
+				require.NoError(t, err)
+				finished = true
+			case <-time.After(time.Second):
+				t.Fatal("runner did not return")
+			}
+		})
+	}
 }
 
 func TestFormatAgentLabels(t *testing.T) {
