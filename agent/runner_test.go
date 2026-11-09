@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v7"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -161,6 +162,14 @@ func TestRunReportsCancelWithoutError(t *testing.T) {
 }
 
 func TestRunCancelsWhenLeaseIsNotFound(t *testing.T) {
+	notFoundErr := status.Error(codes.NotFound, "queue: task not found")
+	_, err := backoff.Retry(t.Context(), func() (struct{}, error) {
+		return struct{}{}, backoff.Permanent(notFoundErr)
+	})
+	require.Error(t, err)
+	require.Equal(t, codes.NotFound, status.Code(err))
+	require.NotEqual(t, notFoundErr.Error(), status.Convert(err).Message())
+
 	originalTimeout := constant.TaskTimeout
 	constant.TaskTimeout = 30 * time.Millisecond
 	t.Cleanup(func() { constant.TaskTimeout = originalTimeout })
@@ -172,7 +181,7 @@ func TestRunCancelsWhenLeaseIsNotFound(t *testing.T) {
 	}{
 		{
 			name:       "server no longer knows workflow",
-			err:        status.Error(codes.NotFound, "queue: task not found"),
+			err:        err,
 			wantCancel: true,
 		},
 		{

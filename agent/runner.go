@@ -155,7 +155,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 				logger.Debug().Msg("renewing workflow lease")
 				if err := r.client.Extend(workflowCtx, workflow.ID); err != nil {
 					if isWorkflowLeaseNotFound(err) {
-						logger.Debug().Err(err).Msg("server no longer has workflow lease")
+						logger.Warn().Err(err).Msg("server no longer has workflow lease")
 						cancelWorkflowCtx(pipeline_errors.ErrCancel)
 					} else {
 						logger.Error().Err(err).Msg("failed to extend workflow lease")
@@ -243,7 +243,7 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 }
 
 func isWorkflowLeaseNotFound(err error) bool {
-	return status.Code(err) == codes.NotFound && status.Convert(err).Message() == "queue: task not found"
+	return status.Code(err) == codes.NotFound
 }
 
 func extractRepositoryName(config *backend_types.Config) string {
