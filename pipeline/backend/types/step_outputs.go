@@ -41,7 +41,7 @@ func ParseStepOutputs(data []byte) (map[string]string, error) {
 			return nil, errors.New("invalid step output line")
 		}
 		for i, c := range key {
-			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || i > 0 && (c == '_' || c == '.' || c == '-')) {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && (i == 0 || (c != '_' && c != '.' && c != '-')) {
 				return nil, errors.New("invalid step output key")
 			}
 		}

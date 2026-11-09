@@ -167,7 +167,8 @@ func TestLocalStepOutputs(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("requires a POSIX shell")
 	}
-	backend := New().(*local)
+	backend, ok := New().(*local)
+	require.True(t, ok)
 	backend.tempDir = t.TempDir()
 	ctx := t.Context()
 	require.NoError(t, backend.SetupWorkflow(ctx, &types.Config{}, "task"))

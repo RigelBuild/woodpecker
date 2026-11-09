@@ -640,7 +640,11 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	cs := pod.Status.ContainerStatuses[0]
 	state := &types.State{ExitCode: int(cs.State.Terminated.ExitCode), Exited: true, OOMKilled: false}
 	count := len(pod.Status.InitContainerStatuses) + len(pod.Status.ContainerStatuses) + len(pod.Status.EphemeralContainerStatuses)
-	cap := min(types.MaxStepOutputBytes, 12288/count) - 64
+	// Kubernetes shares a 12 KiB termination-message limit across all containers in a pod.
+	const podTerminationMessageLimit = 12288
+	// Reserve space below the termination-message limit to detect truncation.
+	const terminationMessageMargin = 64
+	cap := min(types.MaxStepOutputBytes, podTerminationMessageLimit/count) - terminationMessageMargin
 	message := []byte(cs.State.Terminated.Message)
 	if cap <= 0 || len(message) >= cap {
 		state.OutputsState = "invalid"

@@ -86,6 +86,7 @@ func (f *fakeClient) ContainerCreate(_ context.Context, _ client.ContainerCreate
 func (f *fakeClient) CopyToContainer(context.Context, string, client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
 	return client.CopyToContainerResult{}, f.copyErr
 }
+
 func (f *fakeClient) ContainerStart(_ context.Context, _ string, _ client.ContainerStartOptions) (client.ContainerStartResult, error) {
 	f.started = true
 	return client.ContainerStartResult{}, nil
