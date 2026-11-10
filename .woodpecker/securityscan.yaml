@@ -1,6 +1,8 @@
 # Any Linux agent on the AKS pool (kubernetes backend; services run as pods).
 labels:
   os: linux
+  cloud: azure
+  arch: x86_64
 
 when:
   - event: [pull_request]

@@ -3,6 +3,8 @@
 # Any Linux agent: the check builds for the agent's own system.
 labels:
   os: linux
+  cloud: azure
+  arch: x86_64
 
 when:
   - event: pull_request

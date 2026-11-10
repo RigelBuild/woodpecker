@@ -4,6 +4,8 @@
 # chained 1-wide (serial) so only one runs at a time on a 4 GiB agent.
 labels:
   os: linux
+  cloud: azure
+  arch: x86_64
 
 variables:
   - &golang_image 'docker.io/golang:1.27'
