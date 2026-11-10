@@ -552,7 +552,7 @@ func newQueueSQLiteStore(t *testing.T) store.Store {
 	s, err := datastore.NewEngine(&store.Opts{
 		Driver: "sqlite3",
 		Config: ":memory:",
-		XORM: store.XORM{MaxOpenConns: 1, MaxIdleConns: 1},
+		XORM:   store.XORM{MaxOpenConns: 1, MaxIdleConns: 1},
 	})
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(t.Context(), true))

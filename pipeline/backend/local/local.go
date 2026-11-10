@@ -228,10 +228,8 @@ func (e *local) WaitStep(ctx context.Context, step *types.Step, taskUUID string)
 	} else {
 		stepState.ExitCode = state.cmd.ProcessState.ExitCode()
 	}
-	for i := len(state.cmd.Env) - 1; i >= 0; i-- {
-		entry := state.cmd.Env[i]
-		if strings.HasPrefix(entry, "CI_STEP_OUTPUT=") {
-			path := strings.TrimPrefix(entry, "CI_STEP_OUTPUT=")
+	for _, entry := range slices.Backward(state.cmd.Env) {
+		if path, ok := strings.CutPrefix(entry, "CI_STEP_OUTPUT="); ok {
 			file, err := openStepOutput(path)
 			if err != nil {
 				if errors.Is(err, errOutputSymlink) {

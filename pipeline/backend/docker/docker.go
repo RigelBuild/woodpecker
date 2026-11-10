@@ -261,7 +261,9 @@ func (e *docker) StartStep(ctx context.Context, step *backend_types.Step, taskUU
 	}
 	var outputArchive bytes.Buffer
 	tarWriter := tar.NewWriter(&outputArchive)
-	if err := tarWriter.WriteHeader(&tar.Header{Name: "woodpecker-step-output", Mode: 0o666}); err != nil {
+	// The step user needs write access regardless of its container UID.
+	const stepOutputFileMode = 0o666
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "woodpecker-step-output", Mode: stepOutputFileMode}); err != nil {
 		return err
 	}
 	if err := tarWriter.Close(); err != nil {

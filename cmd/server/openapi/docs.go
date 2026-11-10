@@ -5840,6 +5840,15 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "outputs": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "outputs_state": {
+                    "type": "string"
+                },
                 "pid": {
                     "type": "integer"
                 },
