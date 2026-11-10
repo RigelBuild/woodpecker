@@ -11,6 +11,8 @@
 # it). This file is the push+PR Go-test spine.
 labels:
   os: linux
+  cloud: azure
+  arch: x86_64
 
 variables:
   - &golang_image 'docker.io/golang:1.27'
