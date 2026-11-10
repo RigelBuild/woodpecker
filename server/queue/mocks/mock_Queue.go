@@ -48,6 +48,69 @@ func (_m *MockQueue) EXPECT() *MockQueue_Expecter {
 	return &MockQueue_Expecter{mock: &_m.Mock}
 }
 
+// CancelPending provides a mock function for the type MockQueue
+func (_mock *MockQueue) CancelPending(ctx context.Context, ids []string, commit func() error) error {
+	ret := _mock.Called(ctx, ids, commit)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CancelPending")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []string, func() error) error); ok {
+		r0 = returnFunc(ctx, ids, commit)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQueue_CancelPending_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CancelPending'
+type MockQueue_CancelPending_Call struct {
+	*mock.Call
+}
+
+// CancelPending is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ids []string
+//   - commit func() error
+func (_e *MockQueue_Expecter) CancelPending(ctx any, ids any, commit any) *MockQueue_CancelPending_Call {
+	return &MockQueue_CancelPending_Call{Call: _e.mock.On("CancelPending", ctx, ids, commit)}
+}
+
+func (_c *MockQueue_CancelPending_Call) Run(run func(ctx context.Context, ids []string, commit func() error)) *MockQueue_CancelPending_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 []string
+		if args[1] != nil {
+			arg1 = args[1].([]string)
+		}
+		var arg2 func() error
+		if args[2] != nil {
+			arg2 = args[2].(func() error)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQueue_CancelPending_Call) Return(err error) *MockQueue_CancelPending_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQueue_CancelPending_Call) RunAndReturn(run func(ctx context.Context, ids []string, commit func() error) error) *MockQueue_CancelPending_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Done provides a mock function for the type MockQueue
 func (_mock *MockQueue) Done(c context.Context, id string, exitStatus model.StatusValue) error {
 	ret := _mock.Called(c, id, exitStatus)

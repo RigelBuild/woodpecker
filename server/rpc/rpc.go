@@ -441,6 +441,14 @@ func (s *RPC) Init(c context.Context, strWorkflowID string, state rpc.WorkflowSt
 		return err
 	}
 
+	initialWorkflow, err := s.store.WorkflowLoad(workflowID)
+	if err != nil {
+		log.Error().Err(err).Msgf("cannot find workflow with id %d", workflowID)
+		return err
+	}
+	unlock := pipeline.LockPipeline(initialWorkflow.PipelineID)
+	defer unlock()
+
 	workflow, err := s.store.WorkflowLoad(workflowID)
 	if err != nil {
 		log.Error().Err(err).Msgf("cannot find workflow with id %d", workflowID)
@@ -634,9 +642,23 @@ func (s *RPC) finishWorkflow(c context.Context, workflow *model.Workflow, curren
 
 	logger.Debug().Msgf("workflow state in store: %#v", workflow)
 	logger.Debug().Msgf("gRPC Done with state: %#v", state)
-
-	// Complete any still-running children (e.g. service containers) before
-	// computing the workflow status, so their final state is reflected.
+	unlock := pipeline.LockPipeline(currentPipeline.ID)
+	defer unlock()
+	workflow, err = s.store.WorkflowLoad(workflow.ID)
+	if err != nil {
+		return err
+	}
+	workflow.Children, err = s.store.StepListFromWorkflowFind(workflow)
+	if err != nil {
+		return err
+	}
+	if err := checkWorkflowState(workflow.State); err != nil {
+		return err
+	}
+	currentPipeline, err = s.store.GetPipeline(currentPipeline.ID)
+	if err != nil {
+		return err
+	}
 	s.completeChildrenIfParentCompleted(workflow, state.Finished, state.Canceled)
 
 	if workflow, err = pipeline.UpdateWorkflowStatusToDone(s.store, *workflow, state); err != nil {
@@ -920,18 +942,13 @@ func (s *RPC) updateForgeStatus(ctx context.Context, repo *model.Repo, pipeline 
 // to completion, while still guaranteeing the goroutine cannot leak.
 const forgeReportTimeout = 60 * time.Second
 
-// reportForgeStatusAsync runs updateForgeStatus in the background so a slow or
-// rate-limited forge never blocks the agent gRPC call that triggered it. GitHub's
-// secondary-limit backoff can be tens of seconds; a synchronous report would burn
-// the RPC deadline and error the pipeline even though its steps already ran. The
-// pipeline and workflow are snapshotted so the caller's later mutations cannot
-// race the report.
-func (s *RPC) reportForgeStatusAsync(ctx context.Context, repo *model.Repo, pipeline *model.Pipeline, workflow *model.Workflow) {
-	pipelineCopy := *pipeline
-	var workflowCopy *model.Workflow
+// reportForgeStatusAsync reports the latest stored state without blocking the RPC.
+// A separate report lock orders the read and report without blocking mutations.
+func (s *RPC) reportForgeStatusAsync(ctx context.Context, repo *model.Repo, currentPipeline *model.Pipeline, workflow *model.Workflow) {
+	pipelineID := currentPipeline.ID
+	var workflowID int64
 	if workflow != nil {
-		wc := *workflow
-		workflowCopy = &wc
+		workflowID = workflow.ID
 	}
 	if s.reportWG != nil {
 		s.reportWG.Add(1)
@@ -943,7 +960,26 @@ func (s *RPC) reportForgeStatusAsync(ctx context.Context, repo *model.Repo, pipe
 		}
 		ctx, cancel := context.WithTimeout(detached, forgeReportTimeout)
 		defer cancel()
-		s.updateForgeStatus(ctx, repo, &pipelineCopy, workflowCopy)
+		unlock := pipeline.LockReport(pipelineID)
+		defer unlock()
+		current, err := s.store.GetPipeline(pipelineID)
+		if err != nil {
+			log.Error().Err(err).Int64("pipeline_id", pipelineID).Msg("cannot load pipeline for forge status")
+			return
+		}
+		current.Workflows, err = s.store.WorkflowGetTree(current)
+		if err != nil {
+			log.Error().Err(err).Int64("pipeline_id", pipelineID).Msg("cannot load workflows for forge status")
+			return
+		}
+		var currentWorkflow *model.Workflow
+		for _, w := range current.Workflows {
+			if w.ID == workflowID {
+				currentWorkflow = w
+				break
+			}
+		}
+		s.updateForgeStatus(ctx, repo, current, currentWorkflow)
 	}()
 }
 

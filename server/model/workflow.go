@@ -29,6 +29,7 @@ type Workflow struct {
 	Platform       string            `json:"platform,omitempty"   xorm:"platform"`
 	Environ        map[string]string `json:"environ,omitempty"    xorm:"json 'environ'"`
 	DependsOn      []string          `json:"depends_on,omitempty" xorm:"json 'depends_on'"`
+	SupersededBy   *int64            `json:"superseded_by,omitempty" xorm:"superseded_by"`
 	AxisID         int               `json:"-"                    xorm:"axis_id"`
 	OnMetadataEdit bool              `json:"on_metadata_edit,omitempty" xorm:"on_metadata_edit"`
 	Attempts       int               `json:"attempts"              xorm:"attempts"`

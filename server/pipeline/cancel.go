@@ -29,7 +29,7 @@ import (
 
 // Cancel the pipeline and returns the status.
 func Cancel(ctx context.Context, _forge forge.Forge, store store.Store, repo *model.Repo, user *model.User, pipeline *model.Pipeline, cancelInfo *model.CancelInfo) error {
-	unlock := pipelineLocks.lock(pipeline.ID)
+	unlock := LockPipeline(pipeline.ID)
 	defer unlock()
 	// An approval may have moved the pipeline while this call waited, so decide
 	// on the stored row rather than the caller's copy.

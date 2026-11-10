@@ -95,8 +95,6 @@ func withRepo(r *model.Repo, perm *model.Perm) ctxOption {
 // withParam sets a gin URL path parameter (e.g. "cron", "repo_id", "secret").
 // The key is intentionally a parameter so the same helper serves every
 // endpoint group; it currently varies across the api test suite.
-//
-//nolint:unparam // key varies across endpoint test files sharing this helper
 func withParam(key, value string) ctxOption {
 	return func(tc *testContext) {
 		tc.Ctx.Params = append(tc.Ctx.Params, gin.Param{Key: key, Value: value})
@@ -123,6 +121,8 @@ func withRequest(method string, body any) ctxOption {
 
 // withRawBody replaces the request body with raw bytes (e.g. malformed JSON)
 // to exercise bind-error paths.
+//
+//nolint:unparam // This shared helper accepts other HTTP methods for endpoint tests.
 func withRawBody(method, contentType string, body []byte) ctxOption {
 	return func(tc *testContext) {
 		req := httptest.NewRequest(method, "/", bytes.NewReader(body))

@@ -343,12 +343,11 @@ func TestRPCInit(t *testing.T) {
 		mockStore := store_mocks.NewMockStore(t)
 		agent := defaultAgent()
 		repo := defaultRepo()
-		pipeline := defaultPipeline(model.StatusPending)
 		workflow := defaultWorkflow(model.StatusPending)
 
 		mockStore.On("WorkflowLoad", int64(30)).Return(workflow, nil)
 		mockStore.On("AgentFind", int64(1)).Return(agent, nil)
-		mockStore.On("GetPipeline", int64(20)).Return(pipeline, nil)
+		mockStore.On("GetPipeline", int64(20)).Return(func(int64) *model.Pipeline { return defaultPipeline(model.StatusPending) }, nil)
 		mockStore.On("GetRepo", int64(10)).Return(repo, nil)
 		// pipeline.UpdateToStatusRunning -> UpdatePipeline
 		mockStore.On("UpdatePipeline", mock.Anything).Return(nil)
@@ -372,12 +371,11 @@ func TestRPCInit(t *testing.T) {
 		mockStore := store_mocks.NewMockStore(t)
 		agent := defaultAgent()
 		repo := defaultRepo()
-		pipeline := defaultPipeline(model.StatusRunning) // another workflow already started it
 		workflow := defaultWorkflow(model.StatusPending)
 
 		mockStore.On("WorkflowLoad", int64(30)).Return(workflow, nil)
 		mockStore.On("AgentFind", int64(1)).Return(agent, nil)
-		mockStore.On("GetPipeline", int64(20)).Return(pipeline, nil)
+		mockStore.On("GetPipeline", int64(20)).Return(func(int64) *model.Pipeline { return defaultPipeline(model.StatusRunning) }, nil)
 		mockStore.On("GetRepo", int64(10)).Return(repo, nil)
 		// updateForgeStatus -> GetUser returns error so forge interaction is skipped
 		mockStore.On("GetUser", mock.Anything).Return(nil, errors.New("user not found"))

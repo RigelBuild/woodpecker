@@ -15,11 +15,14 @@
 package datastore
 
 import (
+	"errors"
 	"fmt"
 
+	"xorm.io/builder"
 	"xorm.io/xorm"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
 func (s storage) WorkflowGetTree(pipeline *model.Pipeline) ([]*model.Workflow, error) {
@@ -200,6 +203,168 @@ func (s storage) WorkflowByStep(step *model.Step) (*model.Workflow, error) {
 func (s storage) WorkflowUpdate(workflow *model.Workflow) error {
 	_, err := s.engine.ID(workflow.ID).AllCols().Update(workflow)
 	return err
+}
+
+// WorkflowSupersedePending validates and updates the selected dependent closure in one transaction.
+func (s storage) WorkflowSupersedePending(pipelineID int64, ids []int64, by int64) (retErr error) {
+	if len(ids) == 0 {
+		return store.ErrPendingConflict
+	}
+
+	sess := s.engine.NewSession()
+	defer sess.Close()
+	if err := sess.Begin(); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			retErr = errors.Join(retErr, sess.Rollback())
+		}
+	}()
+
+	var workflows []*model.Workflow
+	if err := sess.Where("pipeline_id = ?", pipelineID).Find(&workflows); err != nil {
+		return err
+	}
+	byID := make(map[int64]*model.Workflow, len(workflows))
+	byName := make(map[string][]*model.Workflow, len(workflows))
+	for _, workflow := range workflows {
+		byID[workflow.ID] = workflow
+		byName[workflow.Name] = append(byName[workflow.Name], workflow)
+	}
+
+	selected := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return store.ErrPendingConflict
+		}
+		if _, duplicate := selected[id]; duplicate {
+			return store.ErrPendingConflict
+		}
+		workflow, ok := byID[id]
+		if !ok || workflow.State != model.StatusPending || workflow.AgentID != 0 || workflow.Started != 0 {
+			return store.ErrPendingConflict
+		}
+		selected[id] = struct{}{}
+	}
+
+	dependents := make(map[int64][]int64, len(workflows))
+	for _, workflow := range workflows {
+		seenDeps := make(map[int64]struct{}, len(workflow.DependsOn))
+		for _, name := range workflow.DependsOn {
+			matches := byName[name]
+			if len(matches) != 1 {
+				return store.ErrPendingConflict
+			}
+			dependencyID := matches[0].ID
+			if _, duplicate := seenDeps[dependencyID]; duplicate {
+				return store.ErrPendingConflict
+			}
+			seenDeps[dependencyID] = struct{}{}
+			dependents[dependencyID] = append(dependents[dependencyID], workflow.ID)
+		}
+	}
+	indegree := make(map[int64]int, len(workflows))
+	for _, workflow := range workflows {
+		indegree[workflow.ID] = 0
+	}
+	for _, children := range dependents {
+		for _, childID := range children {
+			indegree[childID]++
+		}
+	}
+	ready := make([]int64, 0, len(workflows))
+	for id, degree := range indegree {
+		if degree == 0 {
+			ready = append(ready, id)
+		}
+	}
+	visitedCount := 0
+	for len(ready) > 0 {
+		last := len(ready) - 1
+		id := ready[last]
+		ready = ready[:last]
+		visitedCount++
+		for _, childID := range dependents[id] {
+			indegree[childID]--
+			if indegree[childID] == 0 {
+				ready = append(ready, childID)
+			}
+		}
+	}
+	if visitedCount != len(workflows) {
+		return store.ErrPendingConflict
+	}
+
+	for _, id := range ids {
+		frontier := []int64{id}
+		visited := map[int64]struct{}{id: {}}
+		for len(frontier) > 0 {
+			current := frontier[len(frontier)-1]
+			frontier = frontier[:len(frontier)-1]
+			for _, childID := range dependents[current] {
+				if _, seen := visited[childID]; seen {
+					continue
+				}
+				visited[childID] = struct{}{}
+				frontier = append(frontier, childID)
+				child := byID[childID]
+				if child.State == model.StatusPending || child.State == model.StatusRunning {
+					if _, included := selected[childID]; !included {
+						return store.ErrPendingConflict
+					}
+				}
+			}
+		}
+	}
+
+	for id := range selected {
+		workflow := byID[id]
+		if workflow.State != model.StatusPending || workflow.AgentID != 0 || workflow.Started != 0 {
+			return store.ErrPendingConflict
+		}
+		steps, err := s.stepListWorkflow(sess, workflow)
+		if err != nil {
+			return err
+		}
+		for _, step := range steps {
+			if step.State != model.StatusPending || step.Started != 0 {
+				return store.ErrPendingConflict
+			}
+			if _, err := sess.ID(step.ID).Cols("state").Update(&model.Step{State: model.StatusCanceled}); err != nil {
+				return err
+			}
+		}
+		stamp := by
+		n, err := sess.ID(id).
+			Where("pipeline_id = ? AND state = ? AND agent_id = 0 AND started = 0", pipelineID, model.StatusPending).
+			Cols("state", "superseded_by").
+			Update(&model.Workflow{State: model.StatusSkipped, SupersededBy: &stamp})
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return store.ErrPendingConflict
+		}
+	}
+
+	if _, err := sess.Where(builder.In("id", workflowTaskIDs(ids))).Delete(new(model.Task)); err != nil {
+		return err
+	}
+	if err := sess.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func workflowTaskIDs(ids []int64) []string {
+	taskIDs := make([]string, len(ids))
+	for i, id := range ids {
+		taskIDs[i] = fmt.Sprint(id)
+	}
+	return taskIDs
 }
 
 // WorkflowResetForRequeue compares and sets the workflow row in one transaction,

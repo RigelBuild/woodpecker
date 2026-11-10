@@ -263,3 +263,8 @@ func (q *persistentQueue) ErrorAtOnce(c context.Context, ids []string, err error
 	}
 	return nil
 }
+
+// CancelPending holds the queue mutex across the store's atomic cancellation commit.
+func (q *persistentQueue) CancelPending(ctx context.Context, ids []string, commit func() error) error {
+	return q.Queue.CancelPending(ctx, ids, commit)
+}

@@ -181,6 +181,69 @@ func (q *fifo) ErrorAtOnce(_ context.Context, ids []string, err error) error {
 	return q.finished(ids, model.StatusFailure, err)
 }
 
+// CancelPending atomically commits and removes tasks that are still unassigned and pending.
+func (q *fifo) CancelPending(_ context.Context, ids []string, commit func() error) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if commit == nil {
+		return errors.New("queue: pending cancel requires commit")
+	}
+
+	q.Lock()
+	defer q.Unlock()
+
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return ErrPendingConflict
+		}
+		if _, duplicate := wanted[id]; duplicate {
+			return ErrPendingConflict
+		}
+		wanted[id] = struct{}{}
+		if _, running := q.running[id]; running {
+			return ErrPendingConflict
+		}
+	}
+
+	found := make(map[string]struct{}, len(ids))
+	for _, tasks := range []*list.List{q.pending, q.waitingOnDeps} {
+		for element := tasks.Front(); element != nil; element = element.Next() {
+			task, ok := element.Value.(*model.Task)
+			if !ok {
+				continue
+			}
+			if _, selected := wanted[task.ID]; selected {
+				if task.AgentID != 0 || task.Started != 0 {
+					return ErrPendingConflict
+				}
+				found[task.ID] = struct{}{}
+			}
+		}
+	}
+	if len(found) != len(wanted) {
+		return ErrPendingConflict
+	}
+
+	if err := commit(); err != nil {
+		return err
+	}
+	for _, tasks := range []*list.List{q.pending, q.waitingOnDeps} {
+		for element := tasks.Front(); element != nil; {
+			next := element.Next()
+			task, ok := element.Value.(*model.Task)
+			if ok {
+				if _, selected := wanted[task.ID]; selected {
+					tasks.Remove(element)
+				}
+			}
+			element = next
+		}
+	}
+	return nil
+}
+
 // locks the queue itself!
 func (q *fifo) finished(ids []string, exitStatus model.StatusValue, err error) error {
 	q.Lock()

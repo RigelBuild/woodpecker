@@ -171,3 +171,7 @@ func (p *impl) CancelWorkflows(c context.Context, workflowIDs []string) error {
 
 	return p.q.ErrorAtOnce(c, workflowIDs, queue.ErrCancel)
 }
+
+func (p *impl) CancelPending(ctx context.Context, ids []string, commit func() error) error {
+	return p.q.CancelPending(ctx, ids, commit)
+}

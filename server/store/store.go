@@ -16,9 +16,13 @@ package store
 
 import (
 	"context"
+	"errors"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
+
+// ErrPendingConflict means pending workflows changed before conditional cancellation.
+var ErrPendingConflict = errors.New("store: pending workflow conflict")
 
 // TODO: CreateX func should return new object to not indirect let storage change an existing object (alter ID etc...)
 
@@ -216,6 +220,8 @@ type Store interface {
 	WorkflowsCreate([]*model.Workflow) error
 	WorkflowsReplace(*model.Pipeline, []*model.Workflow) error
 	WorkflowLoad(int64) (*model.Workflow, error)
+	// WorkflowSupersedePending atomically validates and supersedes pending workflows.
+	WorkflowSupersedePending(pipelineID int64, ids []int64, by int64) error
 	WorkflowByStep(*model.Step) (*model.Workflow, error)
 	WorkflowUpdate(*model.Workflow) error
 	// WorkflowResetForRequeue returns a workflow its agent lost to pending if
