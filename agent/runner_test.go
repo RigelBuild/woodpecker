@@ -198,7 +198,11 @@ func TestRunCancelsWhenLeaseIsNotFound(t *testing.T) {
 			engine.On("DestroyWorkflow", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
-					ctx := args.Get(0).(context.Context)
+					ctx, ok := args.Get(0).(context.Context)
+					if !ok {
+						t.Errorf("StartStep arg 0 is %T, want context.Context", args.Get(0))
+						return
+					}
 					stepCtxCh <- ctx
 					<-ctx.Done()
 				}).Return(errors.New("step interrupted"))
