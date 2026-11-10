@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
@@ -152,7 +154,12 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 			case <-time.After(constant.TaskTimeout / 3):
 				logger.Debug().Msg("renewing workflow lease")
 				if err := r.client.Extend(workflowCtx, workflow.ID); err != nil {
-					logger.Error().Err(err).Msg("failed to extend workflow lease")
+					if isWorkflowLeaseNotFound(err) {
+						logger.Warn().Err(err).Msg("server no longer has workflow lease")
+						cancelWorkflowCtx(pipeline_errors.ErrCancel)
+					} else {
+						logger.Error().Err(err).Msg("failed to extend workflow lease")
+					}
 				}
 			}
 		}
@@ -233,6 +240,10 @@ func (r *Runner) Run(runnerCtx context.Context) error {
 	}
 
 	return nil
+}
+
+func isWorkflowLeaseNotFound(err error) bool {
+	return status.Code(err) == codes.NotFound
 }
 
 func extractRepositoryName(config *backend_types.Config) string {

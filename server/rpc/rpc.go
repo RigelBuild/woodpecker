@@ -343,7 +343,14 @@ func (s *RPC) Extend(c context.Context, workflowID string) error {
 		return err
 	}
 
-	return s.scheduler.Extend(c, agent.ID, workflowID)
+	// Preserve queue absence as a typed gRPC status for agents renewing leases.
+	if err := s.scheduler.Extend(c, agent.ID, workflowID); err != nil {
+		if errors.Is(err, queue.ErrNotFound) {
+			return status.Error(codes.NotFound, err.Error())
+		}
+		return err
+	}
+	return nil
 }
 
 // Update let agent updates the step state at the server.

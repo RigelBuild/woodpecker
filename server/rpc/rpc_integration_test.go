@@ -26,7 +26,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
@@ -37,6 +39,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/queue"
 	queue_mocks "go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
+	scheduler_mocks "go.woodpecker-ci.org/woodpecker/v3/server/scheduler/mocks"
 	log_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/log/mocks"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
@@ -936,6 +939,24 @@ func TestRPCExtend(t *testing.T) {
 		err := rpcInst.Extend(ctx, "30")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not allowed to interact")
+	})
+
+	t.Run("maps missing queue task to NotFound", func(t *testing.T) {
+		mockStore := store_mocks.NewMockStore(t)
+		mockStore.On("AgentFind", int64(1)).Return(defaultAgent(), nil)
+		mockStore.On("AgentUpdate", mock.Anything).Return(nil)
+		mockStore.On("WorkflowLoad", int64(30)).Return(defaultWorkflow(model.StatusRunning), nil)
+		mockStore.On("GetPipeline", int64(20)).Return(defaultPipeline(model.StatusRunning), nil)
+		mockStore.On("GetRepo", int64(10)).Return(defaultRepo(), nil)
+
+		sched := scheduler_mocks.NewMockScheduler(t)
+		sched.On("Extend", mock.Anything, int64(1), "30").Return(queue.ErrNotFound)
+		mockRPC := RPC{store: mockStore, scheduler: sched}
+
+		err := mockRPC.Extend(context.WithValue(t.Context(), agentIDKey, int64(1)), "30")
+		require.Error(t, err)
+		assert.Equal(t, codes.NotFound, status.Code(err))
+		assert.EqualError(t, err, "rpc error: code = NotFound desc = queue: task not found")
 	})
 }
 
