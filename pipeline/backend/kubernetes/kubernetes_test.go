@@ -1341,6 +1341,29 @@ func TestStartSecretsRetryResourceQuotaConflict(t *testing.T) {
 	assert.Len(t, secrets.Items, 2)
 }
 
+// A step Secret left by an earlier attempt of the same step must not fail the step.
+func TestStartStepSecretReplacesLeftoverSecret(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("leftover-secret-01")
+	step.SecretMapping = map[string]string{"TOKEN": "new-value"}
+
+	name, err := stepSecretName(step)
+	require.NoError(t, err)
+	_, err = client.CoreV1().Secrets("test-ns").Create(t.Context(), &kube_core_v1.Secret{
+		ObjectMeta: kube_meta_v1.ObjectMeta{Name: name, Namespace: "test-ns"},
+		StringData: map[string]string{"TOKEN": "old-value"},
+	}, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, startStepSecret(t.Context(), engine, step))
+
+	secrets, err := client.CoreV1().Secrets("test-ns").List(t.Context(), kube_meta_v1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, secrets.Items, 1)
+	assert.Equal(t, "new-value", secrets.Items[0].StringData["TOKEN"])
+}
+
 func TestSetupWorkflowRetriesResourceQuotaConflict(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)

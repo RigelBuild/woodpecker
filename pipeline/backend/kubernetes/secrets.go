@@ -337,9 +337,21 @@ func startStepSecret(ctx context.Context, e *kube, step *types.Step) error {
 		return err
 	}
 	log.Trace().Msgf("creating secret: %s", secret.Name)
-	_, err = createRetryOnConflict(ctx, func() (*kube_core_v1.Secret, error) {
-		return e.client.CoreV1().Secrets(e.config.GetNamespace(step.OrgID)).Create(ctx, secret, kube_meta_v1.CreateOptions{})
-	})
+	create := func() error {
+		_, err := createRetryOnConflict(ctx, func() (*kube_core_v1.Secret, error) {
+			return e.client.CoreV1().Secrets(e.config.GetNamespace(step.OrgID)).Create(ctx, secret, kube_meta_v1.CreateOptions{})
+		})
+		return err
+	}
+	err = create()
+	if errors.IsAlreadyExists(err) {
+		// An earlier attempt of this step left its Secret behind; its values are stale.
+		log.Warn().Str("secret", secret.Name).Msg("replacing step secret left by an earlier attempt")
+		if err := stopStepSecret(ctx, e, step, e.config.newDefaultDeleteOptions()); err != nil {
+			return err
+		}
+		err = create()
+	}
 	return err
 }
 
