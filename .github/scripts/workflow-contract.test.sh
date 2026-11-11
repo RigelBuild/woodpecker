@@ -44,7 +44,10 @@ done
 [ "$(yq -r '.jobs.agent-rehearsal.if' "$publisher")" = "github.event_name == 'workflow_dispatch'" ] || fail 'agent rehearsal is dispatch-only'
 [ "$(yq -r '.jobs.server-rehearsal.if' "$publisher")" = "github.event_name == 'workflow_dispatch'" ] || fail 'server rehearsal is dispatch-only'
 [ "$(yq -r '.jobs.finalize.if' "$publisher")" = "github.event_name == 'push'" ] || fail 'finalize is tag-push-only'
-[ "$(yq -r '.jobs.finalize.needs | sort | join(",")' "$publisher")" = 'agent-publish,resolve,server-publish' ] || fail 'finalize needs both image digests and resolve'
+[ "$(yq -r '.jobs.finalize.needs | sort | join(",")' "$publisher")" = 'agent-publish,release-binaries,resolve,server-publish' ] || fail 'finalize needs both image digests, binaries, and resolve'
+[ "$(yq -r '.jobs.release-binaries.if' "$publisher")" = "github.event_name == 'push'" ] || fail 'release binaries are tag-push-only'
+[ "$(yq -r '.jobs.release-binaries.steps | map(select((.run // "") | test("build-release-binaries.sh"))) | length' "$publisher")" = 1 ] || fail 'release binaries built by the script'
+grep -Fq 'gh release upload "v${VERSION}" dist/assets/* --clobber' "$publisher" || fail 'finalize attaches release binaries'
 for job in agent-publish server-publish; do
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.push" "$publisher")" = true ] || fail "$job pushes its manifest"
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.outputs" "$publisher" | grep -c 'push-by-digest=true')" = 1 ] || fail "$job pushes by digest"
