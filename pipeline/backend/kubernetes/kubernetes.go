@@ -59,13 +59,16 @@ const (
 )
 
 type kube struct {
-	client              kubernetes.Interface
-	config              *config
-	goos                string
-	openLogStream       func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
-	logRetryNow         func() time.Time
-	logRetryTimeout     time.Duration
-	waitLogReopen       func(context.Context, time.Duration) error
+	client          kubernetes.Interface
+	config          *config
+	goos            string
+	openLogStream   func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
+	logRetryNow     func() time.Time
+	logRetryTimeout time.Duration
+	waitLogReopen   func(context.Context, time.Duration) error
+	// snapshotObserved is called after WaitStep's informer stores a Running snapshot for the pod.
+	// Only tests set it; production leaves it nil.
+	snapshotObserved    func(podName string)
 	nodes               sync.Map
 	started             sync.Map
 	workflowResourcesMu sync.RWMutex
@@ -502,6 +505,9 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 		}
 		last.Store(pod.DeepCopy())
 		e.recordNode(pod)
+		if e.snapshotObserved != nil && pod.Status.Phase == kube_core_v1.PodRunning {
+			e.snapshotObserved(podName)
+		}
 		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
 			finishedOnce.Do(func() { close(finished) })
 		}

@@ -65,18 +65,54 @@ func countPodCreates(client *fake.Clientset) *atomic.Int32 {
 	return &creates
 }
 
-// watchPods signals once the informer behind WaitStep has registered its watch.
+// watchPods signals once per watch the informers register, so a test can wait for the first or the
+// second. It forwards the watch's ListOptions to the tracker, so a watch resumed from the list's
+// resourceVersion replays any object stored after the list. Dropping them loses an Update that
+// lands between List and Watch.
 func watchPods(client *fake.Clientset) <-chan struct{} {
-	watching := make(chan struct{})
-	var once atomic.Bool
+	registered := make(chan struct{}, 8)
 	client.PrependWatchReactor("pods", func(action kube_testing.Action) (bool, watch.Interface, error) {
-		w, err := client.Tracker().Watch(action.GetResource(), action.GetNamespace())
-		if once.CompareAndSwap(false, true) {
-			close(watching)
-		}
+		w, err := client.Tracker().Watch(action.GetResource(), action.GetNamespace(), action.(kube_testing.WatchActionImpl).ListOptions)
+		registered <- struct{}{}
 		return true, w, err
 	})
-	return watching
+	return registered
+}
+
+// awaitRegistration waits for the nth watch registration, bounded, so a missing watch fails fast.
+func awaitRegistration(t *testing.T, registered <-chan struct{}, n int) {
+	t.Helper()
+	for range n {
+		select {
+		case <-registered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("watch registration %d never happened", n)
+		}
+	}
+}
+
+// snapshotGate returns a channel closed once the informer stores a Running snapshot for podName.
+// The initial list reaches the informer as a store Replace, not a watch event, so the signal comes
+// from the production handler through snapshotObserved, which runs after the snapshot is stored.
+func snapshotGate(engine *kube, podName string) <-chan struct{} {
+	gate := make(chan struct{})
+	var once atomic.Bool
+	engine.snapshotObserved = func(name string) {
+		if name == podName && once.CompareAndSwap(false, true) {
+			close(gate)
+		}
+	}
+	return gate
+}
+
+// awaitGate waits for a gate with a bound, so a broken gate fails the test instead of hanging.
+func awaitGate(t *testing.T, gate <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-gate:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("gate never fired: %s", what)
+	}
 }
 
 // markRunning drives the production waitPodUp path, which records that the pod reached Running.
@@ -109,6 +145,7 @@ func TestWaitStepRecreatesPodDeletedAfterRunning(t *testing.T) {
 	markRunning(t, engine, step, podName)
 	creates := countPodCreates(client)
 	watching := watchPods(client)
+	running := snapshotGate(engine, podName)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -121,7 +158,9 @@ func TestWaitStepRecreatesPodDeletedAfterRunning(t *testing.T) {
 		state, err := engine.WaitStep(ctx, step, "task-recreate")
 		done <- result{state, err}
 	}()
-	<-watching
+	awaitGate(t, watching, "informer watch registered")
+	// The Running snapshot is stored before the delete, so the loss has a snapshot to decide on.
+	awaitGate(t, running, "Running snapshot stored by WaitStep's informer")
 	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
 	waitForRecreate(t, client, podName)
 	// The replacement exits 7, a code only the new pod can report: the lost pod never exited.
@@ -164,10 +203,14 @@ func TestWaitStepFailsWhenRecreatedPodIsDeletedAgain(t *testing.T) {
 		_, err := engine.WaitStep(ctx, step, "task-recreate-twice")
 		done <- err
 	}()
-	<-watching
+	awaitRegistration(t, watching, 1)
 	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
 	waitForRecreate(t, client, podName)
-	// Delete the replacement too: the second loss must fail, not recreate again.
+	// The second delete must land after the second attempt's watch is registered, so the loss is observed.
+	awaitRegistration(t, watching, 1)
+	// Assert the replacement is stored before the second delete, so the delete is observable.
+	_, err = client.CoreV1().Pods("test-ns").Get(t.Context(), podName, kube_meta_v1.GetOptions{})
+	require.NoError(t, err)
 	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
 
 	select {
@@ -304,7 +347,7 @@ func TestWaitStepDoesNotRecreateDisruptionTargetTerminated(t *testing.T) {
 		_, err := engine.WaitStep(ctx, step, "task-disruption")
 		done <- err
 	}()
-	<-watching
+	awaitGate(t, watching, "informer watch registered")
 	// An abrupt node loss: the container exits 137 and the disruption condition is set, then the object goes.
 	disrupted := recreateTestPod(podName, kube_core_v1.PodFailed, exitedState(137))
 	disrupted.Status.Conditions = []kube_core_v1.PodCondition{{
@@ -420,9 +463,14 @@ func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
 		state, err := engine.WaitStep(ctx, step, "task-1")
 		done <- result{state, err}
 	}()
-	<-watching
+	awaitRegistration(t, watching, 1)
 	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
 	waitForRecreate(t, client, podName)
+	// The second delete must land after the second attempt's watch is registered, so the loss is observed.
+	awaitRegistration(t, watching, 1)
+	// Assert the replacement is stored before the second delete, so the delete is observable.
+	_, err = client.CoreV1().Pods("test-ns").Get(t.Context(), podName, kube_meta_v1.GetOptions{})
+	require.NoError(t, err)
 	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
 
 	select {
