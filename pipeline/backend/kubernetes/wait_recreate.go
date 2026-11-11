@@ -17,6 +17,7 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	kube_core_v1 "k8s.io/api/core/v1"
@@ -32,6 +33,23 @@ type deletedPodError struct {
 
 func (e *deletedPodError) Error() string { return e.err.Error() }
 func (e *deletedPodError) Unwrap() error { return e.err }
+
+// awaitObservedDelete reports whether the informer delivers a watch DELETED for the pod. A bare
+// Get NotFound can reach WaitStep before that event is handled, so the NotFound path waits here,
+// bounded by the informer's resync interval. It fails closed: a timer or context end reports no
+// observed delete, so the loss is never recreated on an unconfirmed delete.
+func awaitObservedDelete(ctx context.Context, deleted <-chan struct{}) bool {
+	timer := time.NewTimer(defaultResyncDuration)
+	defer timer.Stop()
+	select {
+	case <-deleted:
+		return true
+	case <-timer.C:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
 
 // deletedLoss marks a loss recreatable only when the informer observed a real DELETED event for
 // the pod and the final object shows the step container running or waiting. A tombstone, a bare
@@ -64,7 +82,9 @@ func (e *kube) stepBackendOptions(step *types.Step, taskUUID string) BackendOpti
 
 // WaitStep waits for the step pod to finish. If the pod was deleted after it reached Running,
 // it recreates the pod once and waits again. A second loss fails the step.
-// A pod lost before it reached Running is reported without a recreate.
+// Only an abrupt node loss is recreated: a container that is terminated at its last snapshot,
+// including a DisruptionTarget pod that exited 137, is not. A pod lost before it reached Running
+// is reported without a recreate.
 func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
 	podName, err := stepToPodName(step)
 	if err != nil {
