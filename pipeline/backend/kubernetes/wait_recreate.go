@@ -33,18 +33,16 @@ type deletedPodError struct {
 func (e *deletedPodError) Error() string { return e.err.Error() }
 func (e *deletedPodError) Unwrap() error { return e.err }
 
-// deletedLoss marks a loss recreatable only when the last snapshot shows the step container
-// still running or waiting. A nil snapshot, or any terminated state, is not recreated:
-// the step already ran, or nothing shows the pod was ever scheduled.
-func deletedLoss(last *kube_core_v1.Pod, podName string, err error) error {
-	if last == nil {
+// deletedLoss marks a loss recreatable only when the informer observed a real DELETED event for
+// the pod and the final object shows the step container running or waiting. A tombstone, a bare
+// Get NotFound, or a nil snapshot is not recreated: nothing shows the step was ever started.
+// A terminated container has neither Running nor Waiting set, so it is not recreated.
+func deletedLoss(last *kube_core_v1.Pod, observedDelete bool, podName string, err error) error {
+	if !observedDelete || last == nil {
 		return err
 	}
 	container, found := stepContainerStatus(last, podName)
-	if !found || container.State.Terminated != nil {
-		return err
-	}
-	if container.State.Running == nil && container.State.Waiting == nil {
+	if !found || (container.State.Running == nil && container.State.Waiting == nil) {
 		return err
 	}
 	return &deletedPodError{err: err}

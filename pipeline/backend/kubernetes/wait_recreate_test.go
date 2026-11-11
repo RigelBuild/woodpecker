@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	kube_core_v1 "k8s.io/api/core/v1"
+	kube_errors "k8s.io/apimachinery/pkg/api/errors"
 	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kube_runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -147,10 +148,12 @@ func TestWaitStepFailsWhenRecreatedPodIsDeletedAgain(t *testing.T) {
 	podName, err := stepToPodName(step)
 	require.NoError(t, err)
 
-	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), recreateTestPod(podName, kube_core_v1.PodRunning, runningState()), kube_meta_v1.CreateOptions{})
+	pod := recreateTestPod(podName, kube_core_v1.PodRunning, runningState())
+	pod.Spec.NodeName = "node-1"
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
 	require.NoError(t, err)
 	markRunning(t, engine, step, podName)
-	engine.nodes.Store(podName, "node-1")
+	createPreemptEvent(t, client, "node-1")
 	creates := countPodCreates(client)
 	watching := watchPods(client)
 
@@ -206,7 +209,8 @@ func TestWaitStepDoesNotRecreateExitedPodWhileObjectPresent(t *testing.T) {
 	assert.Equal(t, int32(0), creates.Load(), "a finished pod must not be recreated")
 }
 
-// A single loss with the started marker cleared is reported with its node, and is not recreated.
+// A single loss with the started marker cleared reports the node waitPodUp recorded, confirmed by
+// a PreemptScheduled event on that node, and is not recreated.
 func TestWaitStepReportsSingleLossNodeWithoutRecreate(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
@@ -214,10 +218,12 @@ func TestWaitStepReportsSingleLossNodeWithoutRecreate(t *testing.T) {
 	podName, err := stepToPodName(step)
 	require.NoError(t, err)
 
-	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), recreateTestPod(podName, kube_core_v1.PodRunning, runningState()), kube_meta_v1.CreateOptions{})
+	pod := recreateTestPod(podName, kube_core_v1.PodRunning, runningState())
+	pod.Spec.NodeName = "node-1"
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
 	require.NoError(t, err)
 	markRunning(t, engine, step, podName)
-	engine.nodes.Store(podName, "node-1")
+	createPreemptEvent(t, client, "node-1")
 	// Clear the started marker first: this loss must be reported as a plain single loss.
 	engine.started.Delete(podName)
 	creates := countPodCreates(client)
@@ -230,11 +236,26 @@ func TestWaitStepReportsSingleLossNodeWithoutRecreate(t *testing.T) {
 	require.ErrorAs(t, err, &loss)
 	assert.Nil(t, state)
 	assert.Equal(t, "node-1", loss.Node)
-	assert.False(t, loss.Confirmed, "no preemption event was recorded for the node")
+	assert.True(t, loss.Confirmed, "the PreemptScheduled event on node-1 confirms the loss")
 	assert.Equal(t, int32(0), creates.Load(), "a loss without the started marker must not recreate")
 }
 
+// createPreemptEvent records a PreemptScheduled event for node, the evidence podLoss looks for.
+func createPreemptEvent(t *testing.T, client *fake.Clientset, node string) {
+	t.Helper()
+	_, err := client.CoreV1().Events("default").Create(t.Context(), &kube_core_v1.Event{
+		ObjectMeta:     kube_meta_v1.ObjectMeta{Name: "preempt-" + node, Namespace: "default"},
+		InvolvedObject: kube_core_v1.ObjectReference{Kind: "Node", Name: node},
+		Reason:         preemptEventReason,
+		Source:         kube_core_v1.EventSource{Component: preemptEventSource},
+		EventTime:      kube_meta_v1.NewMicroTime(time.Now()),
+	}, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+}
+
 // A container that exited 1 and was then deleted is not recreated: the step already ran and failed.
+// The Failed update and the delete both reach WaitStep's informer as watch events, in order, so the
+// loss sees a Terminated snapshot. Without the Terminated guard this loss would recreate.
 func TestWaitStepDoesNotRecreateNonzeroExitThenDeleted(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
@@ -245,35 +266,73 @@ func TestWaitStepDoesNotRecreateNonzeroExitThenDeleted(t *testing.T) {
 	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), recreateTestPod(podName, kube_core_v1.PodRunning, runningState()), kube_meta_v1.CreateOptions{})
 	require.NoError(t, err)
 	markRunning(t, engine, step, podName)
-	_, err = client.CoreV1().Pods("test-ns").Update(t.Context(), recreateTestPod(podName, kube_core_v1.PodFailed, exitedState(1)), kube_meta_v1.UpdateOptions{})
-	require.NoError(t, err)
 	creates := countPodCreates(client)
-	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+	watching := watchPods(client)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	state, err := engine.WaitStep(ctx, step, "task-exit1")
-	require.Error(t, err)
-	assert.Nil(t, state)
-	assert.Equal(t, int32(0), creates.Load(), "a container that already exited must not be rerun")
+	done := make(chan error, 1)
+	go func() {
+		_, err := engine.WaitStep(ctx, step, "task-exit1")
+		done <- err
+	}()
+	<-watching
+	_, err = client.CoreV1().Pods("test-ns").Update(t.Context(), recreateTestPod(podName, kube_core_v1.PodFailed, exitedState(1)), kube_meta_v1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+
+	select {
+	case err := <-done:
+		var loss *types.PodLossError
+		require.ErrorAs(t, err, &loss)
+		assert.Equal(t, int32(0), creates.Load(), "a container that already exited must not be rerun")
+	case <-ctx.Done():
+		t.Fatal("WaitStep did not return after the delete")
+	}
 }
 
-// A pod deleted before the informer ever observes it has no snapshot, so it is not recreated.
+// A Running pod that vanishes with no watch DELETED event is not recreated: the informer stored a
+// Running snapshot, but no DELETED reached the handler, so the observed-delete guard must stop it.
+// Only a bare Get NotFound reports the loss.
 func TestWaitStepDoesNotRecreateDeletedBeforeInformerSync(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
 	step := makeStep("deleted-before-sync")
-	podName := createPod(t, client, step, "test-ns")
-	// markRunning is not called: no pod snapshot reaches the started marker before deletion.
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), recreateTestPod(podName, kube_core_v1.PodRunning, runningState()), kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	markRunning(t, engine, step, podName)
 	creates := countPodCreates(client)
-	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+	watching := watchPods(client)
+	// Every Get after the pod is gone reports NotFound, and no watch DELETED is ever sent.
+	var gone atomic.Bool
+	client.PrependReactor("get", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
+		if gone.Load() {
+			return true, nil, kube_errors.NewNotFound(kube_core_v1.Resource("pods"), podName)
+		}
+		return false, nil, nil
+	})
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	state, err := engine.WaitStep(ctx, step, "task-pre-sync")
-	require.Error(t, err)
-	assert.Nil(t, state)
-	assert.Equal(t, int32(0), creates.Load(), "a pod with no snapshot must not be recreated")
+	done := make(chan error, 1)
+	go func() {
+		_, err := engine.WaitStep(ctx, step, "task-pre-sync")
+		done <- err
+	}()
+	<-watching
+	gone.Store(true)
+
+	select {
+	case err := <-done:
+		var loss *types.PodLossError
+		require.ErrorAs(t, err, &loss)
+		assert.Equal(t, int32(0), creates.Load(), "a pod with no observed delete must not be recreated")
+	case <-ctx.Done():
+		t.Fatal("WaitStep did not return after the pod was gone")
+	}
 }
 
 // A pod lost before it reached Running is reported, not recreated.
@@ -307,6 +366,7 @@ func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
 	pod.Spec.NodeName = "node-1"
 	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
 	require.NoError(t, err)
+	createPreemptEvent(t, client, "node-1")
 
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()

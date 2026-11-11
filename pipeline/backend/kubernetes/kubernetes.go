@@ -486,6 +486,8 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 	log.Trace().Str("taskUUID", taskUUID).Msgf("waiting for pod: %s", podName)
 
 	var last atomic.Pointer[kube_core_v1.Pod]
+	// observedDelete is set only by a watch DELETED event for this pod, not by a tombstone or a bare Get.
+	var observedDelete atomic.Bool
 	finished := make(chan struct{})
 	var finishedOnce sync.Once
 	podChanged := func(obj any) {
@@ -513,6 +515,7 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 	podDeleted := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
 		if !ok {
+			// A tombstone carries a possibly stale object; it ends the wait but proves no observed delete.
 			tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 			if !ok {
 				return
@@ -521,8 +524,14 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			if !ok {
 				return
 			}
+			if pod.Name == podName {
+				podChanged(pod)
+				finishedOnce.Do(func() { close(finished) })
+			}
+			return
 		}
 		if pod.Name == podName {
+			observedDelete.Store(true)
 			podChanged(pod)
 			finishedOnce.Do(func() { close(finished) })
 		}
@@ -555,7 +564,7 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, deletedLoss(newest, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
+			return nil, deletedLoss(newest, observedDelete.Load(), podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		return nil, err
 	} else {
@@ -605,7 +614,7 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, deletedLoss(newest, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
+			return nil, deletedLoss(newest, observedDelete.Load(), podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		if !types.InTeardown(ctx) {
 			newest := last.Load()
