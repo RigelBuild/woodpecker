@@ -65,6 +65,10 @@
       "matchDatasources": ["docker"],
       "versioning": "regex:^go-(?<major>\\d+)\\.(?<minor>\\d+)\\.x$",
       "matchPackageNames": ["/techknowlogick/xgo/"]
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "automerge": false
     }
   ]
 }
