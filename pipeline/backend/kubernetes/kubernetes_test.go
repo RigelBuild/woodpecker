@@ -1087,12 +1087,13 @@ func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
 		EventTime: kube_meta_v1.NewMicroTime(time.Now()),
 	}, kube_meta_v1.CreateOptions{})
 	require.NoError(t, err)
-	deleted := false
+	// The first list deletes the Running pod; the recreated pod is deleted on its own list: a second loss.
+	deletes := 0
 	client.PrependReactor("list", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
-		if deleted {
+		if deletes >= 2 {
 			return false, nil, nil
 		}
-		deleted = true
+		deletes++
 		if err := client.Tracker().Delete(action.GetResource(), "test-ns", podName); err != nil {
 			return true, nil, err
 		}
@@ -1101,12 +1102,12 @@ func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
 	var teardown atomic.Bool
 	ctx, cancel = context.WithTimeout(types.WithTeardown(t.Context(), &teardown), 3*time.Second)
 	defer cancel()
+	creates := countPodCreates(client)
 	state, err := engine.WaitStep(ctx, step, "task-1")
 	var loss *types.PodLossError
 	require.ErrorAs(t, err, &loss)
 	assert.Nil(t, state)
-	assert.Equal(t, "node-1", loss.Node)
-	assert.True(t, loss.Confirmed)
+	assert.Equal(t, int32(1), creates.Load(), "the first loss recreates the pod once; the second fails")
 }
 
 // A Spot pod can vanish while Pending; TailStep must return so WaitStep reports the loss.

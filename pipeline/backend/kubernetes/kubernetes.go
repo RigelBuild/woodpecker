@@ -67,6 +67,7 @@ type kube struct {
 	logRetryTimeout     time.Duration
 	waitLogReopen       func(context.Context, time.Duration) error
 	nodes               sync.Map
+	started             sync.Map
 	workflowResourcesMu sync.RWMutex
 	workflowResources   map[string]Resources
 }
@@ -190,7 +191,10 @@ func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) 
 			upOnce.Do(func() { close(up) })
 		}
 		switch pod.Status.Phase {
-		case kube_core_v1.PodRunning, kube_core_v1.PodSucceeded, kube_core_v1.PodFailed:
+		case kube_core_v1.PodRunning:
+			e.started.Store(podName, struct{}{})
+			upOnce.Do(func() { close(up) })
+		case kube_core_v1.PodSucceeded, kube_core_v1.PodFailed:
 			upOnce.Do(func() { close(up) })
 		}
 	}
@@ -464,13 +468,8 @@ func (e *kube) SetupWorkflow(ctx context.Context, conf *types.Config, taskUUID s
 
 // StartStep starts the pipeline step.
 func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string) error {
-	options, err := parseBackendOptions(step)
-	if err != nil {
-		log.Error().Err(err).Msg("could not parse backend options")
-	}
-	if step.Type == types.StepTypeClone && len(options.Resources.Requests) == 0 && len(options.Resources.Limits) == 0 {
-		options.Resources = e.getWorkflowResources(taskUUID)
-	}
+	options := e.stepBackendOptions(step, taskUUID)
+	var err error
 
 	if needsRegistrySecret(step) {
 		err = startRegistrySecret(ctx, e, step)
@@ -491,7 +490,8 @@ func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string)
 	return err
 }
 
-func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
+// waitStepAttempt waits for one step pod attempt; WaitStep decides whether to recreate it.
+func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
 	podName, err := stepToPodName(step)
 	if err != nil {
 		return nil, err
@@ -568,7 +568,7 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+			return nil, deletedLoss(e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		return nil, err
 	} else {
@@ -618,7 +618,7 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+			return nil, deletedLoss(e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		if !types.InTeardown(ctx) {
 			newest := last.Load()
@@ -1133,6 +1133,7 @@ func (e *kube) DestroyStep(ctx context.Context, step *types.Step, taskUUID strin
 	}
 	if podName, nameErr := stepToPodName(step); nameErr == nil {
 		e.nodes.Delete(podName)
+		e.started.Delete(podName)
 	} else {
 		errs = append(errs, nameErr)
 	}
@@ -1148,6 +1149,7 @@ func (e *kube) DestroyWorkflow(ctx context.Context, conf *types.Config, taskUUID
 		for _, step := range stage.Steps {
 			if podName, err := stepToPodName(step); err == nil {
 				e.nodes.Delete(podName)
+				e.started.Delete(podName)
 			}
 			err := stopPod(ctx, e, step, e.config.newDefaultDeleteOptions())
 			if err != nil {
