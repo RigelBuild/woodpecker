@@ -19,6 +19,7 @@ import (
 	"errors"
 
 	"github.com/rs/zerolog/log"
+	kube_core_v1 "k8s.io/api/core/v1"
 
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 )
@@ -32,7 +33,20 @@ type deletedPodError struct {
 func (e *deletedPodError) Error() string { return e.err.Error() }
 func (e *deletedPodError) Unwrap() error { return e.err }
 
-func deletedLoss(err error) error {
+// deletedLoss marks a loss recreatable only when the last snapshot shows the step container
+// still running or waiting. A nil snapshot, or any terminated state, is not recreated:
+// the step already ran, or nothing shows the pod was ever scheduled.
+func deletedLoss(last *kube_core_v1.Pod, podName string, err error) error {
+	if last == nil {
+		return err
+	}
+	container, found := stepContainerStatus(last, podName)
+	if !found || container.State.Terminated != nil {
+		return err
+	}
+	if container.State.Running == nil && container.State.Waiting == nil {
+		return err
+	}
 	return &deletedPodError{err: err}
 }
 
@@ -60,26 +74,20 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	}
 
 	state, err := e.waitStepAttempt(ctx, step, taskUUID)
-	if err == nil || !isDeletedLoss(err) {
+	if !isDeletedLoss(err) {
 		return state, err
 	}
-	if _, started := e.started.Load(podName); !started {
-		return nil, err
-	}
-	if types.InTeardown(ctx) {
+	if _, started := e.started.Load(podName); !started || types.InTeardown(ctx) {
 		return nil, err
 	}
 
-	log.Warn().Str("workflow_id", taskUUID).Str("step", step.Name).Str("pod", podName).Msg("step pod deleted after start, recreating once")
+	log.Warn().Str("workflow_id", taskUUID).Str("step", step.Name).Str("pod", podName).Msg("step pod deleted after start; recreating once; logs of the new pod are not streamed")
 	e.started.Delete(podName)
+	e.nodes.Delete(podName)
 	if _, startErr := startPod(ctx, e, step, e.stepBackendOptions(step, taskUUID), taskUUID); startErr != nil {
 		return nil, errors.Join(err, startErr)
 	}
-	state, err = e.waitStepAttempt(ctx, step, taskUUID)
-	if err != nil && isDeletedLoss(err) {
-		return nil, err
-	}
-	return state, err
+	return e.waitStepAttempt(ctx, step, taskUUID)
 }
 
 func isDeletedLoss(err error) bool {

@@ -35,12 +35,13 @@ import (
 
 // recreateTestPod is a step pod in the given phase, with its one container in state.
 func recreateTestPod(name string, phase kube_core_v1.PodPhase, state kube_core_v1.ContainerState) *kube_core_v1.Pod {
+	// The step container is named after the pod, as production does (see stepContainerStatus).
 	return &kube_core_v1.Pod{
 		ObjectMeta: kube_meta_v1.ObjectMeta{Name: name, Namespace: "test-ns"},
-		Spec:       kube_core_v1.PodSpec{Containers: []kube_core_v1.Container{{Name: "step"}}},
+		Spec:       kube_core_v1.PodSpec{Containers: []kube_core_v1.Container{{Name: name}}},
 		Status: kube_core_v1.PodStatus{
 			Phase:             phase,
-			ContainerStatuses: []kube_core_v1.ContainerStatus{{Name: "step", State: state}},
+			ContainerStatuses: []kube_core_v1.ContainerStatus{{Name: name, State: state}},
 		},
 	}
 }
@@ -149,6 +150,7 @@ func TestWaitStepFailsWhenRecreatedPodIsDeletedAgain(t *testing.T) {
 	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), recreateTestPod(podName, kube_core_v1.PodRunning, runningState()), kube_meta_v1.CreateOptions{})
 	require.NoError(t, err)
 	markRunning(t, engine, step, podName)
+	engine.nodes.Store(podName, "node-1")
 	creates := countPodCreates(client)
 	watching := watchPods(client)
 
@@ -167,16 +169,20 @@ func TestWaitStepFailsWhenRecreatedPodIsDeletedAgain(t *testing.T) {
 
 	select {
 	case err := <-done:
-		require.Error(t, err)
+		var loss *types.PodLossError
+		require.ErrorAs(t, err, &loss)
 		assert.True(t, errors.Is(err, types.ErrStepPodLost), "got %v", err)
+		// The replacement was never scheduled, so the second loss must not reuse the first pod's node.
+		assert.Empty(t, loss.Node)
+		assert.False(t, loss.Confirmed)
 	case <-ctx.Done():
 		t.Fatal("WaitStep did not fail after the second loss")
 	}
 	assert.Equal(t, int32(1), creates.Load(), "a second loss must not trigger another recreate")
 }
 
-// A pod whose container exited 0 is not recreated when WaitStep finds the object still present.
-func TestWaitStepDoesNotRecreateFinishedPod(t *testing.T) {
+// A container that exited 0 while the pod object is still present is not recreated.
+func TestWaitStepDoesNotRecreateExitedPodWhileObjectPresent(t *testing.T) {
 	client := fake.NewClientset()
 	engine := makeEngine(client)
 	step := makeStep("finished-deleted")
@@ -200,6 +206,76 @@ func TestWaitStepDoesNotRecreateFinishedPod(t *testing.T) {
 	assert.Equal(t, int32(0), creates.Load(), "a finished pod must not be recreated")
 }
 
+// A single loss with the started marker cleared is reported with its node, and is not recreated.
+func TestWaitStepReportsSingleLossNodeWithoutRecreate(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("single-loss-node")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), recreateTestPod(podName, kube_core_v1.PodRunning, runningState()), kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	markRunning(t, engine, step, podName)
+	engine.nodes.Store(podName, "node-1")
+	// Clear the started marker first: this loss must be reported as a plain single loss.
+	engine.started.Delete(podName)
+	creates := countPodCreates(client)
+	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	state, err := engine.WaitStep(ctx, step, "task-single-loss")
+	var loss *types.PodLossError
+	require.ErrorAs(t, err, &loss)
+	assert.Nil(t, state)
+	assert.Equal(t, "node-1", loss.Node)
+	assert.False(t, loss.Confirmed, "no preemption event was recorded for the node")
+	assert.Equal(t, int32(0), creates.Load(), "a loss without the started marker must not recreate")
+}
+
+// A container that exited 1 and was then deleted is not recreated: the step already ran and failed.
+func TestWaitStepDoesNotRecreateNonzeroExitThenDeleted(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("exit1-deleted")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), recreateTestPod(podName, kube_core_v1.PodRunning, runningState()), kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+	markRunning(t, engine, step, podName)
+	_, err = client.CoreV1().Pods("test-ns").Update(t.Context(), recreateTestPod(podName, kube_core_v1.PodFailed, exitedState(1)), kube_meta_v1.UpdateOptions{})
+	require.NoError(t, err)
+	creates := countPodCreates(client)
+	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	state, err := engine.WaitStep(ctx, step, "task-exit1")
+	require.Error(t, err)
+	assert.Nil(t, state)
+	assert.Equal(t, int32(0), creates.Load(), "a container that already exited must not be rerun")
+}
+
+// A pod deleted before the informer ever observes it has no snapshot, so it is not recreated.
+func TestWaitStepDoesNotRecreateDeletedBeforeInformerSync(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("deleted-before-sync")
+	podName := createPod(t, client, step, "test-ns")
+	// markRunning is not called: no pod snapshot reaches the started marker before deletion.
+	creates := countPodCreates(client)
+	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	state, err := engine.WaitStep(ctx, step, "task-pre-sync")
+	require.Error(t, err)
+	assert.Nil(t, state)
+	assert.Equal(t, int32(0), creates.Load(), "a pod with no snapshot must not be recreated")
+}
+
 // A pod lost before it reached Running is reported, not recreated.
 // This is the boundary the RIG-9399 ruling keeps: Pending losses stay uncovered.
 func TestWaitStepDoesNotRecreatePendingLoss(t *testing.T) {
@@ -217,4 +293,59 @@ func TestWaitStepDoesNotRecreatePendingLoss(t *testing.T) {
 	require.ErrorAs(t, err, &loss)
 	assert.Nil(t, state)
 	assert.Equal(t, int32(0), creates.Load(), "a Pending loss must not be recreated")
+}
+
+// The node is recorded from the initial add of a Running pod. The first loss recreates it, and the
+// second loss of the unscheduled replacement reports no node.
+func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
+	client := fake.NewClientset()
+	engine := makeEngine(client)
+	step := makeStep("pod-running-initial")
+	podName, err := stepToPodName(step)
+	require.NoError(t, err)
+	pod := recreateTestPod(podName, kube_core_v1.PodRunning, runningState())
+	pod.Spec.NodeName = "node-1"
+	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	gone, err := engine.waitPodUp(ctx, step, podName)
+	require.NoError(t, err)
+	require.False(t, gone)
+	value, ok := engine.nodes.Load(podName)
+	require.True(t, ok)
+	assert.Equal(t, "node-1", value)
+
+	// WaitStep's informer must observe the Running pod before it is deleted, so the loss has a snapshot.
+	watching := watchPods(client)
+	creates := countPodCreates(client)
+	var teardown atomic.Bool
+	ctx, cancel = context.WithTimeout(types.WithTeardown(t.Context(), &teardown), 5*time.Second)
+	defer cancel()
+	type result struct {
+		state *types.State
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		state, err := engine.WaitStep(ctx, step, "task-1")
+		done <- result{state, err}
+	}()
+	<-watching
+	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+	waitForRecreate(t, client, podName)
+	require.NoError(t, client.CoreV1().Pods("test-ns").Delete(t.Context(), podName, kube_meta_v1.DeleteOptions{}))
+
+	select {
+	case res := <-done:
+		var loss *types.PodLossError
+		require.ErrorAs(t, res.err, &loss)
+		assert.Nil(t, res.state)
+		assert.Equal(t, int32(1), creates.Load(), "the first loss recreates the pod once; the second fails")
+		assert.Empty(t, loss.Node, "the replacement was never scheduled")
+		assert.False(t, loss.Confirmed)
+	case <-ctx.Done():
+		t.Fatal("WaitStep did not fail after the second loss")
+	}
 }

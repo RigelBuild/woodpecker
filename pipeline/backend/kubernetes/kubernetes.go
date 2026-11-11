@@ -183,20 +183,7 @@ func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) 
 			log.Error().Msgf("could not parse pod: %v", obj)
 			return
 		}
-		if pod.Name != podName {
-			return
-		}
-		e.recordNode(pod)
-		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
-			upOnce.Do(func() { close(up) })
-		}
-		switch pod.Status.Phase {
-		case kube_core_v1.PodRunning:
-			e.started.Store(podName, struct{}{})
-			upOnce.Do(func() { close(up) })
-		case kube_core_v1.PodSucceeded, kube_core_v1.PodFailed:
-			upOnce.Do(func() { close(up) })
-		}
+		e.observePodUp(pod, podName, up, &upOnce)
 	}
 	podDeleted := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
@@ -568,7 +555,7 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, deletedLoss(e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
+			return nil, deletedLoss(newest, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		return nil, err
 	} else {
@@ -618,7 +605,7 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, deletedLoss(e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
+			return nil, deletedLoss(newest, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		if !types.InTeardown(ctx) {
 			newest := last.Load()
