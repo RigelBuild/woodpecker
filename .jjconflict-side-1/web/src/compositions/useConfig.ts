@@ -1,0 +1,29 @@
+import type { User } from '~/lib/api/types';
+
+declare global {
+  interface Window {
+    WOODPECKER_USER: User | undefined;
+    WOODPECKER_VERSION: string | undefined;
+    WOODPECKER_SKIP_VERSION_CHECK: boolean | undefined;
+    WOODPECKER_CSRF: string | undefined;
+    WOODPECKER_ROOT_PATH: string | undefined;
+    WOODPECKER_ENABLE_SWAGGER: boolean | undefined;
+    WOODPECKER_USER_REGISTERED_AGENTS: boolean | undefined;
+    WOODPECKER_MAX_PIPELINE_LOG_LINE_COUNT: number | undefined;
+    WOODPECKER_DEFAULT_CONFIG_PATHS: string[] | undefined;
+    WOODPECKER_PERM_SYNC_INTERVAL: number | undefined;
+  }
+}
+
+export default () => ({
+  user: window.WOODPECKER_USER ?? null,
+  version: window.WOODPECKER_VERSION,
+  skipVersionCheck: window.WOODPECKER_SKIP_VERSION_CHECK === true || false,
+  csrf: window.WOODPECKER_CSRF ?? null,
+  rootPath: window.WOODPECKER_ROOT_PATH ?? '',
+  enableSwagger: window.WOODPECKER_ENABLE_SWAGGER === true || false,
+  userRegisteredAgents: window.WOODPECKER_USER_REGISTERED_AGENTS || false,
+  maxPipelineLogLineCount: window.WOODPECKER_MAX_PIPELINE_LOG_LINE_COUNT ?? 5000,
+  defaultConfigPaths: window.WOODPECKER_DEFAULT_CONFIG_PATHS || [],
+  permSyncInterval: window.WOODPECKER_PERM_SYNC_INTERVAL ?? 3600,
+});

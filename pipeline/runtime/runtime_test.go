@@ -50,7 +50,7 @@ func cmdStep(name string, opts ...func(*backend_types.Step)) *backend_types.Step
 		Type:        backend_types.StepTypeCommands,
 		OnSuccess:   true,
 		OnFailure:   false,
-		Environment: map[string]string{},
+		Environment: make(map[string]string),
 		Commands:    []string{"echo " + name},
 	}
 	for _, o := range opts {

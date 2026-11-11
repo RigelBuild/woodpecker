@@ -42,6 +42,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/queue"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 type ctxKey struct{}
@@ -110,6 +111,9 @@ func (s *RPC) Next(c context.Context, agentFilter rpc.Filter) (*rpc.Workflow, er
 	}
 
 	// enforce labels from server by overwriting agent labels
+	if agentFilter.Labels == nil {
+		agentFilter.Labels = make(map[string]string)
+	}
 	maps.Copy(agentFilter.Labels, agentServerLabels)
 
 	log.Trace().Msgf("Agent %s[%d] tries to pull task with labels: %v", agent.Name, agent.ID, agentFilter.Labels)
@@ -430,7 +434,9 @@ func (s *RPC) Update(c context.Context, strWorkflowID string, state rpc.StepStat
 		).Observe(float64(duration))
 	}
 	if state.Exited {
-		server.Config.Services.LogStore.StepFinished(step)
+		if err := server.Config.Services.LogStore.StepFinished(c, step); err != nil {
+			log.Error().Err(err).Int64("step", step.ID).Msg("log store could not finalize the step log")
+		}
 	}
 
 	if currentPipeline.Workflows, err = s.store.WorkflowGetTree(currentPipeline); err != nil {
@@ -806,8 +812,11 @@ func (s *RPC) Log(c context.Context, stepUUID string, rpcLogEntries []*rpc.LogEn
 		}
 	}()
 
-	if err = server.Config.Services.LogStore.LogAppend(step, logEntries); err != nil {
+	// Entries the agent sends again after a retry are already stored and rejected
+	// by the unique index; that is the only error that is safe to drop.
+	if err = server.Config.Services.LogStore.LogAppend(c, step, logEntries); err != nil && !errors.Is(err, types.ErrInsertDuplicateDetected) {
 		log.Error().Err(err).Msg("could not store log entries")
+		return err
 	}
 
 	return nil

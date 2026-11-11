@@ -1,0 +1,136 @@
+// Copyright 2023 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package metadata
+
+type (
+	// Metadata defines runtime m.
+	Metadata struct {
+		ID       string   `json:"id,omitempty"`
+		Repo     Repo     `json:"repo"`
+		Curr     Pipeline `json:"curr"`
+		Prev     Pipeline `json:"prev"`
+		Workflow Workflow `json:"workflow"`
+		Step     Step     `json:"step"`
+		Sys      System   `json:"sys"`
+		Forge    Forge    `json:"forge"`
+	}
+
+	// Repo defines runtime metadata for a repository.
+	Repo struct {
+		ID          int64                `json:"id,omitempty"`
+		Name        string               `json:"name,omitempty"`
+		Owner       string               `json:"owner,omitempty"`
+		OrgID       int64                `json:"org_id,omitempty"`
+		RemoteID    string               `json:"remote_id,omitempty"`
+		ForgeURL    string               `json:"forge_url,omitempty"`
+		CloneURL    string               `json:"clone_url,omitempty"`
+		CloneSSHURL string               `json:"clone_url_ssh,omitempty"`
+		Private     bool                 `json:"private,omitempty"`
+		Branch      string               `json:"default_branch,omitempty"`
+		Trusted     TrustedConfiguration `json:"trusted"`
+	}
+
+	// Pipeline defines runtime metadata for a pipeline.
+	Pipeline struct {
+		Number      int64    `json:"number,omitempty"`
+		Created     int64    `json:"created,omitempty"`
+		Started     int64    `json:"started,omitempty"`
+		Finished    int64    `json:"finished,omitempty"`
+		Status      string   `json:"status,omitempty"`
+		Event       Event    `json:"event,omitempty"`
+		EventReason []string `json:"event_reason,omitempty"`
+		ForgeURL    string   `json:"forge_url,omitempty"`
+		DeployTo    string   `json:"target,omitempty"`
+		DeployTask  string   `json:"task,omitempty"`
+		Commit      Commit   `json:"commit"`
+		Parent      int64    `json:"parent,omitempty"`
+		RerunCount  int64    `json:"rerun_count,omitempty"`
+		Cron        string   `json:"cron,omitempty"`
+		Release     Release  `json:"release"`
+		Author      string   `json:"author,omitempty"`
+		Avatar      string   `json:"avatar,omitempty"`
+	}
+
+	// Commit defines runtime metadata for a commit.
+	Commit struct {
+		Sha                  string   `json:"sha,omitempty"`
+		Ref                  string   `json:"ref,omitempty"`
+		Refspec              string   `json:"refspec,omitempty"`
+		Branch               string   `json:"branch,omitempty"`
+		Message              string   `json:"message,omitempty"`
+		Timestamp            int64    `json:"timestamp,omitempty"`
+		Author               Author   `json:"author"`
+		ChangedFiles         []string `json:"changed_files,omitempty"`
+		PullRequestLabels    []string `json:"labels,omitempty"`
+		PullRequestMilestone string   `json:"milestone,omitempty"`
+		PullRequestDraft     bool     `json:"draft,omitempty"`
+		PullRequestBody      string   `json:"body,omitempty"`
+	}
+
+	// Release defines runtime metadata for a release.
+	Release struct {
+		Title        string `json:"title,omitempty"`
+		IsPrerelease bool   `json:"is_prerelease,omitempty"`
+	}
+
+	// Author defines runtime metadata for a commit author.
+	Author struct {
+		Name  string `json:"name,omitempty"`
+		Email string `json:"email,omitempty"`
+	}
+
+	// Workflow defines runtime metadata for a workflow.
+	Workflow struct {
+		Name   string            `json:"name,omitempty"`
+		Number int               `json:"number,omitempty"`
+		Matrix map[string]string `json:"matrix,omitempty"`
+	}
+
+	// Step defines runtime metadata for a step.
+	Step struct {
+		Name   string `json:"name,omitempty"`
+		Number int    `json:"number,omitempty"`
+	}
+
+	// System defines runtime metadata for a ci/cd system.
+	System struct {
+		Name     string `json:"name,omitempty"`
+		Host     string `json:"host,omitempty"`
+		URL      string `json:"url,omitempty"`
+		Platform string `json:"arch,omitempty"`
+		Version  string `json:"version,omitempty"`
+	}
+
+	// Forge defines runtime metadata about the forge that host the repo.
+	Forge struct {
+		Type string `json:"type,omitempty"`
+		URL  string `json:"url,omitempty"`
+		Host string `json:"host,omitempty"`
+	}
+
+	// ServerForge represent the needed func of a server forge to get its metadata.
+	ServerForge interface {
+		// Name returns the string name of this driver
+		Name() string
+		// Config returns the metadata of a configured forge
+		Config() Forge
+	}
+
+	TrustedConfiguration struct {
+		Network  bool `json:"network,omitempty"`
+		Volumes  bool `json:"volumes,omitempty"`
+		Security bool `json:"security,omitempty"`
+	}
+)

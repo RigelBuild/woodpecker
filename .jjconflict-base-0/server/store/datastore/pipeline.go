@@ -1,0 +1,249 @@
+// Copyright 2021 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package datastore
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/cenkalti/backoff/v7"
+	"xorm.io/builder"
+	"xorm.io/xorm"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
+)
+
+func (s storage) GetPipeline(id int64) (*model.Pipeline, error) {
+	pipeline := &model.Pipeline{}
+	return pipeline, wrapGet(s.engine.ID(id).Get(pipeline))
+}
+
+func (s storage) GetPipelineNumber(repo *model.Repo, num int64) (*model.Pipeline, error) {
+	pipeline := new(model.Pipeline)
+	return pipeline, wrapGet(s.engine.Where(
+		builder.Eq{"repo_id": repo.ID, "number": num},
+	).Get(pipeline))
+}
+
+func (s storage) GetPipelineBadge(repo *model.Repo, branch string, events []model.WebhookEvent) (*model.Pipeline, error) {
+	pipeline := new(model.Pipeline)
+	return pipeline, wrapGet(s.engine.
+		Desc("number").
+		Where(builder.Eq{"repo_id": repo.ID, "branch": branch}).
+		Where(builder.In("event", events)).
+		Where(builder.Neq{"status": model.StatusBlocked}).
+		Get(pipeline))
+}
+
+func (s storage) GetPipelineLastByBranch(repo *model.Repo, branch string) (*model.Pipeline, error) {
+	pipeline := new(model.Pipeline)
+	return pipeline, wrapGet(s.engine.
+		Desc("number").
+		Where(builder.Eq{"repo_id": repo.ID, "branch": branch, "event": model.EventPush}).
+		Get(pipeline))
+}
+
+// GetPipelineLastBefore returns the pipeline of a branch that precedes the
+// given pipeline number.
+func (s storage) GetPipelineLastBefore(repo *model.Repo, branch string, num int64) (*model.Pipeline, error) {
+	pipeline := new(model.Pipeline)
+	return pipeline, wrapGet(s.engine.
+		Desc("number").
+		Where(builder.Lt{"number": num}.
+			And(builder.Eq{"repo_id": repo.ID, "branch": branch})).
+		Get(pipeline))
+}
+
+func (s storage) GetPipelineList(repo *model.Repo, p *model.ListOptionsWithAll, f *model.PipelineFilter) ([]*model.Pipeline, error) {
+	pipelines := make([]*model.Pipeline, 0, 16)
+
+	cond := builder.NewCond().And(builder.Eq{"repo_id": repo.ID})
+
+	if f != nil {
+		if f.After != 0 {
+			cond = cond.And(builder.Gt{"created": f.After})
+		}
+
+		if f.Before != 0 {
+			cond = cond.And(builder.Lt{"created": f.Before})
+		}
+
+		if f.Branch != "" {
+			cond = cond.And(builder.Eq{"branch": f.Branch})
+		}
+
+		if f.Status != "" {
+			cond = cond.And(builder.Eq{"status": f.Status})
+		}
+
+		if len(f.Events) != 0 {
+			cond = cond.And(builder.In("event", f.Events))
+		}
+
+		if f.RefContains != "" {
+			cond = cond.And(builder.Like{"ref", f.RefContains})
+		}
+	}
+
+	return pipelines, s.paginate(p).Where(cond).
+		Desc("number").
+		Find(&pipelines)
+}
+
+// GetRepoLatestPipelines get the latest pipeline for each repo.
+func (s storage) GetRepoLatestPipelines(repoIDs []int64) ([]*model.Pipeline, error) {
+	pipelines := make([]*model.Pipeline, 0, len(repoIDs))
+
+	// The latest pipeline of a repo is the one holding the highest number,
+	// which is assigned per repo in the order pipelines are created.
+	type repoLatest struct {
+		RepoID int64 `xorm:"repo_id"`
+		Number int64 `xorm:"number"`
+	}
+
+	latest := make([]*repoLatest, 0, len(repoIDs))
+	if err := s.engine.Select("repo_id, MAX(number) AS number").
+		Table("pipelines").
+		Where(builder.In("repo_id", repoIDs)).
+		GroupBy("repo_id").
+		Find(&latest); err != nil {
+		return nil, err
+	}
+
+	if len(latest) == 0 {
+		return pipelines, nil
+	}
+
+	cond := builder.NewCond()
+	for _, l := range latest {
+		cond = cond.Or(builder.Eq{"repo_id": l.RepoID, "number": l.Number})
+	}
+
+	return pipelines, s.engine.Where(cond).Find(&pipelines)
+}
+
+// GetActivePipelineList get all pipelines that are pending, running or blocked.
+func (s storage) GetActivePipelineList(repo *model.Repo) ([]*model.Pipeline, error) {
+	pipelines := make([]*model.Pipeline, 0)
+	query := s.engine.
+		Where("repo_id = ?", repo.ID).
+		In("status", model.StatusPending, model.StatusRunning, model.StatusBlocked).
+		Desc("number")
+	return pipelines, query.Find(&pipelines)
+}
+
+func (s storage) GetPipelineCount() (int64, error) {
+	return s.engine.Count(new(model.Pipeline))
+}
+
+// CreatePipeline creates a new pipeline with retry logic for unique constraint errors.
+func (s storage) CreatePipeline(pipeline *model.Pipeline, stepList ...*model.Step) error {
+	// Maximum number of retries
+	const maxRetries = 3
+
+	// Create backoff configuration
+	exponentialBackoff := backoff.NewExponentialBackOff()
+
+	// Execute with backoff retry
+	_, err := backoff.Retry(context.Background(), func() (struct{}, error) {
+		sess := s.engine.NewSession()
+		defer sess.Close()
+		if err := sess.Begin(); err != nil {
+			return struct{}{}, err
+		}
+
+		repoExist, err := sess.Where("id = ?", pipeline.RepoID).Exist(&model.Repo{})
+		if err != nil {
+			return struct{}{}, err
+		}
+
+		if !repoExist {
+			return struct{}{}, ErrorRepoNotExist{RepoID: pipeline.RepoID}
+		}
+
+		// calc pipeline number
+		var number int64
+		if _, err := sess.Select("MAX(number)").
+			Table(new(model.Pipeline)).
+			Where("repo_id = ?", pipeline.RepoID).
+			Get(&number); err != nil {
+			return struct{}{}, err
+		}
+		pipeline.Number = number + 1
+
+		pipeline.Created = time.Now().UTC().Unix()
+		// only Insert set auto created ID back to object
+		if err := wrapInsert(sess.Insert(pipeline)); err != nil {
+			if errors.Is(err, types.ErrInsertDuplicateDetected) {
+				return struct{}{}, err
+			}
+			return struct{}{}, backoff.Permanent(err)
+		}
+
+		for i := range stepList {
+			stepList[i].PipelineID = pipeline.ID
+			// only Insert set auto created ID back to object
+			if err := wrapInsert(sess.Insert(stepList[i])); err != nil {
+				if errors.Is(err, types.ErrInsertDuplicateDetected) {
+					return struct{}{}, err
+				}
+				return struct{}{}, backoff.Permanent(err)
+			}
+		}
+
+		return struct{}{}, sess.Commit()
+	}, backoff.WithBackOff(exponentialBackoff), backoff.WithMaxTries(maxRetries))
+
+	return err
+}
+
+func (s storage) UpdatePipeline(pipeline *model.Pipeline) error {
+	_, err := s.engine.ID(pipeline.ID).AllCols().Update(pipeline)
+	return err
+}
+
+func (s storage) DeletePipeline(pipeline *model.Pipeline) error {
+	return s.deletePipeline(s.engine.NewSession(), pipeline.ID)
+}
+
+func (s storage) deletePipeline(sess *xorm.Session, pipelineID int64) error {
+	if err := s.workflowsDelete(sess, pipelineID); err != nil {
+		return err
+	}
+
+	var confIDs []int64
+	if err := sess.Table(new(model.PipelineConfig)).Select("config_id").Where("pipeline_id = ?", pipelineID).Find(&confIDs); err != nil {
+		return err
+	}
+	for _, confID := range confIDs {
+		exist, err := sess.Where(builder.Eq{"config_id": confID}.And(builder.Neq{"pipeline_id": pipelineID})).Exist(new(model.PipelineConfig))
+		if err != nil {
+			return err
+		}
+		if !exist {
+			// this config is only used for this pipeline. so delete it
+			if _, err := sess.Where(builder.Eq{"id": confID}).Delete(new(model.Config)); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := sess.Where("pipeline_id = ?", pipelineID).Delete(new(model.PipelineConfig)); err != nil {
+		return err
+	}
+	return wrapDelete(sess.ID(pipelineID).Delete(new(model.Pipeline)))
+}

@@ -1,0 +1,1181 @@
+// Copyright 2022 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package kubernetes
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/cenkalti/backoff/v7"
+	"github.com/rs/zerolog/log"
+	"github.com/urfave/cli/v3"
+	kube_core_v1 "k8s.io/api/core/v1"
+	kube_errors "k8s.io/apimachinery/pkg/api/errors"
+	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp" // To authenticate to GCP K8s clusters
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/yaml"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+)
+
+const (
+	EngineName = "kubernetes"
+	// TODO: 5 seconds is against best practice, k3s didn't work otherwise
+	defaultResyncDuration = 5 * time.Second
+	maxRetryDuration      = 1 * time.Minute
+	// NPD spot-eviction plugin Event that reports an Azure Preempt notice.
+	preemptEventReason = "PreemptScheduled"
+	// Source identifier used by the NPD spot-eviction plugin Event.
+	preemptEventSource = "custom-spot-eviction-condition-plugin-monitor"
+)
+
+type kube struct {
+	client              kubernetes.Interface
+	config              *config
+	goos                string
+	openLogStream       func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
+	logRetryNow         func() time.Time
+	logRetryTimeout     time.Duration
+	waitLogReopen       func(context.Context, time.Duration) error
+	nodes               sync.Map
+	workflowResourcesMu sync.RWMutex
+	workflowResources   map[string]Resources
+}
+
+func (e *kube) openPodLogStream(ctx context.Context, namespace, podName string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+	if e.openLogStream != nil {
+		return e.openLogStream(ctx, namespace, podName, opts)
+	}
+	return e.client.CoreV1().RESTClient().Get().
+		Namespace(namespace).
+		Name(podName).
+		Resource("pods").
+		SubResource("log").
+		VersionedParams(opts, scheme.ParameterCodec).
+		Stream(ctx)
+}
+
+func (e *kube) recordNode(pod *kube_core_v1.Pod) {
+	if pod.Spec.NodeName != "" {
+		e.nodes.Store(pod.Name, pod.Spec.NodeName)
+	}
+}
+
+func podLost(last *kube_core_v1.Pod, gone bool) (reason string, lost bool) {
+	if terminatedSuccessfully(last) {
+		return "", false
+	}
+	if last != nil {
+		for _, condition := range last.Status.Conditions {
+			if condition.Type == kube_core_v1.DisruptionTarget && condition.Status == kube_core_v1.ConditionTrue {
+				return condition.Reason, true
+			}
+		}
+	}
+	if gone {
+		return "NotFound", true
+	}
+	return "", false
+}
+
+func terminatedSuccessfully(pod *kube_core_v1.Pod) bool {
+	if pod == nil || len(pod.Status.ContainerStatuses) == 0 {
+		return false
+	}
+	container := pod.Status.ContainerStatuses[0]
+	return container.State.Terminated != nil && container.State.Terminated.ExitCode == 0
+}
+
+func (e *kube) preemptionEvidence(ctx context.Context, node string, at time.Time) (evidence string, ok bool, err error) {
+	if node == "" {
+		return "node unknown", false, nil
+	}
+	selector := "involvedObject.kind=Node,involvedObject.name=" + node
+	events, err := e.client.CoreV1().Events("default").List(ctx, kube_meta_v1.ListOptions{FieldSelector: selector})
+	if err != nil {
+		return err.Error(), false, err
+	}
+	for _, event := range events.Items {
+		eventAt := event.EventTime.Time
+		if eventAt.IsZero() {
+			eventAt = event.LastTimestamp.Time
+		}
+		if eventAt.IsZero() {
+			eventAt = event.FirstTimestamp.Time
+		}
+		matchesReason := event.Reason == preemptEventReason
+		matchesSource := event.Source.Component == preemptEventSource || event.ReportingController == preemptEventSource
+		withinLossWindow := eventAt.After(at.Add(-10*time.Minute)) && !eventAt.After(at)
+		if !matchesReason || !matchesSource || !withinLossWindow {
+			continue
+		}
+		return event.Reason, true, nil
+	}
+	return "no matching PreemptScheduled event", false, nil
+}
+
+// lossTime bounds the evidence window: the disruption time, else the deletion time, else now.
+func lossTime(last *kube_core_v1.Pod) time.Time {
+	if last == nil {
+		return time.Now()
+	}
+	for _, condition := range last.Status.Conditions {
+		if condition.Type == kube_core_v1.DisruptionTarget && condition.Status == kube_core_v1.ConditionTrue && !condition.LastTransitionTime.IsZero() {
+			return condition.LastTransitionTime.Time
+		}
+	}
+	if last.DeletionTimestamp != nil {
+		return last.DeletionTimestamp.Time
+	}
+	return time.Now()
+}
+
+func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID string, lossAt time.Time) error {
+	node, _ := e.nodes.Load(podName)
+	nodeName, _ := node.(string)
+	evidence, confirmed, err := e.preemptionEvidence(ctx, nodeName, lossAt)
+	if err != nil {
+		evidence = err.Error()
+	}
+	loss := &types.PodLossError{Pod: podName, Node: nodeName, Reason: reason, Confirmed: confirmed, Evidence: evidence}
+	log.Error().Str("workflow_id", taskUUID).Str("step", step).Str("pod", podName).Str("node", nodeName).Str("reason", reason).Bool("confirmed", confirmed).Str("evidence", evidence).Msg("step pod lost")
+	return loss
+}
+
+// waitPodUp reports gone when the pod is deleted before it starts, so WaitStep classifies the loss.
+func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) (gone bool, err error) {
+	up := make(chan struct{})
+	var upOnce sync.Once
+	var deleted atomic.Bool
+	podUp := func(obj any) {
+		pod, ok := obj.(*kube_core_v1.Pod)
+		if !ok {
+			log.Error().Msgf("could not parse pod: %v", obj)
+			return
+		}
+		if pod.Name != podName {
+			return
+		}
+		e.recordNode(pod)
+		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
+			upOnce.Do(func() { close(up) })
+		}
+		switch pod.Status.Phase {
+		case kube_core_v1.PodRunning, kube_core_v1.PodSucceeded, kube_core_v1.PodFailed:
+			upOnce.Do(func() { close(up) })
+		}
+	}
+	podDeleted := func(obj any) {
+		pod, ok := obj.(*kube_core_v1.Pod)
+		if !ok {
+			tombstone, isTombstone := obj.(cache.DeletedFinalStateUnknown)
+			if !isTombstone {
+				return
+			}
+			if pod, ok = tombstone.Obj.(*kube_core_v1.Pod); !ok {
+				return
+			}
+		}
+		if pod.Name == podName {
+			deleted.Store(true)
+			upOnce.Do(func() { close(up) })
+		}
+	}
+
+	namespace := e.config.GetNamespace(step.OrgID)
+	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(namespace))
+	podInformer := si.Core().V1().Pods().Informer()
+	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    podUp,
+		UpdateFunc: func(_, newPod any) { podUp(newPod) },
+		DeleteFunc: podDeleted,
+	}); err != nil {
+		return false, err
+	}
+	stop := make(chan struct{})
+	si.Start(stop)
+	defer close(stop)
+	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
+		return false, ctx.Err()
+	}
+	// A pod deleted before the initial List never produces an event.
+	if _, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{}); err != nil {
+		if kube_errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	select {
+	case <-up:
+		return deleted.Load(), nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+type config struct {
+	Namespace                       string
+	EnableNamespacePerOrg           bool
+	ClusterDomain                   string
+	StorageClass                    string
+	VolumeSize                      string
+	StorageRwx                      bool
+	PodLabels                       map[string]string
+	PodLabelsAllowFromStep          bool
+	PodAnnotations                  map[string]string
+	PodAnnotationsAllowFromStep     bool
+	PodNodeSelector                 map[string]string
+	PodNodeSelectorAllowFromStep    bool
+	PodTolerationsAllowFromStep     bool
+	PodTolerations                  []Toleration
+	PodAffinity                     *kube_core_v1.Affinity
+	PodAffinityAllowFromStep        bool
+	RuntimeClassAllowFromStep       bool
+	ImagePullSecretNames            []string
+	SecurityContext                 SecurityContextConfig
+	NativeSecretsAllowFromStep      bool
+	ServiceAccountNameAllowFromStep bool
+	PriorityClassName               string
+	StopTimeout                     int64
+	PermissionInitImage             string
+	EnableUserNamespaces            bool
+}
+
+func (c *config) GetNamespace(orgID int64) string {
+	if c.EnableNamespacePerOrg {
+		return strings.ToLower(fmt.Sprintf("%s-%s", c.Namespace, strconv.FormatInt(orgID, 10)))
+	}
+	return c.Namespace
+}
+
+type SecurityContextConfig struct {
+	RunAsNonRoot                    bool
+	FSGroup                         *int64
+	OverrideNonRootInUserNamespaces bool
+}
+
+func (c *config) newDefaultDeleteOptions() kube_meta_v1.DeleteOptions {
+	propagationPolicy := kube_meta_v1.DeletePropagationBackground
+
+	return kube_meta_v1.DeleteOptions{
+		GracePeriodSeconds: &c.StopTimeout,
+		PropagationPolicy:  &propagationPolicy,
+	}
+}
+
+func configFromCliContext(ctx context.Context) (*config, error) {
+	if ctx != nil {
+		if c, ok := ctx.Value(types.CliCommand).(*cli.Command); ok {
+			config := config{
+				Namespace:                    c.String("backend-k8s-namespace"),
+				EnableNamespacePerOrg:        c.Bool("backend-k8s-namespace-per-org"),
+				ClusterDomain:                c.String("backend-k8s-cluster-domain"),
+				StorageClass:                 c.String("backend-k8s-storage-class"),
+				VolumeSize:                   c.String("backend-k8s-volume-size"),
+				StorageRwx:                   c.Bool("backend-k8s-storage-rwx"),
+				PriorityClassName:            c.String("backend-k8s-priority-class"),
+				PodLabels:                    make(map[string]string), // just init empty map to prevent nil panic
+				PodLabelsAllowFromStep:       c.Bool("backend-k8s-pod-labels-allow-from-step"),
+				PodAnnotations:               make(map[string]string), // just init empty map to prevent nil panic
+				PodAnnotationsAllowFromStep:  c.Bool("backend-k8s-pod-annotations-allow-from-step"),
+				PodTolerationsAllowFromStep:  c.Bool("backend-k8s-pod-tolerations-allow-from-step"),
+				PodNodeSelectorAllowFromStep: c.Bool("backend-k8s-pod-node-selector-allow-from-step"),
+				PodNodeSelector:              make(map[string]string), // just init empty map to prevent nil panic
+				PodAffinityAllowFromStep:     c.Bool("backend-k8s-pod-affinity-allow-from-step"),
+				RuntimeClassAllowFromStep:    c.Bool("backend-k8s-runtime-class-allow-from-step"),
+				ImagePullSecretNames:         c.StringSlice("backend-k8s-pod-image-pull-secret-names"),
+				SecurityContext: SecurityContextConfig{
+					RunAsNonRoot:                    c.Bool("backend-k8s-secctx-nonroot"), // cspell:words secctx nonroot
+					FSGroup:                         newInt64(defaultFSGroup),
+					OverrideNonRootInUserNamespaces: c.Bool("backend-k8s-user-namespaces-override-secctx-nonroot"), // cspell:words secctx nonroot
+				},
+				EnableUserNamespaces:            c.Bool("backend-k8s-user-namespaces"),
+				NativeSecretsAllowFromStep:      c.Bool("backend-k8s-allow-native-secrets"),
+				ServiceAccountNameAllowFromStep: c.Bool("backend-k8s-service-account-name-allow-from-step"),
+				StopTimeout:                     c.Int64("backend-k8s-stop-timeout"),
+				PermissionInitImage:             c.String("backend-k8s-permission-init-image"),
+			}
+			// Unmarshal label and annotation settings here to ensure they're valid on startup
+			if labels := c.String("backend-k8s-pod-labels"); labels != "" {
+				if err := yaml.Unmarshal([]byte(labels), &config.PodLabels); err != nil {
+					log.Error().Err(err).Msgf("could not unmarshal pod labels '%s'", c.String("backend-k8s-pod-labels"))
+					return nil, err
+				}
+			}
+			if annotations := c.String("backend-k8s-pod-annotations"); annotations != "" {
+				if err := yaml.Unmarshal([]byte(c.String("backend-k8s-pod-annotations")), &config.PodAnnotations); err != nil {
+					log.Error().Err(err).Msgf("could not unmarshal pod annotations '%s'", c.String("backend-k8s-pod-annotations"))
+					return nil, err
+				}
+			}
+			if nodeSelector := c.String("backend-k8s-pod-node-selector"); nodeSelector != "" {
+				if err := yaml.Unmarshal([]byte(nodeSelector), &config.PodNodeSelector); err != nil {
+					log.Error().Err(err).Msgf("could not unmarshal pod node selector '%s'", nodeSelector)
+					return nil, err
+				}
+			}
+			if podTolerations := c.String("backend-k8s-pod-tolerations"); podTolerations != "" {
+				if err := yaml.Unmarshal([]byte(podTolerations), &config.PodTolerations); err != nil {
+					log.Error().Err(err).Msgf("could not unmarshal pod tolerations '%s'", podTolerations)
+					return nil, err
+				}
+			}
+			if podAffinity := c.String("backend-k8s-pod-affinity"); podAffinity != "" {
+				if err := yaml.Unmarshal([]byte(podAffinity), &config.PodAffinity); err != nil {
+					log.Error().Err(err).Msgf("could not unmarshal pod affinity '%s'", podAffinity)
+					return nil, err
+				}
+			}
+
+			return &config, nil
+		}
+	}
+
+	return nil, types.ErrNoCliContextFound
+}
+
+// New returns a new Kubernetes Backend.
+func New() types.Backend {
+	return &kube{}
+}
+
+func (e *kube) Name() string {
+	return EngineName
+}
+
+func (e *kube) IsAvailable(context.Context) bool {
+	host := os.Getenv("KUBERNETES_SERVICE_HOST")
+	return len(host) > 0
+}
+
+func (e *kube) Flags() []cli.Flag {
+	return Flags
+}
+
+func (e *kube) Load(ctx context.Context) (*types.BackendInfo, error) {
+	config, err := configFromCliContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	e.config = config
+
+	var kubeClient kubernetes.Interface
+	_, err = rest.InClusterConfig()
+	if err != nil {
+		kubeClient, err = getClientOutOfCluster()
+	} else {
+		kubeClient, err = getClientInsideOfCluster()
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	e.client = kubeClient
+
+	// TODO(2693): use info resp of kubeClient to define platform var
+	e.goos = runtime.GOOS
+	return &types.BackendInfo{
+		Platform: runtime.GOOS + "/" + runtime.GOARCH,
+	}, nil
+}
+
+func (e *kube) getConfig() *config {
+	if e.config == nil {
+		return nil
+	}
+	c := *e.config
+	c.PodLabels = maps.Clone(e.config.PodLabels)
+	c.PodAnnotations = maps.Clone(e.config.PodAnnotations)
+	c.PodNodeSelector = maps.Clone(e.config.PodNodeSelector)
+	c.ImagePullSecretNames = slices.Clone(e.config.ImagePullSecretNames)
+	return &c
+}
+
+// SetupWorkflow sets up the pipeline environment.
+func (e *kube) SetupWorkflow(ctx context.Context, conf *types.Config, taskUUID string) error {
+	e.setWorkflowResources(taskUUID, maxWorkflowResources(conf))
+	log.Trace().Str("taskUUID", taskUUID).Msgf("Setting up Kubernetes primitives")
+
+	namespace := e.config.GetNamespace(conf.Stages[0].Steps[0].OrgID)
+
+	if e.config.EnableNamespacePerOrg {
+		log.Trace().Str("taskUUID", taskUUID).Msgf("Ensure organization namespace: %s", namespace)
+		err := mkNamespace(ctx, e.client.CoreV1().Namespaces(), namespace)
+		if err != nil {
+			return err
+		}
+	}
+
+	// drop local filesystem volumes inside the workspace, Kubernetes cannot mount host paths
+	dropLocalPathsInsideWorkspace(conf)
+
+	log.Trace().Str("taskUUID", taskUUID).Msgf("Creating workflow volume")
+	err := startVolume(ctx, e, conf.Volume, namespace)
+	if kube_errors.IsAlreadyExists(err) {
+		// The server requeued this workflow after losing its agent; that attempt's objects remain.
+		log.Warn().Str("taskUUID", taskUUID).Msg("removing objects left by an earlier attempt of this workflow")
+		if err := e.recreateAfterLostAttempt(ctx, conf, namespace, taskUUID); err != nil {
+			return fmt.Errorf("replace objects left by an earlier attempt: %w", err)
+		}
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+
+	log.Trace().Str("taskUUID", taskUUID).Msgf("Creating workflow headless service")
+	_, err = startHeadlessService(ctx, e, namespace, taskUUID)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// StartStep starts the pipeline step.
+func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string) error {
+	options, err := parseBackendOptions(step)
+	if err != nil {
+		log.Error().Err(err).Msg("could not parse backend options")
+	}
+	if step.Type == types.StepTypeClone && len(options.Resources.Requests) == 0 && len(options.Resources.Limits) == 0 {
+		options.Resources = e.getWorkflowResources(taskUUID)
+	}
+
+	if needsRegistrySecret(step) {
+		err = startRegistrySecret(ctx, e, step)
+		if err != nil {
+			return err
+		}
+	}
+
+	if needsStepSecret(step) {
+		err = startStepSecret(ctx, e, step)
+		if err != nil {
+			return err
+		}
+	}
+
+	log.Trace().Str("taskUUID", taskUUID).Msgf("starting step: %s", step.Name)
+	_, err = startPod(ctx, e, step, options, taskUUID)
+	return err
+}
+
+func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
+	podName, err := stepToPodName(step)
+	if err != nil {
+		return nil, err
+	}
+	log.Trace().Str("taskUUID", taskUUID).Msgf("waiting for pod: %s", podName)
+
+	var last atomic.Pointer[kube_core_v1.Pod]
+	finished := make(chan struct{})
+	var finishedOnce sync.Once
+	podChanged := func(obj any) {
+		pod, ok := obj.(*kube_core_v1.Pod)
+		if !ok {
+			log.Error().Msgf("could not parse pod: %v", obj)
+			return
+		}
+		if pod.Name != podName {
+			return
+		}
+		last.Store(pod.DeepCopy())
+		e.recordNode(pod)
+		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
+			finishedOnce.Do(func() { close(finished) })
+		}
+		switch pod.Status.Phase {
+		case kube_core_v1.PodSucceeded, kube_core_v1.PodFailed, kube_core_v1.PodUnknown:
+			finishedOnce.Do(func() { close(finished) })
+		}
+		if _, lost := podLost(pod, false); lost {
+			finishedOnce.Do(func() { close(finished) })
+		}
+	}
+	podDeleted := func(obj any) {
+		pod, ok := obj.(*kube_core_v1.Pod)
+		if !ok {
+			tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+			if !ok {
+				return
+			}
+			pod, ok = tombstone.Obj.(*kube_core_v1.Pod)
+			if !ok {
+				return
+			}
+		}
+		if pod.Name == podName {
+			podChanged(pod)
+			finishedOnce.Do(func() { close(finished) })
+		}
+	}
+
+	namespace := e.config.GetNamespace(step.OrgID)
+	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(namespace))
+	podInformer := si.Core().V1().Pods().Informer()
+	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    podChanged,
+		UpdateFunc: func(_, newPod any) { podChanged(newPod) },
+		DeleteFunc: podDeleted,
+	}); err != nil {
+		return nil, err
+	}
+	stop := make(chan struct{})
+	si.Start(stop)
+	defer close(stop)
+	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
+		return nil, ctx.Err()
+	}
+
+	if pod, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{}); err != nil {
+		if kube_errors.IsNotFound(err) {
+			if types.InTeardown(ctx) {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			newest := last.Load()
+			reason, lost := podLost(newest, true)
+			if !lost {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+		}
+		return nil, err
+	} else {
+		last.Store(pod.DeepCopy())
+		e.recordNode(pod)
+	}
+
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	pod, err := backoff.Retry(
+		ctx,
+		func() (*kube_core_v1.Pod, error) {
+			p, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{})
+			if err != nil {
+				if kube_errors.IsNotFound(err) {
+					return nil, backoff.Permanent(err)
+				}
+				return nil, err
+			}
+			e.recordNode(p)
+			last.Store(p.DeepCopy())
+			if len(p.Status.ContainerStatuses) == 0 {
+				return nil, fmt.Errorf("no container statuses found for pod %s", podName)
+			}
+			if p.Status.ContainerStatuses[0].State.Terminated == nil {
+				return nil, fmt.Errorf("container %s/%s terminated state not yet finalized", podName, p.Status.ContainerStatuses[0].Name)
+			}
+			return p, nil
+		},
+		backoff.WithBackOff(backoff.NewExponentialBackOff()),
+		backoff.WithMaxElapsedTime(maxRetryDuration),
+		backoff.WithNotify(func(err error, delay time.Duration) {
+			log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("waiting for container terminated state, retrying with backoff")
+		}),
+	)
+	if err != nil {
+		lastErr := backoff.AsRetryError(err).LastErr
+		if kube_errors.IsNotFound(lastErr) {
+			if types.InTeardown(ctx) {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			newest := last.Load()
+			reason, lost := podLost(newest, true)
+			if !lost {
+				return &types.State{ExitCode: 0, Exited: true}, nil
+			}
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+		}
+		if !types.InTeardown(ctx) {
+			newest := last.Load()
+			if reason, lost := podLost(newest, false); lost {
+				return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+			}
+		}
+		return nil, err
+	}
+
+	if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
+		return nil, fmt.Errorf("could not pull image for pod %s", podName)
+	}
+	if !types.InTeardown(ctx) {
+		if reason, lost := podLost(pod, false); lost {
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(pod))
+		}
+	}
+	cs := pod.Status.ContainerStatuses[0]
+	state := &types.State{ExitCode: int(cs.State.Terminated.ExitCode), Exited: true, OOMKilled: false}
+	count := len(pod.Status.InitContainerStatuses) + len(pod.Status.ContainerStatuses) + len(pod.Status.EphemeralContainerStatuses)
+	// Kubernetes shares a 12 KiB termination-message limit across all containers in a pod.
+	const podTerminationMessageLimit = 12288
+	// Reserve space below the termination-message limit to detect truncation.
+	const terminationMessageMargin = 64
+	cap := min(types.MaxStepOutputBytes, podTerminationMessageLimit/count) - terminationMessageMargin
+	message := []byte(cs.State.Terminated.Message)
+	if cap <= 0 || len(message) >= cap {
+		state.OutputsState = "invalid"
+	} else {
+		state.Outputs, err = types.ParseStepOutputs(message)
+		state.OutputsState = "reported"
+		if err != nil {
+			state.OutputsState = "invalid"
+		}
+	}
+	return state, nil
+}
+
+// TailStep tails the pipeline step logs.
+func (e *kube) TailStep(ctx context.Context, step *types.Step, taskUUID string) (io.ReadCloser, error) {
+	podName, err := stepToPodName(step)
+	if err != nil {
+		return nil, err
+	}
+	log.Trace().Str("taskUUID", taskUUID).Msgf("tail logs of pod: %s", podName)
+	gone, err := e.waitPodUp(ctx, step, podName)
+	if err != nil {
+		return nil, err
+	}
+	if gone {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	return e.tailLogs(ctx, step, podName)
+}
+
+func (e *kube) tailLogs(ctx context.Context, step *types.Step, podName string) (io.ReadCloser, error) {
+	return e.tailLogsFrom(ctx, step, podName, &kube_core_v1.PodLogOptions{
+		Follow:     true,
+		Timestamps: true,
+		Container:  podName,
+	})
+}
+
+const (
+	logTimestampPrefixLimit = 64
+	logReadBufferSize       = 32 * 1024
+	initialLogReopenDelay   = 200 * time.Millisecond
+	maxLogReopenDelay       = 10 * time.Second
+)
+
+func (e *kube) tailLogsFrom(ctx context.Context, step *types.Step, podName string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+	tailCtx, cancel := context.WithCancelCause(ctx)
+	logs, err := e.openLogStreamWithRetry(tailCtx, step, podName, opts)
+	if err != nil {
+		cancel(context.Canceled)
+		return nil, err
+	}
+	reader, writer := io.Pipe()
+	done := make(chan struct{})
+	active := &activePodLogStream{}
+	stream, ok := active.replace(logs)
+	if !ok {
+		cancel(context.Canceled)
+		return nil, tailCtx.Err()
+	}
+	go func() {
+		defer close(done)
+		stopClose := context.AfterFunc(tailCtx, func() {
+			writer.CloseWithError(context.Cause(tailCtx))
+			active.close()
+		})
+		defer stopClose()
+		defer writer.Close()
+		var last time.Time
+		atLast := 0
+		skipping := false
+		skipAtLast := 0
+		reopenDelay := initialLogReopenDelay
+		for {
+			delivered := false
+			streamErr := e.copyTimestampedLogs(tailCtx, writer, stream, &last, &atLast, &skipping, &skipAtLast, &delivered)
+			if _, ok := errors.AsType[*podLogPipeWriteError](streamErr); ok {
+				stream.Close()
+				return
+			}
+			stream.Close()
+			if tailCtx.Err() != nil {
+				return
+			}
+
+			pod, getErr := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(tailCtx, podName, kube_meta_v1.GetOptions{})
+			if kube_errors.IsNotFound(getErr) {
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended; pod no longer exists")
+				return
+			}
+			if getErr != nil {
+				log.Debug().Err(getErr).Str("pod", podName).Msg("failed to check pod after log stream ended")
+				return
+			}
+			container, found := stepContainerStatus(pod, podName)
+			if !found {
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended; step container status is unavailable")
+				return
+			}
+			terminated := container.State.Terminated != nil
+			switch {
+			case terminated:
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended after container termination; draining final logs")
+			case container.State.Running != nil:
+				log.Warn().Err(streamErr).Str("pod", podName).Msg("pod log stream ended while step container is running; reopening")
+			case container.State.Waiting != nil:
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended while step container is waiting; reopening")
+			default:
+				log.Debug().Err(streamErr).Str("pod", podName).Msg("pod log stream ended; step container state is unavailable")
+				return
+			}
+
+			if !terminated && delivered {
+				reopenDelay = initialLogReopenDelay
+			}
+			if !terminated {
+				if err := e.waitBeforeLogReopen(tailCtx, reopenDelay); err != nil {
+					return
+				}
+				if !delivered && reopenDelay < maxLogReopenDelay {
+					reopenDelay *= 2
+					if reopenDelay > maxLogReopenDelay {
+						reopenDelay = maxLogReopenDelay
+					}
+				}
+			}
+			nextOpts := &kube_core_v1.PodLogOptions{Container: podName, Timestamps: true, Follow: !terminated}
+			if !last.IsZero() {
+				since := kube_meta_v1.NewTime(last)
+				nextOpts.SinceTime = &since
+			}
+
+			var finalDrainDeadline time.Time
+			for {
+				if !finalDrainDeadline.IsZero() && !e.logRetryTime().Before(finalDrainDeadline) {
+					log.Warn().Err(err).Str("pod", podName).Dur("retry_duration", e.logRetryDuration()).Msg("final pod log drain retry duration expired; stopping log tail")
+					return
+				}
+
+				logs, err = e.openPodLogStream(tailCtx, e.config.GetNamespace(step.OrgID), podName, nextOpts)
+				if err == nil {
+					break
+				}
+				if finalDrainDeadline.IsZero() && !nextOpts.Follow {
+					finalDrainDeadline = e.logRetryTime().Add(e.logRetryDuration())
+				}
+				if tailCtx.Err() != nil {
+					return
+				}
+				if kube_errors.IsNotFound(err) {
+					log.Debug().Err(err).Str("pod", podName).Msg("pod log stream no longer exists; stopping log tail")
+					return
+				}
+				pod, getErr := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(tailCtx, podName, kube_meta_v1.GetOptions{})
+				if kube_errors.IsNotFound(getErr) {
+					log.Debug().Err(err).Str("pod", podName).Msg("pod deleted while reopening log stream; stopping log tail")
+					return
+				}
+				if getErr == nil {
+					container, found := stepContainerStatus(pod, podName)
+					if found && container.State.Terminated != nil && !terminated {
+						terminated = true
+						nextOpts.Follow = false
+						continue
+					}
+				} else {
+					log.Warn().Err(getErr).Str("pod", podName).Msg("failed to check pod while reopening log stream")
+				}
+
+				log.Warn().Err(err).Str("pod", podName).Dur("backoff", reopenDelay).Msg("failed to reopen pod log stream, retrying with backoff")
+				waitDelay := reopenDelay
+				if !finalDrainDeadline.IsZero() {
+					remaining := finalDrainDeadline.Sub(e.logRetryTime())
+					if remaining < waitDelay {
+						waitDelay = remaining
+					}
+				}
+				if waitErr := e.waitBeforeLogReopen(tailCtx, waitDelay); waitErr != nil {
+					return
+				}
+				if reopenDelay < maxLogReopenDelay {
+					reopenDelay *= 2
+					if reopenDelay > maxLogReopenDelay {
+						reopenDelay = maxLogReopenDelay
+					}
+				}
+			}
+			stream, ok = active.replace(logs)
+
+			if !ok {
+				return
+			}
+			skipping = true
+			skipAtLast = atLast
+			if terminated {
+				delivered = false
+				streamErr = e.copyTimestampedLogs(tailCtx, writer, stream, &last, &atLast, &skipping, &skipAtLast, &delivered)
+				stream.Close()
+				if tailCtx.Err() == nil {
+					if _, ok := errors.AsType[*podLogPipeWriteError](streamErr); !ok {
+						log.Debug().Err(streamErr).Str("pod", podName).Msg("final pod log stream ended")
+					}
+				}
+				return
+			}
+		}
+	}()
+	return &tailLogReadCloser{reader: reader, cancel: cancel, done: done}, nil
+}
+
+func (e *kube) logRetryTime() time.Time {
+	if e.logRetryNow != nil {
+		return e.logRetryNow()
+	}
+	return time.Now()
+}
+
+func (e *kube) logRetryDuration() time.Duration {
+	if e.logRetryTimeout > 0 {
+		return e.logRetryTimeout
+	}
+	return maxRetryDuration
+}
+
+func (e *kube) waitBeforeLogReopen(ctx context.Context, delay time.Duration) error {
+	if e.waitLogReopen != nil {
+		return e.waitLogReopen(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+type tailLogReadCloser struct {
+	reader *io.PipeReader
+	cancel context.CancelCauseFunc
+	done   <-chan struct{}
+	once   sync.Once
+	err    error
+}
+
+func (r *tailLogReadCloser) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *tailLogReadCloser) Close() error {
+	r.once.Do(func() {
+		r.cancel(context.Canceled)
+		r.err = r.reader.Close()
+		<-r.done
+	})
+	return r.err
+}
+
+type activePodLogStream struct {
+	mu     sync.Mutex
+	stream *oncePodLogStream
+	closed bool
+}
+
+func (s *activePodLogStream) replace(stream io.ReadCloser) (*oncePodLogStream, bool) {
+	current := &oncePodLogStream{ReadCloser: stream}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		current.Close()
+		return nil, false
+	}
+	previous := s.stream
+	s.stream = current
+	s.mu.Unlock()
+	if previous != nil {
+		previous.Close()
+	}
+	return current, true
+}
+
+func (s *activePodLogStream) close() {
+	s.mu.Lock()
+	s.closed = true
+	stream := s.stream
+	s.mu.Unlock()
+	if stream != nil {
+		stream.Close()
+	}
+}
+
+type oncePodLogStream struct {
+	io.ReadCloser
+	once sync.Once
+	err  error
+}
+
+func (s *oncePodLogStream) Close() error {
+	s.once.Do(func() { s.err = s.ReadCloser.Close() })
+	return s.err
+}
+
+func (e *kube) openLogStreamWithRetry(ctx context.Context, step *types.Step, podName string, opts *kube_core_v1.PodLogOptions) (io.ReadCloser, error) {
+	return backoff.Retry(
+		ctx,
+		func() (io.ReadCloser, error) {
+			return e.openPodLogStream(ctx, e.config.GetNamespace(step.OrgID), podName, opts)
+		},
+		backoff.WithBackOff(backoff.NewExponentialBackOff()),
+		backoff.WithMaxElapsedTime(maxRetryDuration),
+		backoff.WithNotify(func(err error, delay time.Duration) {
+			log.Warn().Err(err).Str("pod", podName).Dur("backoff", delay).Msg("failed to open pod log stream, retrying with backoff")
+		}),
+	)
+}
+
+func stepContainerStatus(pod *kube_core_v1.Pod, podName string) (kube_core_v1.ContainerStatus, bool) {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == podName {
+			return status, true
+		}
+	}
+	return kube_core_v1.ContainerStatus{}, false
+}
+
+func (e *kube) copyTimestampedLogs(ctx context.Context, writer *io.PipeWriter, logs io.Reader, last *time.Time, atLast *int, skipping *bool, skipAtLast *int, delivered *bool) error {
+	reader := newPodLogReader(logs)
+	for {
+		var prefix [logTimestampPrefixLimit]byte
+		prefixLen := 0
+		separator := false
+		prefixErr := error(nil)
+		for prefixLen < len(prefix) {
+			value, err := reader.ReadByte()
+			if err != nil {
+				prefixErr = err
+				break
+			}
+			prefix[prefixLen] = value
+			prefixLen++
+			if value == ' ' {
+				separator = true
+				break
+			}
+			if value == '\n' {
+				break
+			}
+		}
+		if prefixLen == 0 && prefixErr != nil {
+			return prefixErr
+		}
+
+		timestamp, parseErr := parsePodLogTimestamp(prefix[:prefixLen], separator)
+		keep := true
+		if parseErr == nil && *skipping {
+			switch {
+			case last.IsZero():
+				*skipping = false
+			case timestamp.Before(*last):
+				keep = false
+			case timestamp.Equal(*last) && *skipAtLast > 0:
+				*skipAtLast--
+				keep = false
+			default:
+				*skipping = false
+			}
+		}
+
+		lineComplete := prefixLen > 0 && prefix[prefixLen-1] == '\n'
+		if keep {
+			if parseErr != nil {
+				if err := writePodLogOutput(writer, prefix[:prefixLen], delivered); err != nil {
+					return err
+				}
+			} else {
+				lineComplete = false
+			}
+		}
+		if !lineComplete && prefixErr == nil {
+			var err error
+			lineComplete, err = copyPodLogLineRemainder(reader, writer, keep, delivered)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return err
+			}
+			if errors.Is(err, io.EOF) {
+				prefixErr = io.EOF
+			}
+		}
+		if parseErr == nil && keep && lineComplete {
+			if timestamp.After(*last) || last.IsZero() {
+				*last = timestamp
+				*atLast = 1
+			} else if timestamp.Equal(*last) {
+				*atLast++
+			}
+			*delivered = true
+		}
+		if parseErr != nil && keep && prefixLen > 0 {
+			*delivered = true
+		}
+		if prefixErr != nil {
+			return prefixErr
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+}
+
+func newPodLogReader(logs io.Reader) *bufio.Reader {
+	return bufio.NewReaderSize(logs, logReadBufferSize)
+}
+
+func parsePodLogTimestamp(prefix []byte, separator bool) (time.Time, error) {
+	if !separator {
+		return time.Time{}, fmt.Errorf("missing timestamp separator")
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, string(prefix[:len(prefix)-1]))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing pod log timestamp: %w", err)
+	}
+	return timestamp, nil
+}
+
+func copyPodLogLineRemainder(reader *bufio.Reader, writer *io.PipeWriter, keep bool, delivered *bool) (bool, error) {
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		if keep && len(chunk) > 0 {
+			if writeErr := writePodLogOutput(writer, chunk, delivered); writeErr != nil {
+				return false, writeErr
+			}
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return true, io.EOF
+		}
+		return err == nil, err
+	}
+}
+
+func writePodLogOutput(writer *io.PipeWriter, output []byte, delivered *bool) error {
+	if _, err := writer.Write(output); err != nil {
+		return &podLogPipeWriteError{err: err}
+	}
+	if len(output) > 0 {
+		*delivered = true
+	}
+	return nil
+}
+
+type podLogPipeWriteError struct {
+	err error
+}
+
+func (e *podLogPipeWriteError) Error() string {
+	return fmt.Sprintf("writing pod log output: %v", e.err)
+}
+
+func (e *podLogPipeWriteError) Unwrap() error {
+	return e.err
+}
+
+func (e *kube) DestroyStep(ctx context.Context, step *types.Step, taskUUID string) error {
+	var errs []error
+	log.Trace().Str("taskUUID", taskUUID).Msgf("Stopping step: %s", step.Name)
+	if needsRegistrySecret(step) {
+		err := stopRegistrySecret(ctx, e, step, e.config.newDefaultDeleteOptions())
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if needsStepSecret(step) {
+		err := stopStepSecret(ctx, e, step, e.config.newDefaultDeleteOptions())
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	err := stopPod(ctx, e, step, e.config.newDefaultDeleteOptions())
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if podName, nameErr := stepToPodName(step); nameErr == nil {
+		e.nodes.Delete(podName)
+	} else {
+		errs = append(errs, nameErr)
+	}
+	return errors.Join(errs...)
+}
+
+// DestroyWorkflow destroys the pipeline environment.
+func (e *kube) DestroyWorkflow(ctx context.Context, conf *types.Config, taskUUID string) error {
+	e.deleteWorkflowResources(taskUUID)
+	log.Trace().Str("taskUUID", taskUUID).Msg("deleting Kubernetes primitives")
+
+	for _, stage := range conf.Stages {
+		for _, step := range stage.Steps {
+			if podName, err := stepToPodName(step); err == nil {
+				e.nodes.Delete(podName)
+			}
+			err := stopPod(ctx, e, step, e.config.newDefaultDeleteOptions())
+			if err != nil {
+				return err
+			}
+			// A step whose start failed never reaches DestroyStep; its Secret may hold the clone token.
+			if needsStepSecret(step) {
+				err = stopStepSecret(ctx, e, step, e.config.newDefaultDeleteOptions())
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	namespace := e.config.GetNamespace(conf.Stages[0].Steps[0].OrgID)
+
+	log.Trace().Str("taskUUID", taskUUID).Msgf("deleting workflow headless service")
+	err := e.stopHeadlessService(ctx, e, namespace, taskUUID)
+	if err != nil {
+		return err
+	}
+
+	log.Trace().Str("taskUUID", taskUUID).Msgf("deleting workflow volume")
+	err = stopVolume(ctx, e, conf.Volume, e.config.GetNamespace(conf.Stages[0].Steps[0].OrgID), e.config.newDefaultDeleteOptions())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}

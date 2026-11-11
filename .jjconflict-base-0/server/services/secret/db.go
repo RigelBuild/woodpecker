@@ -1,0 +1,140 @@
+// Copyright 2022 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package secret
+
+import (
+	"context"
+	"slices"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+)
+
+type db struct {
+	store store.Store
+}
+
+// NewDB returns a new local secret service.
+func NewDB(store store.Store) Service {
+	return &db{store: store}
+}
+
+func (d *db) SecretFind(repo *model.Repo, name string) (*model.Secret, error) {
+	return d.store.SecretFind(repo, name)
+}
+
+func (d *db) SecretList(repo *model.Repo, p *model.ListOptionsWithAll) ([]*model.Secret, error) {
+	return d.store.SecretList(repo, false, p)
+}
+
+func (d *db) SecretListPipeline(_ context.Context, repo *model.Repo, _ *model.Pipeline, _ *model.Netrc) ([]*model.Secret, error) {
+	s, err := d.store.SecretList(repo, true, &model.ListOptionsWithAll{All: true})
+	if err != nil {
+		return nil, err
+	}
+
+	// Return only secrets with unique name, matched case-insensitively like the compiler.
+	// Priority order in case of duplicate names are repository, user/organization, global.
+	// The winner supplies the value; a shadowed same-name secret still narrows its policy.
+	secrets := make([]*model.Secret, 0, len(s))
+	index := make(map[string]int)
+	unusable := make(map[string]struct{})
+	for _, condition := range []struct {
+		IsRepository   bool
+		IsOrganization bool
+		IsGlobal       bool
+	}{
+		{IsRepository: true},
+		{IsOrganization: true},
+		{IsGlobal: true},
+	} {
+		for _, secret := range s {
+			if secret.IsRepository() != condition.IsRepository || secret.IsOrganization() != condition.IsOrganization || secret.IsGlobal() != condition.IsGlobal {
+				continue
+			}
+			key := secretKey(secret.Name)
+			i, ok := index[key]
+			if !ok {
+				index[key] = len(secrets)
+				secrets = append(secrets, secret)
+				continue
+			}
+			narrowed, usable := withStrictestPolicy(secrets[i], secret)
+			if !usable {
+				unusable[key] = struct{}{}
+				continue
+			}
+			secrets[i] = narrowed
+		}
+	}
+	// Filters that share nothing fit no run, so the name is dropped and a step
+	// asking for it fails instead of getting either value.
+	return slices.DeleteFunc(secrets, func(secret *model.Secret) bool {
+		_, drop := unusable[secretKey(secret.Name)]
+		return drop
+	}), nil
+}
+
+func (d *db) SecretCreate(_ *model.Repo, in *model.Secret) error {
+	return d.store.SecretCreate(in)
+}
+
+func (d *db) SecretUpdate(_ *model.Repo, in *model.Secret) error {
+	return d.store.SecretUpdate(in)
+}
+
+func (d *db) SecretDelete(_ *model.Repo, secret *model.Secret) error {
+	return d.store.SecretDelete(secret)
+}
+
+func (d *db) OrgSecretFind(owner int64, name string) (*model.Secret, error) {
+	return d.store.OrgSecretFind(owner, name)
+}
+
+func (d *db) OrgSecretList(owner int64, p *model.ListOptionsWithAll) ([]*model.Secret, error) {
+	return d.store.OrgSecretList(owner, p)
+}
+
+func (d *db) OrgSecretCreate(_ int64, in *model.Secret) error {
+	return d.store.SecretCreate(in)
+}
+
+func (d *db) OrgSecretUpdate(_ int64, in *model.Secret) error {
+	return d.store.SecretUpdate(in)
+}
+
+func (d *db) OrgSecretDelete(_ int64, secret *model.Secret) error {
+	return d.store.SecretDelete(secret)
+}
+
+func (d *db) GlobalSecretFind(owner string) (*model.Secret, error) {
+	return d.store.GlobalSecretFind(owner)
+}
+
+func (d *db) GlobalSecretList(p *model.ListOptionsWithAll) ([]*model.Secret, error) {
+	return d.store.GlobalSecretList(p)
+}
+
+func (d *db) GlobalSecretCreate(in *model.Secret) error {
+	return d.store.SecretCreate(in)
+}
+
+func (d *db) GlobalSecretUpdate(in *model.Secret) error {
+	return d.store.SecretUpdate(in)
+}
+
+func (d *db) GlobalSecretDelete(secret *model.Secret) error {
+	return d.store.SecretDelete(secret)
+}

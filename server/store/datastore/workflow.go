@@ -201,8 +201,9 @@ func (s storage) WorkflowByStep(step *model.Step) (*model.Workflow, error) {
 }
 
 func (s storage) WorkflowUpdate(workflow *model.Workflow) error {
-	_, err := s.engine.ID(workflow.ID).AllCols().Update(workflow)
-	return err
+	return retryWrite(func() error {
+		return wrapUpdate(s.engine.ID(workflow.ID).AllCols().Update(workflow))
+	})
 }
 
 // WorkflowSupersedePending validates and updates the selected dependent closure in one transaction.

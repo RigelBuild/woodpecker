@@ -1,0 +1,82 @@
+// Copyright 2024 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package woodpecker
+
+import (
+	"fmt"
+	"net/url"
+)
+
+const (
+	pathAgents     = "%s/api/agents"
+	pathAgent      = "%s/api/agents/%d"
+	pathAgentTasks = "%s/api/agents/%d/tasks"
+)
+
+// AgentCreate creates a new agent.
+func (c *client) AgentCreate(in *Agent) (*Agent, error) {
+	out := new(Agent)
+	uri := fmt.Sprintf(pathAgents, c.addr)
+	return out, c.post(uri, in, out)
+}
+
+// AgentListOptions represents the options for the agent list.
+type AgentListOptions struct {
+	ListOptions
+}
+
+// AgentList returns the first page of registered agents.
+//
+// Deprecated: use AgentListWithOpts instead, which can ask for any page.
+func (c *client) AgentList() ([]*Agent, error) {
+	out := make([]*Agent, 0, 5)
+	uri := fmt.Sprintf(pathAgents, c.addr)
+	return out, c.get(uri, &out)
+}
+
+// AgentListWithOpts returns a page of registered agents.
+func (c *client) AgentListWithOpts(opt AgentListOptions) ([]*Agent, error) {
+	out := make([]*Agent, 0, 5)
+	uri, _ := url.Parse(fmt.Sprintf(pathAgents, c.addr))
+	uri.RawQuery = opt.getURLQuery().Encode()
+	return out, c.get(uri.String(), &out)
+}
+
+// Agent returns an agent by id.
+func (c *client) Agent(agentID int64) (*Agent, error) {
+	out := new(Agent)
+	uri := fmt.Sprintf(pathAgent, c.addr, agentID)
+	return out, c.get(uri, out)
+}
+
+// AgentUpdate updates the agent with the provided Agent struct.
+func (c *client) AgentUpdate(in *Agent) (*Agent, error) {
+	out := new(Agent)
+	uri := fmt.Sprintf(pathAgent, c.addr, in.ID)
+	return out, c.patch(uri, in, out)
+}
+
+// AgentDelete deletes the agent with the given id.
+func (c *client) AgentDelete(agentID int64) error {
+	uri := fmt.Sprintf(pathAgent, c.addr, agentID)
+	return c.delete(uri)
+}
+
+// AgentTasksList returns a list of all tasks for the agent with the given id.
+func (c *client) AgentTasksList(agentID int64) ([]*Task, error) {
+	out := make([]*Task, 0, 5)
+	uri := fmt.Sprintf(pathAgentTasks, c.addr, agentID)
+	return out, c.get(uri, &out)
+}

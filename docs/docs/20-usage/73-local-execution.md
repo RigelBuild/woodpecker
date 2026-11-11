@@ -94,4 +94,4 @@ All `CI_NETRC_*` names are reserved for server-managed clone credentials and are
 
 ## More options
 
-See the generated [CLI reference](../40-cli.md#exec) for the full list of `exec` flags.
+See the generated [CLI reference](../40-cli/90-reference.md#exec) for the full list of `exec` flags.

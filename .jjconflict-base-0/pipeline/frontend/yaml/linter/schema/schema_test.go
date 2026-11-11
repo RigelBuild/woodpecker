@@ -1,0 +1,266 @@
+// Copyright 2023 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package schema_test
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/linter/schema"
+)
+
+func TestSchema(t *testing.T) {
+	t.Parallel()
+
+	testTable := []struct {
+		name     string
+		testFile string
+		fail     bool
+	}{
+		{
+			name:     "Clone",
+			testFile: ".woodpecker/test-clone.yaml",
+		},
+		{
+			name:     "Clone skip",
+			testFile: ".woodpecker/test-clone-skip.yaml",
+		},
+		{
+			name:     "Matrix",
+			testFile: ".woodpecker/test-matrix.yaml",
+		},
+		{
+			name:     "Multi Pipeline",
+			testFile: ".woodpecker/test-multi.yaml",
+		},
+		{
+			name:     "Plugin",
+			testFile: ".woodpecker/test-plugin.yaml",
+		},
+		{
+			name:     "Run on",
+			testFile: ".woodpecker/test-run-on.yaml",
+		},
+		{
+			name:     "Service",
+			testFile: ".woodpecker/test-service.yaml",
+		},
+		{
+			name:     "Step",
+			testFile: ".woodpecker/test-step.yaml",
+		},
+		{
+			name:     "When",
+			testFile: ".woodpecker/test-when.yaml",
+		},
+		{
+			name:     "Workspace",
+			testFile: ".woodpecker/test-workspace.yaml",
+		},
+		{
+			name:     "Labels",
+			testFile: ".woodpecker/test-labels.yaml",
+		},
+		{
+			name:     "Named workflow",
+			testFile: ".woodpecker/test-named.yaml",
+		},
+		{
+			name:     "Map and Sequence Merge", // https://woodpecker-ci.org/docs/next/usage/advanced-yaml-syntax
+			testFile: ".woodpecker/test-merge-map-and-sequence.yaml",
+		},
+		{
+			name:     "Backend options",
+			testFile: ".woodpecker/test-backend-options.yaml",
+		},
+		{
+			name:     "Broken Config",
+			testFile: ".woodpecker/test-broken.yaml",
+			fail:     true,
+		},
+		{
+			name:     "Array syntax",
+			testFile: ".woodpecker/test-array-syntax.yaml",
+			fail:     false,
+		},
+		{
+			name:     "Step DAG syntax",
+			testFile: ".woodpecker/test-dag.yaml",
+			fail:     false,
+		},
+		{
+			name:     "Custom backend",
+			testFile: ".woodpecker/test-custom-backend.yaml",
+			fail:     false,
+		},
+		{
+			name:     "Broken Plugin by environment",
+			testFile: ".woodpecker/test-broken-plugin.yaml",
+			fail:     true,
+		},
+		{
+			name:     "Broken Plugin by commands",
+			testFile: ".woodpecker/test-broken-plugin2.yaml",
+			fail:     true,
+		},
+		{
+			name:     "Kubernetes backend tolerations",
+			testFile: ".woodpecker/test-kubernetes-backend-tolerations.yaml",
+			fail:     false,
+		},
+		{
+			name:     "Concurrency",
+			testFile: ".woodpecker/test-concurrency.yaml",
+			fail:     false,
+		},
+		{
+			name:     "Concurrency shorthand",
+			testFile: ".woodpecker/test-concurrency-shorthand.yaml",
+			fail:     false,
+		},
+		{
+			name:     "Concurrency invalid",
+			testFile: ".woodpecker/test-concurrency-invalid.yaml",
+			fail:     true,
+		},
+		{
+			name:     "Service without name in array syntax",
+			testFile: ".woodpecker/test-broken-service-without-name.yaml",
+			fail:     true,
+		},
+		{
+			name:     "skip exit code zero",
+			testFile: ".woodpecker/test-skip-exit-code-zero.yaml",
+			fail:     true,
+		},
+	}
+
+	for _, tt := range testTable {
+		t.Run(tt.name, func(t *testing.T) {
+			fi, err := os.Open(tt.testFile)
+			assert.NoError(t, err, "could not open test file")
+			defer fi.Close()
+			configErrors, err := schema.Lint(fi)
+			if tt.fail {
+				if len(configErrors) == 0 {
+					assert.Error(t, err, "Expected config errors but got none")
+				}
+			} else {
+				assert.NoError(t, err, fmt.Sprintf("Validation failed: %v", configErrors))
+				t.Run("parse", func(t *testing.T) {
+					config, err := io.ReadAll(fi)
+					require.NoError(t, err)
+					parsedConfig, err := yaml.ParseBytes(config)
+					assert.NoError(t, err, "if schema lint passes, we should be able to parse it")
+					assert.NotNil(t, parsedConfig)
+				})
+			}
+		})
+	}
+}
+
+func TestSchemaFiltersRedundantCompositionErrors(t *testing.T) {
+	t.Parallel()
+
+	configErrors, err := schema.LintString(`steps:
+  publish:
+    image: plugins/docker
+    settings:
+      repo: foo/bar
+      tags: latest
+    environment:
+      CGO: 0
+`)
+	require.Error(t, err)
+
+	descriptions := make([]string, 0, len(configErrors))
+	for _, configError := range configErrors {
+		descriptions = append(descriptions, configError.Description())
+	}
+
+	assert.NotContains(t, descriptions, "Must validate one and only one schema (oneOf)")
+	assert.NotContains(t, descriptions, "Must validate at least one schema (anyOf)")
+	assert.Contains(t, descriptions, "Additional property settings is not allowed")
+}
+
+func TestLintConcurrent(t *testing.T) {
+	const config = `steps:
+  test:
+    image: alpine
+    commands:
+      - echo hello
+`
+
+	for i := range 16 {
+		t.Run(fmt.Sprintf("worker-%d", i), func(t *testing.T) {
+			t.Parallel()
+
+			for range 10 {
+				configErrors, err := schema.LintString(config)
+
+				require.NoError(t, err)
+				require.Empty(t, configErrors)
+			}
+		})
+	}
+}
+
+func TestMatrixSchemaWorkflowLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		count   int
+		include bool
+		wantErr bool
+	}{
+		{name: "10 axis values", count: 10},
+		{name: "11 axis values", count: 11, wantErr: true},
+		{name: "64 include entries", count: 64, include: true},
+		{name: "65 include entries", count: 65, include: true, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var matrix string
+			if tt.include {
+				entries := make([]string, tt.count)
+				for i := range entries {
+					entries[i] = fmt.Sprintf("  - VERSION: %d", i)
+				}
+				matrix = "matrix:\n  include:\n" + strings.Join(entries, "\n")
+			} else {
+				values := make([]string, tt.count)
+				for i := range values {
+					values[i] = fmt.Sprintf("    - %d", i)
+				}
+				matrix = "matrix:\n  VERSION:\n" + strings.Join(values, "\n")
+			}
+			config := "steps:\n  test:\n    image: alpine\n    commands: [echo test]\n" + matrix
+
+			_, err := schema.LintString(config)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

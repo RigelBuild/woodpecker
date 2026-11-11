@@ -1,0 +1,197 @@
+// Copyright 2022 Woodpecker Authors
+// Copyright 2018 Drone.IO Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package gitea
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/rs/zerolog/log"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+)
+
+const (
+	hookEvent       = "X-Gitea-Event"
+	hookSignature   = "X-Gitea-Signature"
+	hookPush        = "push"
+	hookCreated     = "create"
+	hookPullRequest = "pull_request"
+	hookRelease     = "release"
+
+	actionOpen         = "opened"
+	actionSync         = "synchronized"
+	actionClose        = "closed"
+	actionEdited       = "edited"
+	actionLabelUpdate  = "label_updated"
+	actionLabelCleared = "label_cleared"
+	actionMilestoned   = "milestoned"
+	actionDeMilestoned = "demilestoned"
+	actionAssigned     = "assigned"
+	actionUnAssigned   = "unassigned"
+	actionReopen       = "reopened"
+
+	refBranch = "branch"
+	refTag    = "tag"
+)
+
+var actionList = []string{
+	actionOpen,
+	actionSync,
+	actionClose,
+	actionEdited,
+	actionLabelUpdate,
+	actionMilestoned,
+	actionDeMilestoned,
+	actionLabelCleared,
+	actionAssigned,
+	actionUnAssigned,
+	actionReopen,
+}
+
+func supportedAction(action string) bool {
+	return slices.Contains(actionList, action)
+}
+
+// parseHook parses a Gitea hook payload of the given type and returns
+// Repo and Pipeline detail. If a hook type is unsupported nil values are returned.
+func parseHook(hookType string, payload []byte) (*model.Repo, *model.Pipeline, error) {
+	switch hookType {
+	case hookPush:
+		return parsePushHook(payload)
+	case hookCreated:
+		return parseCreatedHook(payload)
+	case hookPullRequest:
+		return parsePullRequestHook(payload)
+	case hookRelease:
+		return parseReleaseHook(payload)
+	}
+	log.Debug().Msgf("unsupported hook type: '%s'", hookType)
+	return nil, nil, &types.ErrIgnoreEvent{Event: hookType}
+}
+
+// parsePushHook parses a push hook and returns the Repo and Pipeline details.
+// If the commit type is unsupported nil values are returned.
+func parsePushHook(payload []byte) (repo *model.Repo, pipeline *model.Pipeline, err error) {
+	push, err := parsePush(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := push.validate(); err != nil {
+		return nil, nil, err
+	}
+
+	// ignore push events for tags
+	if strings.HasPrefix(push.Ref, "refs/tags/") {
+		return nil, nil, nil
+	}
+
+	// TODO: is this even needed?
+	if push.RefType == refBranch {
+		return nil, nil, nil
+	}
+
+	repo = toRepo(push.Repo)
+	pipeline = pipelineFromPush(push)
+	return repo, pipeline, err
+}
+
+// parseCreatedHook parses a push hook and returns the Repo and Pipeline details.
+// If the commit type is unsupported nil values are returned.
+func parseCreatedHook(payload []byte) (repo *model.Repo, pipeline *model.Pipeline, err error) {
+	push, err := parsePush(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := push.validate(); err != nil {
+		return nil, nil, err
+	}
+
+	if push.RefType != refTag {
+		return nil, nil, nil
+	}
+
+	repo = toRepo(push.Repo)
+	pipeline = pipelineFromTag(push)
+	return repo, pipeline, nil
+}
+
+// parsePullRequestHook parses a pull_request hook and returns the Repo and Pipeline details.
+func parsePullRequestHook(payload []byte) (*model.Repo, *model.Pipeline, error) {
+	var (
+		repo     *model.Repo
+		pipeline *model.Pipeline
+	)
+
+	pr, err := parsePullRequest(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := pr.validate(); err != nil {
+		return nil, nil, err
+	}
+
+	if pr.PullRequest == nil {
+		// this should never have happened but it did - so we check
+		return nil, nil, fmt.Errorf("parsed pull_request webhook does not contain pull_request info")
+	}
+
+	// Only trigger pipelines for supported event types
+	if !supportedAction(pr.Action) {
+		log.Debug().Msgf("pull_request action is '%s'. Only '%s' are supported", pr.Action, strings.Join(actionList, "', '"))
+		return nil, nil, nil
+	}
+
+	repo = toRepo(pr.Repo)
+	pipeline = pipelineFromPullRequest(pr)
+
+	// all other actions return the state of labels after the actions where done ... so we should too
+	if pr.Action == actionLabelCleared {
+		pipeline.PullRequestLabels = []string{}
+	}
+	if pr.Action == actionDeMilestoned {
+		pipeline.PullRequestMilestone = ""
+	}
+
+	for i := range pipeline.EventReason {
+		pipeline.EventReason[i] = common.NormalizeEventReason(pipeline.EventReason[i])
+	}
+
+	return repo, pipeline, err
+}
+
+// parseReleaseHook parses a release hook and returns the Repo and Pipeline details.
+func parseReleaseHook(payload []byte) (*model.Repo, *model.Pipeline, error) {
+	var (
+		repo     *model.Repo
+		pipeline *model.Pipeline
+	)
+
+	release, err := parseRelease(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := release.validate(); err != nil {
+		return nil, nil, err
+	}
+
+	repo = toRepo(release.Repo)
+	pipeline = pipelineFromRelease(release)
+	return repo, pipeline, err
+}

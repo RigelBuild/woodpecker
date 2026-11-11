@@ -1,0 +1,191 @@
+// Copyright 2023 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// cSpell:ignore ERRORLEVEL
+
+package local
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+
+	"al.essio.dev/pkg/shellescape"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/common"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+)
+
+func lookupShellPath(shellName string) string {
+	if shellPath, exists := os.LookupEnv("WOODPECKER_SHELL_PATH_" + shellName); exists {
+		return shellPath
+	}
+
+	return shellName
+}
+
+// execCommands use step.Image as shell and run the commands in it.
+func (e *local) execCommands(ctx context.Context, step *types.Step, state *workflowState, env []string) error {
+	// Use the image name to determine the shell.
+	shellName := strings.TrimSuffix(strings.ToLower(step.Image), ".exe")
+	shellPath := lookupShellPath(shellName)
+	if err := checkShellExistence(shellPath); err != nil {
+		return err
+	}
+
+	// Prepare commands
+	// TODO: support `entrypoint` from pipeline config
+	args, err := e.genCmdByShell(shellName, shellPath, step.Commands, state.baseDir)
+	if err != nil {
+		return fmt.Errorf("could not convert commands into args: %w", err)
+	}
+
+	cmd := newCmd(ctx, shellPath, args...)
+	cmd.Env = env
+	cmd.Dir = state.workspaceDir
+
+	reader, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	if e.os == "windows" {
+		// we get non utf8 output from windows so just sanitize it
+		// TODO: remove hack
+		reader = io.NopCloser(transform.NewReader(reader, unicode.UTF8.NewDecoder().Transformer))
+	}
+
+	// Get output and redirect Stderr to Stdout
+	cmd.Stderr = cmd.Stdout
+
+	// Save state
+	state.stepState.Store(step.UUID, &stepState{
+		cmd:    cmd,
+		output: reader,
+	})
+
+	return cmd.Start()
+}
+
+func checkShellExistence(shell string) error {
+	_, err := exec.LookPath(shell)
+	return err
+}
+
+// Use a delimiter not present in the value to preserve its contents.
+// https://www.nushell.sh/lang-guide/chapters/strings_and_text.html#string-literals
+func quoteNushell(value string) string {
+	for n := 1; ; n++ {
+		hashes := strings.Repeat("#", n)
+		if !strings.Contains(value, "'"+hashes) {
+			return "r" + hashes + "'" + value + "'" + hashes
+		}
+	}
+}
+
+func (e *local) genCmdByShell(shellName, shellPath string, cmdList []string, baseDir string) (args []string, err error) {
+	if len(cmdList) == 0 {
+		return nil, ErrNoCmdSet
+	}
+
+	switch shellName {
+	default:
+		// assume posix shell
+		if err := probeShellIsPosix(shellPath); err != nil {
+			return nil, err
+		}
+		fallthrough
+		// normal posix shells
+	case "sh", "bash", "zsh":
+		var script strings.Builder
+		for _, cmd := range cmdList {
+			script.WriteString("echo " + shellescape.Quote(common.CommandMarker+cmd) + "\n")
+			script.WriteString(cmd + "\n")
+		}
+		return []string{"-e", "-c", script.String()}, nil
+	case "":
+		return nil, ErrNoShellSet
+	case "cmd":
+		agentPath, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		var script strings.Builder
+		script.WriteString("@echo off\n")
+		for _, cmd := range cmdList {
+			// Escaping in cmd.exe is a pain, because of that, the command is encoded in Base64, then the output is done
+			// by a special agent command, the decoder intentionally does not add a new line, so we have to add it here
+			encodedCmd := base64.StdEncoding.EncodeToString([]byte(common.CommandMarker + cmd + "\n"))
+
+			script.WriteString("\n")
+			script.WriteString(agentPath + " decode-base64 " + encodedCmd + "\n")
+			script.WriteString(cmd + "\n")
+			script.WriteString("if not %ERRORLEVEL% == 0 exit %ERRORLEVEL%\n")
+		}
+		cmd, err := os.CreateTemp(baseDir, "*.cmd")
+		if err != nil {
+			return nil, err
+		}
+		defer cmd.Close()
+		if _, err := cmd.WriteString(script.String()); err != nil {
+			return nil, err
+		}
+		return []string{"/D", "/C", cmd.Name()}, nil
+	case "fish":
+		var script strings.Builder
+		for _, cmd := range cmdList {
+			script.WriteString("echo " + shellescape.Quote(common.CommandMarker+cmd) + "\n")
+			script.WriteString(cmd + " || exit $status\n")
+		}
+		return []string{"-c", script.String()}, nil
+	case "nu", "nushell":
+		var script strings.Builder
+		for _, cmd := range cmdList {
+			script.WriteString("print " + quoteNushell(common.CommandMarker+cmd) + "\n")
+			script.WriteString(cmd + "\n")
+		}
+		return []string{"--commands", script.String()}, nil
+	case "powershell", "pwsh":
+		var script strings.Builder
+		script.WriteString("$ErrorActionPreference = \"Stop\"\n")
+		for _, cmd := range cmdList {
+			script.WriteString("Write-Host " + common.QuotePowerShell(common.CommandMarker+cmd) + "\n")
+			script.WriteString(cmd + "\n")
+		}
+		return []string{"-noprofile", "-noninteractive", "-c", script.String()}, nil
+	}
+}
+
+// before we generate a generic posix shell we test.
+func probeShellIsPosix(shell string) error {
+	script := `x=1 && [ "$x" = "1" ] && command -v test >/dev/null && printf ok`
+
+	cmd := exec.Command(shell, "-c", script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return &ErrNoPosixShell{Shell: shell, Err: err}
+	}
+
+	if strings.TrimSpace(string(output)) != "ok" {
+		return &ErrNoPosixShell{Shell: shell, Err: fmt.Errorf("unexpected output returned: %q", string(output))}
+	}
+
+	return nil
+}

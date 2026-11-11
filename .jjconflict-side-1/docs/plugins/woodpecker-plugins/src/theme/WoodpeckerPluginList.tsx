@@ -1,0 +1,97 @@
+import Link from '@docusaurus/Link';
+import Layout from '@theme/Layout';
+import Fuse from 'fuse.js';
+import React, { useRef, useState } from 'react';
+
+import './style.css';
+
+import { WoodpeckerPlugin } from '../types';
+import { IconPlugin, IconRelease, IconVerified } from './Icons';
+
+function PluginPanel({ plugin }: { plugin: WoodpeckerPlugin }) {
+  const pluginUrl = `/plugins/${plugin.slug}`;
+
+  return (
+    <a href={pluginUrl} className="card shadow--md wp-plugin-card">
+      <div className="card__header row">
+        <div className="col col--2 text--left">
+          {plugin.iconDataUrl ? <img src={plugin.iconDataUrl} width="50" /> : IconPlugin()}
+        </div>
+        <div className="col col--10">
+          <h3>{plugin.name}</h3>
+          <p>{plugin.description}</p>
+          {(plugin.latestRelease || plugin.tags) && (
+            <div className="wp-plugin-tags">
+              {plugin.latestRelease && (
+                <span className="badge badge--secondary wp-plugin-release">
+                  {IconRelease(14)}
+                  {plugin.latestRelease.tag}
+                </span>
+              )}
+              {plugin.tags?.map((tag, idx) => (
+                <span className="badge badge--success" key={idx}>
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      {plugin.verified && <div className="wp-plugin-verified">{IconVerified()}</div>}
+    </a>
+  );
+}
+
+export function WoodpeckerPluginList({ plugins }: { plugins: WoodpeckerPlugin[] }) {
+  const applyForIndexUrl =
+    'https://github.com/woodpecker-ci/woodpecker/edit/main/docs/plugins/woodpecker-plugins/plugins.json';
+
+  const [query, setQuery] = useState('');
+
+  const fuse = useRef(
+    new Fuse(plugins, {
+      keys: ['name', 'description', 'tags'],
+      threshold: 0.3,
+    }),
+  );
+
+  const searchedPlugins = query.length >= 1 ? fuse.current.search(query).map((p) => p.item) : plugins;
+
+  return (
+    <Layout title="Woodpecker CI plugins" description="List of all Woodpecker-CI plugins">
+      <main className="margin-vert--lg container">
+        <section>
+          <div style={{ display: 'flex', flexFlow: 'column', alignItems: 'center' }}>
+            <h1>Woodpecker CI plugins</h1>
+            <p>This list contains plugins which you can use to easily execute usual pipeline tasks.</p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '1rem' }}>
+              <a href={applyForIndexUrl} target="_blank" rel="noopener noreferrer" className="button button--primary">
+                🎉 Add your plugin
+              </a>
+              <Link to="/docs/usage/plugins/creating-plugins" className="button button--secondary">
+                🛠️ Developer guide
+              </Link>
+            </div>
+          </div>
+          <div className="container" style={{ display: 'flex', flexFlow: 'column', marginTop: '4rem' }}>
+            <input
+              type="search"
+              autoComplete="off"
+              value={query}
+              onChange={(event) => setQuery(event.currentTarget.value)}
+              placeholder="Search for a plugin ..."
+              className="wp-plugin-search"
+            />
+            <div className="wp-plugins-list">
+              {searchedPlugins.map((plugin) => (
+                <PluginPanel key={plugin.name} plugin={plugin} />
+              ))}
+            </div>
+          </div>
+        </section>
+      </main>
+    </Layout>
+  );
+}
+
+export default WoodpeckerPluginList;

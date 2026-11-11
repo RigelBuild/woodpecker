@@ -1,0 +1,172 @@
+// Copyright 2022 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package kubernetes
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+)
+
+func TestPvcName(t *testing.T) {
+	name, err := volumeName("woodpecker_cache:/woodpecker/src/cache")
+	assert.NoError(t, err)
+	assert.Equal(t, "woodpecker-cache", name)
+
+	name, err = volumeName("woodpecker\\cache")
+	assert.NoError(t, err)
+	assert.Equal(t, "woodpecker-cache", name)
+
+	name, err = volumeName("-woodpecker.cache:/woodpecker/src/cache")
+	assert.NoError(t, err)
+	assert.Equal(t, "woodpecker.cache", name)
+}
+
+func TestPvcMount(t *testing.T) {
+	mount := volumeMountPath("woodpecker-cache:/woodpecker/src/cache")
+	assert.Equal(t, "/woodpecker/src/cache", mount)
+
+	mount = volumeMountPath("/woodpecker/src/cache")
+	assert.Equal(t, "/woodpecker/src/cache", mount)
+}
+
+func TestPersistentVolumeClaim(t *testing.T) {
+	namespace := "someNamespace"
+	expectedRwx := `
+	{
+	  "metadata": {
+	    "name": "somename",
+	    "namespace": "someNamespace"
+	  },
+	  "spec": {
+	    "accessModes": [
+	      "ReadWriteMany"
+	    ],
+	    "resources": {
+	      "requests": {
+	        "storage": "1Gi"
+	      }
+	    },
+	    "storageClassName": "local-storage"
+	  },
+	  "status": {}
+	}`
+
+	expectedRwo := `
+	{
+	  "metadata": {
+	    "name": "somename",
+	    "namespace": "someNamespace"
+	  },
+	  "spec": {
+	    "accessModes": [
+	      "ReadWriteOnce"
+	    ],
+	    "resources": {
+	      "requests": {
+	        "storage": "1Gi"
+	      }
+	    },
+	    "storageClassName": "local-storage"
+	  },
+	  "status": {}
+	}`
+
+	pvc, err := mkPersistentVolumeClaim(&config{
+		Namespace:    namespace,
+		StorageClass: "local-storage",
+		VolumeSize:   "1Gi",
+		StorageRwx:   true,
+	}, "somename", namespace)
+	assert.NoError(t, err)
+
+	j, err := json.Marshal(pvc)
+	assert.NoError(t, err)
+	assert.JSONEq(t, expectedRwx, string(j))
+
+	pvc, err = mkPersistentVolumeClaim(&config{
+		Namespace:    namespace,
+		StorageClass: "local-storage",
+		VolumeSize:   "1Gi",
+		StorageRwx:   false,
+	}, "somename", namespace)
+	assert.NoError(t, err)
+
+	j, err = json.Marshal(pvc)
+	assert.NoError(t, err)
+	assert.JSONEq(t, expectedRwo, string(j))
+
+	pvc, err = mkPersistentVolumeClaim(&config{
+		Namespace:    namespace,
+		StorageClass: "local-storage",
+		VolumeSize:   "1Gi",
+		StorageRwx:   false,
+	}, "some0..INVALID3name", namespace)
+	assert.NoError(t, err)
+	assert.Equal(t, "some0.invalid3name", pvc.Name)
+}
+
+func TestDropLocalPathsInsideWorkspace(t *testing.T) {
+	conf := &types.Config{
+		Stages: []*types.Stage{{
+			Steps: []*types.Step{
+				{
+					WorkspaceBase: "/woodpecker",
+					Volumes: []string{
+						"wp_workflow_0_default:/woodpecker",
+						"/home/user/repo:/woodpecker/src",
+						"woodpecker-cache:/cache",
+						"/host/data:/data",
+						"/host/woodpecker-not-below:/woodpecker-not-below",
+					},
+				},
+			},
+		}},
+	}
+
+	dropLocalPathsInsideWorkspace(conf)
+
+	assert.Equal(t, []string{
+		"wp_workflow_0_default:/woodpecker",
+		"woodpecker-cache:/cache",
+		"/host/data:/data",
+		"/host/woodpecker-not-below:/woodpecker-not-below",
+	}, conf.Stages[0].Steps[0].Volumes)
+}
+
+func TestDropLocalPathsInsideWorkspaceAtBase(t *testing.T) {
+	conf := &types.Config{
+		Stages: []*types.Stage{{
+			Steps: []*types.Step{
+				{
+					WorkspaceBase: "/woodpecker",
+					Volumes: []string{
+						"/home/user/repo:/woodpecker",
+						"wp_workflow_0_default:/woodpecker",
+					},
+				},
+			},
+		}},
+	}
+
+	dropLocalPathsInsideWorkspace(conf)
+
+	assert.Equal(t, []string{
+		"wp_workflow_0_default:/woodpecker",
+	}, conf.Stages[0].Steps[0].Volumes)
+}

@@ -1,0 +1,947 @@
+// Copyright 2026 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build test
+
+package runtime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/dummy"
+	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types/mocks"
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/logging"
+	tracer_mocks "go.woodpecker-ci.org/woodpecker/v3/pipeline/tracing/mocks"
+)
+
+const testWorkflowID = "WID_test"
+
+// newDummyRuntime creates a Runtime backed by the dummy engine with a pre-setup
+// workflow so individual step methods can be tested in isolation.
+func newDummyRuntime(t *testing.T, tracer *tracer_mocks.MockTracer) *Runtime {
+	t.Helper()
+	engine := dummy.New()
+	r := New(
+		&backend_types.Config{}, engine,
+		WithTracer(tracer),
+		WithTaskUUID(testWorkflowID),
+		WithLogger(newTestLogger(t)),
+	)
+	require.NoError(t, engine.SetupWorkflow(t.Context(), nil, testWorkflowID))
+	return r
+}
+
+func dummyStep(name string) *backend_types.Step {
+	return &backend_types.Step{
+		Name:        name,
+		UUID:        name + "-uuid",
+		Type:        backend_types.StepTypeCommands,
+		OnSuccess:   true,
+		OnFailure:   false,
+		Environment: make(map[string]string),
+		Commands:    []string{"echo hello"},
+	}
+}
+
+func TestShouldSkipStep(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NoErrorOnSuccessTrue", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		step := &backend_types.Step{Name: "s", OnSuccess: true, OnFailure: false}
+
+		assert.False(t, r.shouldSkipStep(step))
+	})
+
+	t.Run("NoErrorOnSuccessFalse", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		step := &backend_types.Step{Name: "s", OnSuccess: false, OnFailure: true}
+
+		assert.True(t, r.shouldSkipStep(step))
+	})
+
+	t.Run("ErrorOnFailureTrue", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		r.err.Set(errors.New("previous failure"))
+		step := &backend_types.Step{Name: "s", OnSuccess: false, OnFailure: true}
+
+		assert.False(t, r.shouldSkipStep(step))
+	})
+
+	t.Run("ErrorOnFailureFalse", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		r.err.Set(errors.New("previous failure"))
+		step := &backend_types.Step{Name: "s", OnSuccess: true, OnFailure: false}
+
+		assert.True(t, r.shouldSkipStep(step))
+	})
+}
+
+func TestTraceStep(t *testing.T) {
+	t.Parallel()
+
+	t.Run("StepStarted", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+
+		r := newDummyRuntime(t, tracer)
+		r.started = 1000
+		step := dummyStep("s1")
+
+		err := r.traceStep(nil, nil, step)
+
+		assert.NoError(t, err)
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 1)
+		assert.Equal(t, int64(1000), calls[0].Workflow.Started)
+		assert.Equal(t, step, calls[0].CurrStep)
+		assert.False(t, calls[0].CurrStepState.Exited)
+	})
+
+	t.Run("StepFailedToStart", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("s1")
+		startErr := errors.New("image pull failed")
+
+		err := r.traceStep(nil, startErr, step)
+
+		assert.ErrorIs(t, err, startErr)
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 1)
+		assert.True(t, calls[0].CurrStepState.Exited)
+		assert.Equal(t, startErr, calls[0].CurrStepState.Error)
+	})
+
+	t.Run("StepFinished", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("s1")
+		ps := &backend_types.State{Exited: true, ExitCode: 0, Started: 42}
+
+		err := r.traceStep(ps, nil, step)
+
+		assert.NoError(t, err)
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 1)
+		assert.True(t, calls[0].CurrStepState.Exited)
+		assert.Equal(t, 0, calls[0].CurrStepState.ExitCode)
+		assert.Equal(t, int64(42), calls[0].CurrStepState.Started)
+	})
+
+	t.Run("StepSkipped", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("s1")
+		ps := &backend_types.State{Exited: true, Skipped: true}
+
+		err := r.traceStep(ps, nil, step)
+
+		assert.NoError(t, err)
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 1)
+		assert.True(t, calls[0].CurrStepState.Skipped)
+		assert.True(t, calls[0].CurrStepState.Exited)
+	})
+
+	t.Run("PipelineErrorPropagated", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+
+		r := newDummyRuntime(t, tracer)
+		r.err.Set(errors.New("earlier failure"))
+
+		_ = r.traceStep(nil, nil, dummyStep("s1"))
+
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 1)
+		assert.EqualError(t, calls[0].Workflow.Error, "earlier failure")
+	})
+}
+
+// The startStep uses dummy for success + start/tail failures and mockery mock for logger test.
+func TestStartStep(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		step := dummyStep("s1")
+
+		waitForLogs, startTime, err := r.startStep(step)
+
+		assert.NoError(t, err)
+		assert.NotNil(t, waitForLogs)
+		assert.Greater(t, startTime, int64(0))
+		waitForLogs()
+	})
+
+	t.Run("StartStepError", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		step := dummyStep("fail")
+		step.Environment[dummy.EnvKeyStepStartFail] = "true"
+
+		_, _, err := r.startStep(step)
+
+		assert.Error(t, err)
+	})
+
+	t.Run("TailStepError", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		step := dummyStep("tail-fail")
+		step.Environment[dummy.EnvKeyStepTailFail] = "true"
+		r.logger = logging.Logger(func(_ *backend_types.Step, _ io.ReadCloser) error { return nil })
+
+		_, _, err := r.startStep(step)
+
+		assert.Error(t, err)
+	})
+
+	t.Run("WithLogger", func(t *testing.T) {
+		t.Parallel()
+		var logCalled atomic.Int32
+		engine := mocks.NewMockBackend(t)
+		engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(io.NopCloser(strings.NewReader("log line")), nil)
+
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)),
+			WithLogger(logging.Logger(func(_ *backend_types.Step, rc io.ReadCloser) error {
+				logCalled.Add(1)
+				_, _ = io.ReadAll(rc)
+				return nil
+			})))
+		step := dummyStep("s1")
+
+		waitForLogs, _, err := r.startStep(step)
+		require.NoError(t, err)
+
+		waitForLogs()
+		assert.Equal(t, int32(1), logCalled.Load())
+	})
+
+	t.Run("LoggerError", func(t *testing.T) {
+		t.Parallel()
+		logErr := errors.New("log stream broken")
+
+		engine := mocks.NewMockBackend(t)
+		engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(io.NopCloser(strings.NewReader("data")), nil)
+
+		r := New(
+			&backend_types.Config{}, engine,
+			WithTracer(newTestTracer(t)),
+			WithLogger(logging.Logger(func(_ *backend_types.Step, rc io.ReadCloser) error {
+				_, _ = io.ReadAll(rc)
+				return logErr // triggers the error-log branch in the goroutine
+			})),
+		)
+
+		waitForLogs, _, err := r.startStep(dummyStep("s1"))
+		require.NoError(t, err) // startStep itself succeeds
+
+		// waitForLogs blocks until the goroutine finishes; the branch is hit inside.
+		waitForLogs()
+	})
+}
+
+// The completeStep uses mockery mock for fine-grained control over
+// WaitStep/DestroyStep return values that dummy cannot provide.
+func TestCompleteStep(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		assert.True(t, ws.Exited)
+		assert.Equal(t, 0, ws.ExitCode)
+	})
+	t.Run("SkipExitCodeDoesNotSkipSuccess", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("success")
+		skipExitCode := 42
+		step.SkipExitCode = skipExitCode
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		require.NotNil(t, state)
+		assert.False(t, state.Skipped)
+		assert.Zero(t, state.ExitCode)
+	})
+
+	t.Run("SkipExitCodeWithWaitErrorFails", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		waitErr := errors.New("wait failed")
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 42}, waitErr)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("failure")
+		step.SkipExitCode = 42
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		assert.ErrorIs(t, err, waitErr)
+		assert.Nil(t, state)
+	})
+
+	t.Run("NonZeroExitCode", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 1}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		var exitErr *pipeline_errors.ExitError
+		assert.True(t, errors.As(err, &exitErr))
+		assert.Equal(t, 1, exitErr.Code)
+		assert.Equal(t, 1, ws.ExitCode)
+	})
+	t.Run("SkipExitCode", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 42}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("skip")
+		step.SkipExitCode = 42
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		require.NotNil(t, state)
+		assert.True(t, state.Skipped)
+		assert.Equal(t, 42, state.ExitCode)
+	})
+
+	t.Run("SkipExitCodeDoesNotMatch", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 7}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("fail")
+		step.SkipExitCode = 42
+
+		state, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		var exitErr *pipeline_errors.ExitError
+		assert.ErrorAs(t, err, &exitErr)
+		require.NotNil(t, state)
+		assert.False(t, state.Skipped)
+		assert.Equal(t, 7, exitErr.Code)
+	})
+
+	t.Run("OOMKilled", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, OOMKilled: true, ExitCode: 137}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+		step := dummyStep("s1")
+		step.SkipExitCode = 137
+
+		ws, err := r.completeStep(t.Context(), step, func() {}, time.Now().Unix())
+
+		var oomErr *pipeline_errors.OomError
+		assert.ErrorAs(t, err, &oomErr)
+		assert.False(t, ws.Skipped)
+		assert.True(t, ws.OOMKilled)
+		assert.Equal(t, err.Error(), ws.Error.Error(), "OOM kill must be reported through the state too")
+	})
+
+	t.Run("OOMKilledExitZero", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, OOMKilled: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		var oomErr *pipeline_errors.OomError
+		assert.True(t, errors.As(err, &oomErr))
+		assert.Equal(t, 0, ws.ExitCode)
+		assert.Equal(t, err.Error(), ws.Error.Error(), "OOM kill must be reported through the state too")
+	})
+
+	t.Run("StateErrorExitZero", func(t *testing.T) {
+		t.Parallel()
+		stateErr := errors.New("backend reported failure")
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0, Error: stateErr}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.ErrorIs(t, err, stateErr, "state error must fail the step for the runtime too")
+		assert.Equal(t, stateErr.Error(), ws.Error.Error())
+	})
+
+	t.Run("ContextCanceledNilState", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, context.Canceled)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		require.NotNil(t, ws, "nil guard must allocate a new State")
+		assert.Equal(t, pipeline_errors.ErrCancel, ws.Error)
+	})
+
+	t.Run("ContextCanceledWithState", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, context.Canceled)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		assert.Equal(t, pipeline_errors.ErrCancel, ws.Error)
+	})
+
+	t.Run("WaitStepNonCancelError", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, errors.New("engine exploded"))
+		// DestroyStep should NOT be called — early return.
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.EqualError(t, err, "engine exploded")
+		assert.Nil(t, ws)
+	})
+
+	t.Run("DestroyStepError", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(errors.New("cleanup failed"))
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.EqualError(t, err, "cleanup failed")
+		assert.Nil(t, ws)
+	})
+
+	t.Run("SetsStartTime", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, 9999)
+
+		assert.NoError(t, err)
+		assert.Equal(t, int64(9999), ws.Started)
+	})
+	t.Run("PodLossDuringCancellation", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancelCause(t.Context())
+		loss := &backend_types.PodLossError{Pod: "wp-lost", Reason: "DeletionByPodGC"}
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).Run(func(mock.Arguments) {
+			cancel(loss)
+		}).Return(nil, loss)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+		r := New(
+			&backend_types.Config{},
+			engine,
+			WithTracer(newTestTracer(t)),
+			WithLogger(newTestLogger(t)),
+			WithContext(ctx),
+		)
+
+		const startTime = int64(9999)
+		state, err := r.completeStep(t.Context(), dummyStep("lost"), func() {}, startTime)
+
+		assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+		assert.ErrorIs(t, err, backend_types.ErrStepPodLost)
+		require.NotNil(t, state)
+		assert.Equal(t, startTime, state.Started)
+		assert.Equal(t, pipeline_errors.ErrCancel, state.Error)
+		engine.AssertCalled(t, "DestroyStep", mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("CtxCanceledAfterDestroyStep", func(t *testing.T) {
+		t.Parallel()
+		// WaitStep succeeds (no context.Canceled from the engine),
+		// but r.ctx is already canceled — the re-check at the bottom catches it.
+		canceledCtx, cancel := context.WithCancelCause(t.Context())
+		cancel(nil) // pre-cancel
+
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+		r := New(
+			&backend_types.Config{},
+			engine,
+			WithTracer(newTestTracer(t)),
+			WithLogger(newTestLogger(t)),
+			WithContext(canceledCtx), // r.ctx is canceled
+		)
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.NoError(t, err)
+		require.NotNil(t, ws)
+		assert.Equal(t, pipeline_errors.ErrCancel, ws.Error,
+			"re-check should set ErrCancel when r.ctx is already canceled")
+	})
+}
+
+// An unconfirmed loss still destroys the step (the kube backend deletes its secrets there) and fails it.
+func TestExecuteStepPodLossDestroysStepAndFails(t *testing.T) {
+	engine := mocks.NewMockBackend(t)
+	step := dummyStep("lost")
+	loss := &backend_types.PodLossError{Pod: "wp-lost", Reason: "NotFound", Evidence: "node unknown"}
+	engine.On("StartStep", mock.Anything, step, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, step, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, step, mock.Anything).Return(nil, loss)
+	engine.On("DestroyStep", mock.Anything, step, mock.Anything).Return(nil).Once()
+	tracer := newTestTracer(t)
+	r := New(&backend_types.Config{}, engine, WithTracer(tracer), WithLogger(newTestLogger(t)))
+
+	err := r.executeStep(t.Context(), step)
+
+	assert.ErrorIs(t, err, backend_types.ErrStepPodLost)
+	engine.AssertNumberOfCalls(t, "DestroyStep", 1)
+	calls := getTracerStates(tracer)
+	require.Len(t, calls, 2)
+	assert.Equal(t, 1, calls[1].CurrStepState.ExitCode)
+	assert.ErrorIs(t, calls[1].CurrStepState.Error, backend_types.ErrStepPodLost)
+	assert.NotErrorIs(t, calls[1].CurrStepState.Error, pipeline_errors.ErrCancel)
+}
+
+// The executeStep uses dummy for the full step lifecycle.
+func TestExecuteStep(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SkippedStepTraced", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+		r := newDummyRuntime(t, tracer)
+		step := &backend_types.Step{
+			Name: "skip-me", UUID: "skip-uuid",
+			Type: backend_types.StepTypeCommands, Environment: make(map[string]string),
+			OnSuccess: false, OnFailure: true,
+		}
+
+		err := r.executeStep(t.Context(), step)
+
+		assert.NoError(t, err)
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 1)
+		assert.True(t, calls[0].CurrStepState.Skipped)
+	})
+
+	t.Run("BlockingStepSuccess", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("build")
+
+		err := r.executeStep(t.Context(), step)
+
+		assert.NoError(t, err)
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 2)
+		assert.False(t, calls[0].CurrStepState.Exited, "first trace should be step-started")
+		assert.True(t, calls[1].CurrStepState.Exited, "second trace should be step-completed")
+	})
+
+	t.Run("BlockingStepFailure", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("fail")
+		step.Environment[dummy.EnvKeyStepExitCode] = "1"
+
+		err := r.executeStep(t.Context(), step)
+
+		assert.Error(t, err)
+		var exitErr *pipeline_errors.ExitError
+		assert.True(t, errors.As(err, &exitErr))
+		assert.Equal(t, 1, exitErr.Code)
+	})
+
+	// Use an atomic counter instead of getTracerStates inside Eventually to avoid
+	// a data race: the detached-step goroutine writes to mock.Calls concurrently
+	// with the Eventually polling goroutine reading it.
+	t.Run("DetachedStep", func(t *testing.T) {
+		t.Parallel()
+		var traced atomic.Int32
+		tracer := tracer_mocks.NewMockTracer(t)
+		tracer.On("Trace", mock.Anything).
+			Run(func(mock.Arguments) { traced.Add(1) }).
+			Return(nil).Maybe()
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("svc")
+		step.Detached = true
+		step.Type = backend_types.StepTypeService
+		step.Environment[dummy.EnvKeyStepSleep] = "1ms"
+
+		err := r.executeStep(t.Context(), step)
+
+		assert.NoError(t, err)
+		assert.Eventually(t, func() bool {
+			return traced.Load() >= 2
+		}, time.Second, 10*time.Millisecond)
+	})
+}
+
+func TestRunBlockingStep(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+
+		err := r.runBlockingStep(t.Context(), dummyStep("s1"))
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("FailureIgnore", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		step := dummyStep("s1")
+		step.Failure = string(metadata.FailureIgnore)
+		step.Environment[dummy.EnvKeyStepExitCode] = "1"
+
+		err := r.runBlockingStep(t.Context(), step)
+
+		assert.NoError(t, err, "error should be suppressed when Failure==FailureIgnore")
+	})
+
+	t.Run("StartFailure", func(t *testing.T) {
+		t.Parallel()
+		tracer := newTestTracer(t)
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("s1")
+		step.Environment[dummy.EnvKeyStepStartFail] = "true"
+
+		err := r.runBlockingStep(t.Context(), step)
+
+		assert.Error(t, err)
+		calls := getTracerStates(tracer)
+		require.Len(t, calls, 1)
+		assert.True(t, calls[0].CurrStepState.Exited)
+	})
+
+	t.Run("DestroyStepErrorMappedToErrCancel", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(context.Canceled)
+		engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).Return(io.NopCloser(strings.NewReader("")), nil)
+
+		tracer := newTestTracer(t)
+		r := New(&backend_types.Config{}, engine, WithTracer(tracer), WithLogger(newTestLogger(t)))
+
+		err := r.runBlockingStep(t.Context(), dummyStep("s1"))
+
+		assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+	})
+}
+
+func TestRunDetachedStep(t *testing.T) {
+	t.Parallel()
+
+	// Use an atomic counter instead of getTracerStates inside Eventually to avoid
+	// a data race: the detached-step goroutine writes to mock.Calls concurrently
+	// with the Eventually polling goroutine reading it.
+	t.Run("ReturnsImmediately", func(t *testing.T) {
+		t.Parallel()
+		var traced atomic.Int32
+		tracer := tracer_mocks.NewMockTracer(t)
+		tracer.On("Trace", mock.Anything).
+			Run(func(mock.Arguments) { traced.Add(1) }).
+			Return(nil).Maybe()
+		r := newDummyRuntime(t, tracer)
+		step := dummyStep("svc")
+		step.Environment[dummy.EnvKeyStepSleep] = "1ms"
+
+		err := r.runDetachedStep(t.Context(), step)
+
+		assert.NoError(t, err)
+		assert.Eventually(t, func() bool {
+			return traced.Load() >= 1
+		}, time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("StartFailure", func(t *testing.T) {
+		t.Parallel()
+		r := newDummyRuntime(t, newTestTracer(t))
+		step := dummyStep("svc")
+		step.Environment[dummy.EnvKeyStepStartFail] = "true"
+
+		err := r.runDetachedStep(t.Context(), step)
+
+		assert.Error(t, err)
+	})
+
+	// Branch 1: context.Canceled from WaitStep → mapped to ErrCancel in the goroutine.
+	// Branch 2: non-nil error from completeStep → error log branch.
+	// Both are covered by a WaitStep that returns context.Canceled.
+	//
+	// Use an atomic counter instead of getTracerStates inside Eventually to avoid
+	// a data race: the detached-step goroutine writes to mock.Calls concurrently
+	// with the Eventually polling goroutine reading it.
+	t.Run("BackgroundContextCanceled", func(t *testing.T) {
+		t.Parallel()
+		var traced atomic.Int32
+		tracer := tracer_mocks.NewMockTracer(t)
+		tracer.On("Trace", mock.Anything).
+			Run(func(mock.Arguments) { traced.Add(1) }).
+			Return(nil).Maybe()
+
+		engine := mocks.NewMockBackend(t)
+		engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(io.NopCloser(strings.NewReader("")), nil)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, context.Canceled)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+		r := New(
+			&backend_types.Config{},
+			engine,
+			WithTracer(tracer),
+			WithLogger(newTestLogger(t)),
+		)
+		step := dummyStep("svc")
+
+		err := r.runDetachedStep(t.Context(), step)
+
+		assert.NoError(t, err) // returns immediately
+		// Wait for the goroutine to finish and emit its trace.
+		assert.Eventually(t, func() bool {
+			return traced.Load() >= 1
+		}, time.Second, 10*time.Millisecond)
+	})
+
+	// Branch 3: traceStep itself fails inside the goroutine → trace-error log branch.
+	t.Run("BackgroundTracerError", func(t *testing.T) {
+		t.Parallel()
+		traceErr := errors.New("trace failed in background")
+
+		engine := mocks.NewMockBackend(t)
+		engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(io.NopCloser(strings.NewReader("")), nil)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(&backend_types.State{Exited: true, ExitCode: 0}, nil)
+		engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+		var traced atomic.Int32
+		tracer := tracer_mocks.NewMockTracer(t)
+		tracer.On("Trace", mock.Anything).
+			Run(func(_ mock.Arguments) { traced.Add(1) }).
+			Return(traceErr) // every Trace call fails
+
+		r := New(
+			&backend_types.Config{},
+			engine,
+			WithTracer(tracer),
+			WithLogger(newTestLogger(t)),
+		)
+
+		err := r.runDetachedStep(t.Context(), dummyStep("svc"))
+
+		assert.NoError(t, err)
+		assert.Eventually(t, func() bool {
+			return traced.Load() >= 1
+		}, time.Second, 10*time.Millisecond)
+	})
+}
+
+// transportCancelErr mimics what a backend using an HTTP client returns when
+// its request context is canceled: net/http surfaces context.Cause(ctx), which
+// is the cancel cause the agent set, not context.Canceled.
+func transportCancelErr(cause error) error {
+	return fmt.Errorf(`error during connect: Post "http://.../containers/x/wait": %w`, cause)
+}
+
+func canceledRuntime(t *testing.T, engine backend_types.Backend) *Runtime {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(pipeline_errors.ErrCancel)
+	return New(&backend_types.Config{}, engine,
+		WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)), WithContext(ctx))
+}
+
+// Backend errors raised because the workflow was canceled describe the aborted
+// call, not a step failure. They must be reported as a plain cancellation.
+func TestCompleteStepCancelFallout(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		waitErr error
+	}{
+		{"TransportErrorWrappingCancelCause", transportCancelErr(pipeline_errors.ErrCancel)},
+		{"TransportErrorWrappingContextCanceled", transportCancelErr(context.Canceled)},
+		{"BareContextCanceled", context.Canceled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			engine := mocks.NewMockBackend(t)
+			engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).Return(nil, tt.waitErr)
+			engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			r := canceledRuntime(t, engine)
+
+			ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+			assert.NoError(t, err)
+			require.NotNil(t, ws)
+			assert.Equal(t, pipeline_errors.ErrCancel, ws.Error,
+				"a backend error caused by the cancellation must not leak into the step state")
+		})
+	}
+
+	t.Run("UnrelatedErrorStillSurfaces", func(t *testing.T) {
+		t.Parallel()
+		engine := mocks.NewMockBackend(t)
+		engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, errors.New("engine exploded"))
+		r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+		ws, err := r.completeStep(t.Context(), dummyStep("s1"), func() {}, time.Now().Unix())
+
+		assert.EqualError(t, err, "engine exploded")
+		assert.Nil(t, ws)
+	})
+}
+
+// A step that could not even be started because the workflow was canceled must
+// be reported as canceled, not with the backend's transport error.
+func TestRunBlockingStepStartFailureAfterCancel(t *testing.T) {
+	t.Parallel()
+
+	engine := mocks.NewMockBackend(t)
+	engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).
+		Return(transportCancelErr(pipeline_errors.ErrCancel))
+	r := canceledRuntime(t, engine)
+
+	err := r.runBlockingStep(t.Context(), dummyStep("s1"))
+
+	assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+	assert.Equal(t, pipeline_errors.ErrCancel, err,
+		"the transport error must be replaced, not just wrapped")
+}
+
+// A start failure that has nothing to do with cancellation must still surface.
+func TestRunBlockingStepStartFailureWithoutCancel(t *testing.T) {
+	t.Parallel()
+
+	engine := mocks.NewMockBackend(t)
+	engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).
+		Return(errors.New("no such image"))
+	r := New(&backend_types.Config{}, engine, WithTracer(newTestTracer(t)), WithLogger(newTestLogger(t)))
+
+	err := r.runBlockingStep(t.Context(), dummyStep("s1"))
+
+	assert.EqualError(t, err, "no such image")
+}
+
+// The error a canceled step ends with must not reach the stage as a step
+// failure, whatever shape the backend gave it.
+func TestRunBlockingStepCompleteFalloutAfterCancel(t *testing.T) {
+	t.Parallel()
+
+	engine := mocks.NewMockBackend(t)
+	engine.On("StartStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	engine.On("TailStep", mock.Anything, mock.Anything, mock.Anything).
+		Return(io.NopCloser(strings.NewReader("")), nil)
+	engine.On("WaitStep", mock.Anything, mock.Anything, mock.Anything).
+		Return(&backend_types.State{Exited: true, ExitCode: 130}, nil)
+	engine.On("DestroyStep", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	r := canceledRuntime(t, engine)
+
+	err := r.runBlockingStep(t.Context(), dummyStep("s1"))
+
+	assert.ErrorIs(t, err, pipeline_errors.ErrCancel)
+	assert.False(t, pipeline_errors.IsStepFailure(err),
+		"a step aborted by the cancellation is not a step failure")
+}

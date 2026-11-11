@@ -1,0 +1,147 @@
+// Copyright 2021 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package datastore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"runtime"
+	"strings"
+
+	"github.com/cenkalti/backoff/v7"
+	"xorm.io/xorm"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
+)
+
+// maxRetries is the number of retry attempts for transient database errors.
+const maxRetries = 3
+
+// retryWrite runs fn with exponential backoff, retrying on transient database errors
+// (ErrDatabaseLocked, ErrInsertDuplicateDetected).
+func retryWrite(fn func() error) error {
+	return retryWriteCtx(context.Background(), fn)
+}
+
+// retryWriteCtx is retryWrite that stops once ctx is done.
+func retryWriteCtx(ctx context.Context, fn func() error) error {
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		err := fn()
+		if errors.Is(err, types.ErrDatabaseLocked) || errors.Is(err, types.ErrInsertDuplicateDetected) {
+			return struct{}{}, err
+		}
+		return struct{}{}, backoff.Permanent(err)
+	}, backoff.WithBackOff(backoff.NewExponentialBackOff()), backoff.WithMaxTries(maxRetries))
+	return err
+}
+
+// isErrDatabaseLocked reports whether err is a transient SQLite lock error
+// (SQLITE_BUSY "database is locked" or SQLITE_LOCKED "database table is locked").
+func isErrDatabaseLocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "database is locked") ||
+		strings.Contains(errMsg, "database table is locked")
+}
+
+// wrapGet return error if err not nil or if requested entry do not exist.
+func wrapGet(exist bool, err error) error {
+	if isErrDatabaseLocked(err) {
+		return types.ErrDatabaseLocked
+	}
+	if err != nil {
+		// we only ask for the function's name if needed for performance reasons
+		fnName := callerName(2)
+		return fmt.Errorf("%s: %w", fnName, err)
+	}
+	if !exist {
+		return types.ErrRecordNotExist
+	}
+	return nil
+}
+
+// wrapDelete return error if err not nil or if requested entry do not exist.
+func wrapDelete(c int64, err error) error {
+	if isErrDatabaseLocked(err) {
+		return types.ErrDatabaseLocked
+	}
+	if c == 0 {
+		return types.ErrRecordNotExist
+	}
+	if err != nil {
+		// we only ask for the function's name if needed for performance reasons
+		fnName := callerName(2)
+		return fmt.Errorf("%s: %w", fnName, err)
+	}
+	return nil
+}
+
+// wrapUpdate wraps an update error and detects transient "database is locked" errors.
+func wrapUpdate(_ int64, err error) error {
+	if isErrDatabaseLocked(err) {
+		return types.ErrDatabaseLocked
+	}
+	return err
+}
+
+func wrapInsert(c int64, err error) error {
+	if err != nil {
+		// Common unique constraint violation patterns across the supported drivers.
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "UNIQUE constraint failed") ||
+			strings.Contains(errMsg, "UNIQUE violation") ||
+			strings.Contains(errMsg, "duplicate key") ||
+			strings.Contains(errMsg, "unique constraint") ||
+			strings.Contains(errMsg, "Duplicate entry") {
+			return fmt.Errorf("%w: %w", types.ErrInsertDuplicateDetected, err)
+		}
+		if isErrDatabaseLocked(err) {
+			return types.ErrDatabaseLocked
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (s storage) paginate(p *model.ListOptionsWithAll) *xorm.Session {
+	if p == nil || p.All {
+		return s.engine.NewSession()
+	}
+	if p.PerPage < 1 {
+		p.PerPage = 1
+	}
+	if p.Page < 1 {
+		p.Page = 1
+	}
+	return s.engine.Limit(p.PerPage, p.PerPage*(p.Page-1))
+}
+
+func callerName(skip int) string {
+	pc, _, _, ok := runtime.Caller(skip)
+	if !ok {
+		return ""
+	}
+	fnName := runtime.FuncForPC(pc).Name()
+	pIndex := strings.LastIndex(fnName, ".")
+	if pIndex != -1 {
+		fnName = fnName[pIndex+1:]
+	}
+	return fnName
+}

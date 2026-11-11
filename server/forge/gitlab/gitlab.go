@@ -25,12 +25,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog/log"
 	gitlab "gitlab.com/gitlab-org/api/client-go/v3"
 	"golang.org/x/oauth2"
 
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/metadata"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/common"
@@ -85,9 +85,11 @@ func (g *GitLab) Name() string {
 	return "gitlab"
 }
 
-// URL returns the root url of a configured forge.
-func (g *GitLab) URL() string {
-	return g.url
+func (g *GitLab) Close() error { return nil }
+
+// Config returns the metadata of the configured forge.
+func (g *GitLab) Config() metadata.Forge {
+	return metadata.Forge{Type: g.Name(), URL: g.url, Host: common.HostFromURL(g.url)}
 }
 
 func (g *GitLab) oauth2Config(ctx context.Context) (*oauth2.Config, context.Context) {
@@ -158,13 +160,25 @@ func (g *GitLab) Login(ctx context.Context, req *forge_types.OAuthRequest) (*mod
 // Refresh refreshes the Gitlab oauth2 access token. If the token is
 // refreshed the user is updated and a true value is returned.
 func (g *GitLab) Refresh(ctx context.Context, user *model.User) (bool, error) {
+	// Some forges issue non-expiring tokens, e.g. GitLab < 15.0 OAuth
+	// applications with "Expire access tokens" disabled: the token response
+	// then omits expires_in, so the stored expiry stays at or below zero.
+	// For such tokens every refresh_token exchange invalidates the previous
+	// access_token and refresh_token —
+	// https://docs.gitlab.com/api/oauth2/#authorization-code-flow — so
+	// forcing the exchange on every refresh would rotate the token and
+	// invalidate the clone credentials already baked into running pipelines.
+	// Keep the stored token whenever the forge reports no expiry for it.
+	if user.Expiry <= 0 {
+		return false, nil
+	}
+
 	config, oauth2Ctx := g.oauth2Config(ctx)
 	config.RedirectURL = ""
 
+	// Refresh token only: a stored access token makes oauth2 skip the exchange.
 	source := config.TokenSource(oauth2Ctx, &oauth2.Token{
-		AccessToken:  user.AccessToken,
 		RefreshToken: user.RefreshToken,
-		Expiry:       time.Unix(user.Expiry, 0),
 	})
 
 	token, err := source.Token()
@@ -366,7 +380,7 @@ func (g *GitLab) PullRequests(ctx context.Context, u *model.User, r *model.Repo,
 	result := make([]*model.PullRequest, len(pullRequests))
 	for i := range pullRequests {
 		result[i] = &model.PullRequest{
-			Index: model.ForgeRemoteID(strconv.Itoa(int(pullRequests[i].ID))),
+			Index: model.ForgeRemoteID(strconv.Itoa(int(pullRequests[i].IID))),
 			Title: pullRequests[i].Title,
 		}
 	}
@@ -410,8 +424,8 @@ func (g *GitLab) Dir(ctx context.Context, user *model.User, repo *model.Repo, pi
 		Recursive: new(false),
 	}
 
-	for i := 1; true; i++ {
-		opts.Page = 1
+	for page := int64(1); ; page++ {
+		opts.Page = page
 		batch, _, err := client.Repositories.ListTree(_repo.ID, opts, gitlab.WithContext(ctx))
 		if err != nil {
 			return nil, err
@@ -649,7 +663,7 @@ func (g *GitLab) BranchHead(ctx context.Context, u *model.User, r *model.Repo, b
 
 // Hook parses the post-commit hook from the Request body
 // and returns the required data in a standard format.
-func (g *GitLab) Hook(ctx context.Context, req *http.Request) (*model.Repo, *model.Pipeline, error) {
+func (g *GitLab) Hook(ctx context.Context, req *http.Request, _ string) (*model.Repo, *model.Pipeline, error) {
 	defer req.Body.Close()
 	payload, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -680,6 +694,12 @@ func (g *GitLab) Hook(ctx context.Context, req *http.Request) (*model.Repo, *mod
 		}
 		return convertPushHook(event)
 	case *gitlab.TagEvent:
+		// GitLab sends tag_push events for tag creation and deletion.
+		// A deletion is indicated by a zero after SHA and can never result
+		// in a valid pipeline, as the commit is gone.
+		if event.After == "0000000000000000000000000000000000000000" {
+			return nil, nil, &forge_types.ErrIgnoreEvent{Event: string(eventType), Reason: "tag deleted"}
+		}
 		repo, pipeline, cmID, err := convertTagHook(event)
 		if err != nil || pipeline.Message != "" {
 			return repo, pipeline, err
@@ -925,7 +945,16 @@ func (g *GitLab) loadCommitFromSHA(ctx context.Context, tmpRepo *model.Repo, pip
 		return nil, err
 	}
 
-	pipeline.Author = cm.AuthorName
+	// For annotated tags `sha` is the tag object's own SHA; the commits
+	// endpoint resolves it to the tagged commit. Record that commit so
+	// CI_COMMIT_SHA matches the commit GitLab shows on the tag page.
+	pipeline.Commit = cm.ID
+
+	// Do not set pipeline.Author from the git commit metadata here: it is
+	// controlled by whoever made the commit and would overwrite the author
+	// taken from the authenticated webhook (convertTagHook sets it to
+	// hook.UserUsername). Trusting it lets a pusher spoof an
+	// ApprovalAllowedUsers entry and skip approval (CVE-2026-58370).
 	pipeline.Email = cm.AuthorEmail
 	pipeline.Message = cm.Message
 	pipeline.Timestamp = cm.CommittedDate.Unix()

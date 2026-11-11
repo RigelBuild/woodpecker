@@ -1,0 +1,814 @@
+// Copyright 2022 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package kubernetes
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+
+	"github.com/rs/zerolog/log"
+	kube_core_v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	kube_meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/common"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+)
+
+const (
+	// StepLabelLegacy is the legacy label name from before the introduction of the woodpecker-ci.org namespace.
+	// This will be removed in the future.
+	StepLabelLegacy            = "step"
+	StepLabel                  = "woodpecker-ci.org/step"
+	TaskUUIDLabel              = "woodpecker-ci.org/task-uuid"
+	podPrefix                  = "wp-"
+	defaultFSGroup       int64 = 1000
+	defaultClusterDomain       = "cluster.local"
+	// Because of https://docs.redhat.com/en/documentation/openshift_container_platform/4.10/html/nodes/working-with-clusters
+	initContainerMemLimit = "12Mi"
+)
+
+func mkPod(step *types.Step, config *config, podName, goos string, options BackendOptions, taskUUID string) (*kube_core_v1.Pod, error) {
+	var err error
+
+	nsp := newNativeSecretsProcessor(config, options.Secrets)
+	err = nsp.process()
+	if err != nil {
+		return nil, err
+	}
+
+	meta, err := podMeta(step, config, options, podName, taskUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	spec, err := podSpec(step, config, options, nsp, taskUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	container, err := podContainer(step, podName, goos, options, nsp)
+	if err != nil {
+		return nil, err
+	}
+	spec.Containers = append(spec.Containers, container)
+
+	initContainer := podInitContainer(config, &spec, &container)
+	if initContainer != nil {
+		spec.InitContainers = append(spec.InitContainers, *initContainer)
+	}
+
+	pod := &kube_core_v1.Pod{
+		ObjectMeta: meta,
+		Spec:       spec,
+	}
+
+	return pod, nil
+}
+
+func stepToPodName(step *types.Step) (name string, err error) {
+	if isService(step) {
+		return serviceName(step)
+	}
+	return podName(step)
+}
+
+func podName(step *types.Step) (string, error) {
+	return toDNSName(podPrefix + step.UUID)
+}
+
+func podMeta(step *types.Step, config *config, options BackendOptions, podName, taskUUID string) (kube_meta_v1.ObjectMeta, error) {
+	var err error
+	meta := kube_meta_v1.ObjectMeta{
+		Name:        podName,
+		Namespace:   config.GetNamespace(step.OrgID),
+		Annotations: podAnnotations(config, options),
+	}
+
+	meta.Labels, err = podLabels(step, config, options, taskUUID)
+	if err != nil {
+		return meta, err
+	}
+
+	return meta, nil
+}
+
+func podLabels(step *types.Step, config *config, options BackendOptions, taskUUID string) (map[string]string, error) {
+	var err error
+	labels := make(map[string]string)
+
+	for k, v := range step.WorkflowLabels {
+		// Only copy user labels if allowed by agent config.
+		// Internal labels are filtered on the server-side.
+		if config.PodLabelsAllowFromStep || strings.HasPrefix(k, pipeline.InternalLabelPrefix) {
+			if strings.HasPrefix(k, pipeline.InternalLabelPrefix) {
+				labels[k], err = toInternalLabelValue(v)
+			} else {
+				labels[k], err = toLabelValue(v)
+			}
+			if err != nil {
+				return labels, err
+			}
+		}
+	}
+
+	if len(options.Labels) > 0 {
+		if config.PodLabelsAllowFromStep {
+			log.Trace().Msgf("using labels from the backend options: %v", options.Labels)
+			// Steps must not override internal labels; admission policies trust them.
+			for k, v := range options.Labels {
+				if !strings.HasPrefix(k, pipeline.InternalLabelPrefix) {
+					labels[k] = v
+				}
+			}
+		} else {
+			log.Debug().Msg("Pod labels were defined in backend options, but its using disallowed by instance configuration")
+		}
+	}
+	if len(config.PodLabels) > 0 {
+		log.Trace().Msgf("using labels from the configuration: %v", config.PodLabels)
+		// TODO should we filter out label with internal prefix?
+		maps.Copy(labels, config.PodLabels)
+	}
+	if isService(step) {
+		labels[ServiceLabel], _ = serviceName(step)
+	}
+	labels[StepLabelLegacy], err = toLabelValue(step.Name)
+	if err != nil {
+		return labels, err
+	}
+	labels[StepLabel], err = toLabelValue(step.Name)
+	if err != nil {
+		return labels, err
+	}
+
+	if len(taskUUID) > 0 {
+		labels[TaskUUIDLabel] = taskUUID
+	}
+
+	return labels, nil
+}
+
+func podAnnotations(config *config, options BackendOptions) map[string]string {
+	annotations := make(map[string]string)
+
+	if len(options.Annotations) > 0 {
+		if config.PodAnnotationsAllowFromStep {
+			log.Trace().Msgf("using annotations from the backend options: %v", options.Annotations)
+			maps.Copy(annotations, options.Annotations)
+		} else {
+			log.Debug().Msg("Pod annotations were defined in backend options, but its using disallowed by instance configuration ")
+		}
+	}
+	if len(config.PodAnnotations) > 0 {
+		log.Trace().Msgf("using annotations from the configuration: %v", config.PodAnnotations)
+		maps.Copy(annotations, config.PodAnnotations)
+	}
+
+	return annotations
+}
+
+func podSpec(step *types.Step, config *config, options BackendOptions, nsp nativeSecretsProcessor, taskUUID string) (kube_core_v1.PodSpec, error) {
+	subdomain, err := subdomain(taskUUID)
+	if err != nil {
+		return kube_core_v1.PodSpec{}, err
+	}
+
+	hostUsers := options.HostUsers
+	// if the step hasn't explicitly requested to use or not use the host user
+	// namespace, default to the config
+	if hostUsers == nil && config.EnableUserNamespaces {
+		hostUsers = newBool(false)
+	}
+
+	spec := kube_core_v1.PodSpec{
+		RestartPolicy:     kube_core_v1.RestartPolicyNever,
+		PriorityClassName: config.PriorityClassName,
+		HostAliases:       hostAliases(step.ExtraHosts),
+		Hostname:          getHostnameOrEmpty(step.Name),
+		Subdomain:         subdomain,
+		DNSConfig:         dnsConfig(config.GetNamespace(step.OrgID), subdomain, config.ClusterDomain),
+		NodeSelector:      nodeSelector(options.NodeSelector, config.PodNodeSelector, config.PodNodeSelectorAllowFromStep, step.Environment["CI_SYSTEM_PLATFORM"]),
+		Tolerations:       tolerations(options.Tolerations),
+		Affinity:          affinity(options.Affinity, config.PodAffinity, config.PodAffinityAllowFromStep),
+		SecurityContext:   podSecurityContext(options.SecurityContext, config.SecurityContext, step.Privileged, hostUsers),
+		HostUsers:         hostUsers,
+	}
+
+	// Only allow the step to set the service account name if explicitly enabled by the admin.
+	if config.ServiceAccountNameAllowFromStep {
+		spec.ServiceAccountName = options.ServiceAccountName
+	}
+
+	if config.RuntimeClassAllowFromStep {
+		spec.RuntimeClassName = options.RuntimeClassName
+	}
+
+	// If there are tolerations and they are allowed
+	if config.PodTolerationsAllowFromStep && len(options.Tolerations) != 0 {
+		spec.Tolerations = tolerations(options.Tolerations)
+	} else {
+		spec.Tolerations = tolerations(config.PodTolerations)
+	}
+
+	spec.Volumes, err = pvcVolumes(podVolumes(step, options))
+	if err != nil {
+		return spec, err
+	}
+
+	if len(step.DNS) != 0 || len(step.DNSSearch) != 0 {
+		spec.DNSConfig = &kube_core_v1.PodDNSConfig{}
+		if len(step.DNS) != 0 {
+			spec.DNSConfig.Nameservers = step.DNS
+		}
+		if len(step.DNSSearch) != 0 {
+			spec.DNSConfig.Searches = step.DNSSearch
+		}
+	}
+
+	log.Trace().Msgf("using the image pull secrets: %v", config.ImagePullSecretNames)
+	spec.ImagePullSecrets = secretsReferences(config.ImagePullSecretNames)
+	if needsRegistrySecret(step) {
+		log.Trace().Msgf("using an image pull secret from registries")
+		name, err := registrySecretName(step)
+		if err != nil {
+			return spec, err
+		}
+		spec.ImagePullSecrets = append(spec.ImagePullSecrets, secretReference(name))
+	}
+
+	spec.Volumes = append(spec.Volumes, nsp.volumes...)
+
+	return spec, nil
+}
+
+func podContainer(step *types.Step, podName, goos string, options BackendOptions, nsp nativeSecretsProcessor) (kube_core_v1.Container, error) {
+	var err error
+	container := kube_core_v1.Container{
+		Name:                     podName,
+		Image:                    step.Image,
+		WorkingDir:               step.WorkingDir,
+		Ports:                    containerPorts(step.Ports),
+		SecurityContext:          containerSecurityContext(options.SecurityContext, step.Privileged),
+		TerminationMessagePath:   "/run/woodpecker/step-output",
+		TerminationMessagePolicy: kube_core_v1.TerminationMessageReadFile,
+	}
+
+	if step.Pull {
+		container.ImagePullPolicy = kube_core_v1.PullAlways
+	}
+
+	if len(step.Commands) > 0 {
+		scriptEnv, command, err := common.GenerateContainerConf(step.Commands, goos, step.WorkingDir)
+		if err != nil {
+			return container, err
+		}
+		container.Command = command
+		maps.Copy(step.Environment, scriptEnv)
+
+		// step.WorkingDir will be respected by the generated script
+		container.WorkingDir = step.WorkspaceBase
+	}
+	if len(step.Entrypoint) > 0 {
+		container.Command = step.Entrypoint
+	}
+
+	stepSecret, err := stepSecretName(step)
+	if err != nil {
+		return container, err
+	}
+
+	// filter environment variables to non-secrets and secrets, refer secrets from step secrets
+	envs, secs := filterSecrets(step.Environment, stepSecretData(step))
+	delete(envs, "CI_STEP_OUTPUT")
+	secs = slices.DeleteFunc(secs, func(key string) bool { return key == "CI_STEP_OUTPUT" })
+	envsFromSecrets := mapToEnvVarsFromStepSecrets(secs, stepSecret)
+	container.Env = append(mapToEnvVars(envs), envsFromSecrets...)
+
+	container.Resources, err = resourceRequirements(options.Resources)
+	if err != nil {
+		return container, err
+	}
+
+	container.VolumeMounts, err = volumeMounts(podVolumes(step, options))
+	if err != nil {
+		return container, err
+	}
+
+	container.EnvFrom = append(container.EnvFrom, nsp.envFromSources...)
+	container.Env = append(container.Env, nsp.envVars...)
+	container.Env = slices.DeleteFunc(container.Env, func(env kube_core_v1.EnvVar) bool { return env.Name == "CI_STEP_OUTPUT" })
+	container.Env = append(container.Env, kube_core_v1.EnvVar{Name: "CI_STEP_OUTPUT", Value: "/run/woodpecker/step-output"})
+	container.VolumeMounts = append(container.VolumeMounts, nsp.mounts...)
+
+	return container, nil
+}
+
+// podInitContainer determines whether an init container is required to prepare the
+// main step container's working directory with the correct permissions.
+// If it is required, it returns the init container spec, otherwise it returns an empty container spec.
+func podInitContainer(config *config, podSpec *kube_core_v1.PodSpec, container *kube_core_v1.Container) *kube_core_v1.Container {
+	// if pod is running as root, we don't need an init container to precreate the workingDir
+	// since kubelet already precreates it (as root:root)
+	if podSpec.SecurityContext == nil ||
+		podSpec.SecurityContext.RunAsUser == nil ||
+		*podSpec.SecurityContext.RunAsUser == 0 {
+		return nil
+	}
+
+	volumeMounts := []kube_core_v1.VolumeMount{}
+
+	for _, mount := range container.VolumeMounts {
+		// we only add volume mounts to the init container if the workingDir is under the mount path
+		// otherwise the init container won't have permission to create the workingDir
+		// when workingDir is exactly the same as mountPath, permissions are already handled by the FsGroupChangePolicy
+		if strings.HasPrefix(container.WorkingDir, mount.MountPath+"/") {
+			volumeMounts = append(volumeMounts, mount)
+		}
+	}
+	// if workingDir is not covered by any volume mount, we don't need an init container to precreate it
+	if len(volumeMounts) == 0 {
+		return nil
+	}
+
+	return &kube_core_v1.Container{
+		Name:            "init-" + container.Name,
+		Image:           config.PermissionInitImage,
+		ImagePullPolicy: kube_core_v1.PullAlways,
+		Args:            []string{"mkdir", "-p", container.WorkingDir},
+		SecurityContext: &kube_core_v1.SecurityContext{
+			Capabilities: &kube_core_v1.Capabilities{
+				Drop: []kube_core_v1.Capability{"ALL"},
+			},
+			AllowPrivilegeEscalation: newBool(false),
+		},
+		Resources: kube_core_v1.ResourceRequirements{
+			Requests: kube_core_v1.ResourceList{
+				kube_core_v1.ResourceCPU:    resource.MustParse("5m"),
+				kube_core_v1.ResourceMemory: resource.MustParse(initContainerMemLimit),
+			},
+			Limits: kube_core_v1.ResourceList{
+				kube_core_v1.ResourceCPU:    resource.MustParse("5m"),
+				kube_core_v1.ResourceMemory: resource.MustParse(initContainerMemLimit),
+			},
+		},
+		VolumeMounts: volumeMounts,
+	}
+}
+
+func mapToEnvVarsFromStepSecrets(secs []string, stepSecretName string) []kube_core_v1.EnvVar {
+	var ev []kube_core_v1.EnvVar
+	for _, key := range secs {
+		ev = append(ev, kube_core_v1.EnvVar{
+			Name: key,
+			ValueFrom: &kube_core_v1.EnvVarSource{
+				SecretKeyRef: &kube_core_v1.SecretKeySelector{
+					Name: stepSecretName,
+					Key:  key,
+				},
+			},
+		})
+	}
+	return ev
+}
+
+func filterSecrets(environment, secrets map[string]string) (map[string]string, []string) {
+	ev := make(map[string]string)
+	var secs []string
+
+	for k, v := range environment {
+		if _, found := secrets[k]; found {
+			secs = append(secs, k)
+		} else {
+			ev[k] = v
+		}
+	}
+	return ev, secs
+}
+
+func pvcVolumes(volumes []string) ([]kube_core_v1.Volume, error) {
+	var vols []kube_core_v1.Volume
+
+	for _, v := range volumes {
+		volumeName, err := volumeName(v)
+		if err != nil {
+			return nil, err
+		}
+		vols = append(vols, pvcVolume(volumeName))
+	}
+
+	return vols, nil
+}
+
+func podVolumes(step *types.Step, options BackendOptions) []string {
+	if !isService(step) || useWorkspaceVolume(options) {
+		return step.Volumes
+	}
+
+	volumes := make([]string, 0, len(step.Volumes))
+	for _, volume := range step.Volumes {
+		if volumeMountPath(volume) != step.WorkspaceBase {
+			volumes = append(volumes, volume)
+		}
+	}
+	return volumes
+}
+
+func useWorkspaceVolume(options BackendOptions) bool {
+	if options.WorkspaceVolume != nil {
+		return *options.WorkspaceVolume
+	}
+	return true
+}
+
+func pvcVolume(name string) kube_core_v1.Volume {
+	pvcSource := kube_core_v1.PersistentVolumeClaimVolumeSource{
+		ClaimName: name,
+		ReadOnly:  false,
+	}
+	return kube_core_v1.Volume{
+		Name:                  name,
+		PersistentVolumeClaim: &pvcSource,
+	}
+}
+
+func volumeMounts(volumes []string) ([]kube_core_v1.VolumeMount, error) {
+	var mounts []kube_core_v1.VolumeMount
+
+	for _, v := range volumes {
+		volumeName, err := volumeName(v)
+		if err != nil {
+			return nil, err
+		}
+
+		mount := volumeMount(volumeName, volumeMountPath(v))
+		mounts = append(mounts, mount)
+	}
+	return mounts, nil
+}
+
+func volumeMount(name, path string) kube_core_v1.VolumeMount {
+	return kube_core_v1.VolumeMount{
+		Name:      name,
+		MountPath: path,
+	}
+}
+
+func containerPorts(ports []types.Port) []kube_core_v1.ContainerPort {
+	containerPorts := make([]kube_core_v1.ContainerPort, len(ports))
+	for i, port := range ports {
+		containerPorts[i] = containerPort(port)
+	}
+	return containerPorts
+}
+
+func containerPort(port types.Port) kube_core_v1.ContainerPort {
+	return kube_core_v1.ContainerPort{
+		ContainerPort: int32(port.Number),
+		Protocol:      kube_core_v1.Protocol(strings.ToUpper(port.Protocol)),
+	}
+}
+
+// Here is the service IPs (placed in /etc/hosts in the Pod).
+func hostAliases(extraHosts []types.HostAlias) []kube_core_v1.HostAlias {
+	var hostAliases []kube_core_v1.HostAlias
+	for _, extraHost := range extraHosts {
+		hostAlias := hostAlias(extraHost)
+		hostAliases = append(hostAliases, hostAlias)
+	}
+	return hostAliases
+}
+
+func hostAlias(extraHost types.HostAlias) kube_core_v1.HostAlias {
+	return kube_core_v1.HostAlias{
+		IP:        extraHost.IP,
+		Hostnames: []string{extraHost.Name},
+	}
+}
+
+func resourceRequirements(resources Resources) (kube_core_v1.ResourceRequirements, error) {
+	var err error
+	requirements := kube_core_v1.ResourceRequirements{}
+
+	requirements.Requests, err = resourceList(resources.Requests)
+	if err != nil {
+		return requirements, err
+	}
+
+	requirements.Limits, err = resourceList(resources.Limits)
+	if err != nil {
+		return requirements, err
+	}
+
+	return requirements, nil
+}
+
+func resourceList(resources map[string]string) (kube_core_v1.ResourceList, error) {
+	requestResources := kube_core_v1.ResourceList{}
+	for key, val := range resources {
+		resName := kube_core_v1.ResourceName(key)
+		resVal, err := resource.ParseQuantity(val)
+		if err != nil {
+			return nil, fmt.Errorf("resource request '%s' quantity '%s': %w", key, val, err)
+		}
+		requestResources[resName] = resVal
+	}
+	return requestResources, nil
+}
+
+func nodeSelector(backendNodeSelector, configNodeSelector map[string]string, allowFromStep bool, platform string) map[string]string {
+	nodeSelector := make(map[string]string)
+
+	if platform != "" {
+		arch := strings.Split(platform, "/")[1]
+		nodeSelector[kube_core_v1.LabelArchStable] = arch
+		log.Trace().Msgf("using the node selector from the Agent's platform: %v", nodeSelector)
+	}
+
+	if len(configNodeSelector) > 0 {
+		log.Trace().Msgf("appending labels to the node selector from the configuration: %v", configNodeSelector)
+		maps.Copy(nodeSelector, configNodeSelector)
+	}
+
+	if len(backendNodeSelector) > 0 {
+		if allowFromStep {
+			log.Trace().Msgf("appending labels to the node selector from the backend options: %v", backendNodeSelector)
+			maps.Copy(nodeSelector, backendNodeSelector)
+		} else {
+			log.Debug().Msg("Step node selector is disallowed by instance configuration, ignoring it")
+		}
+	}
+
+	return nodeSelector
+}
+
+func tolerations(backendTolerations []Toleration) []kube_core_v1.Toleration {
+	var tolerations []kube_core_v1.Toleration
+
+	if len(backendTolerations) > 0 {
+		log.Trace().Msgf("tolerations that will be used in the backend options: %v", backendTolerations)
+		for _, backendToleration := range backendTolerations {
+			toleration := toleration(backendToleration)
+			tolerations = append(tolerations, toleration)
+		}
+	}
+
+	return tolerations
+}
+
+func toleration(backendToleration Toleration) kube_core_v1.Toleration {
+	return kube_core_v1.Toleration{
+		Key:               backendToleration.Key,
+		Operator:          kube_core_v1.TolerationOperator(backendToleration.Operator),
+		Value:             backendToleration.Value,
+		Effect:            kube_core_v1.TaintEffect(backendToleration.Effect),
+		TolerationSeconds: backendToleration.TolerationSeconds,
+	}
+}
+
+func affinity(stepAffinity, agentAffinity *kube_core_v1.Affinity, allowFromStep bool) *kube_core_v1.Affinity {
+	if stepAffinity != nil {
+		if allowFromStep {
+			log.Trace().Msg("using affinity from step backend options")
+			return stepAffinity
+		} else {
+			log.Debug().Msg("Step affinity is disallowed by instance configuration, ignoring it")
+		}
+	}
+
+	if agentAffinity != nil {
+		log.Trace().Msg("using affinity from agent configuration")
+		return agentAffinity
+	}
+
+	log.Trace().Msg("no affinity configured")
+	return nil
+}
+
+func podSecurityContext(sc *SecurityContext, secCtxConf SecurityContextConfig, stepPrivileged bool, hostUsers *bool) *kube_core_v1.PodSecurityContext {
+	var (
+		nonRoot             *bool
+		user                *int64
+		group               *int64
+		fsGroup             *int64
+		fsGroupChangePolicy *kube_core_v1.PodFSGroupChangePolicy
+		seccomp             *kube_core_v1.SeccompProfile
+		apparmor            *kube_core_v1.AppArmorProfile
+	)
+
+	// With user namespaces (hostUsers=false), UID 0 inside the container maps
+	// to a non-root UID on the host, so requesting root is safe.
+	usingUserns := (hostUsers != nil && !*hostUsers)
+	allowRoot := stepPrivileged || usingUserns
+
+	if secCtxConf.RunAsNonRoot {
+		nonRoot = newBool(true)
+	}
+	if secCtxConf.FSGroup != nil {
+		fsGroup = secCtxConf.FSGroup
+	}
+
+	if sc != nil {
+		// only allow to set user if its not root or step is privileged or using user namespaces
+		if sc.RunAsUser != nil && (*sc.RunAsUser != 0 || allowRoot) {
+			user = sc.RunAsUser
+		}
+
+		// only allow to set group if its not root or step is privileged or using user namespaces
+		if sc.RunAsGroup != nil && (*sc.RunAsGroup != 0 || allowRoot) {
+			group = sc.RunAsGroup
+		}
+
+		// only allow to set fsGroup if its not root or step is privileged or using user namespaces
+		if sc.FSGroup != nil && (*sc.FSGroup != 0 || allowRoot) {
+			fsGroup = sc.FSGroup
+		}
+
+		// if unset, set fsGroup to 1000 by default to support non-root images
+		if sc.FSGroup != nil {
+			fsGroup = sc.FSGroup
+		}
+
+		// only allow to set nonRoot if it's not set globally already or using user namespaces
+		// and override is allowed
+		if (nonRoot == nil || (usingUserns && secCtxConf.OverrideNonRootInUserNamespaces)) && sc.RunAsNonRoot != nil {
+			nonRoot = sc.RunAsNonRoot
+		}
+
+		seccomp = seccompProfile(sc.SeccompProfile)
+		apparmor = apparmorProfile(sc.ApparmorProfile)
+		fsGroupChangePolicy = sc.FsGroupChangePolicy
+	}
+
+	if nonRoot == nil && user == nil && group == nil && fsGroup == nil && seccomp == nil && apparmor == nil {
+		return nil
+	}
+
+	securityContext := &kube_core_v1.PodSecurityContext{
+		RunAsNonRoot:        nonRoot,
+		RunAsUser:           user,
+		RunAsGroup:          group,
+		FSGroup:             fsGroup,
+		FSGroupChangePolicy: fsGroupChangePolicy,
+		SeccompProfile:      seccomp,
+		AppArmorProfile:     apparmor,
+	}
+	log.Trace().Msgf("pod security context that will be used: %v", securityContext)
+	return securityContext
+}
+
+func seccompProfile(scp *SecProfile) *kube_core_v1.SeccompProfile {
+	if scp == nil || len(scp.Type) == 0 {
+		return nil
+	}
+	log.Trace().Msgf("using seccomp profile: %v", scp)
+
+	seccompProfile := &kube_core_v1.SeccompProfile{
+		Type: kube_core_v1.SeccompProfileType(scp.Type),
+	}
+	if len(scp.LocalhostProfile) > 0 {
+		seccompProfile.LocalhostProfile = &scp.LocalhostProfile
+	}
+
+	return seccompProfile
+}
+
+func apparmorProfile(scp *SecProfile) *kube_core_v1.AppArmorProfile {
+	if scp == nil || len(scp.Type) == 0 {
+		return nil
+	}
+	log.Trace().Msgf("using AppArmor profile: %v", scp)
+
+	apparmorProfile := &kube_core_v1.AppArmorProfile{
+		Type: kube_core_v1.AppArmorProfileType(scp.Type),
+	}
+	if len(scp.LocalhostProfile) > 0 {
+		apparmorProfile.LocalhostProfile = &scp.LocalhostProfile
+	}
+
+	return apparmorProfile
+}
+
+func containerCapabilities(capabilities *Capabilities) *kube_core_v1.Capabilities {
+	if capabilities == nil || len(capabilities.Drop) == 0 {
+		return nil
+	}
+
+	drop := make([]kube_core_v1.Capability, len(capabilities.Drop))
+
+	for i, c := range capabilities.Drop {
+		drop[i] = kube_core_v1.Capability(c)
+	}
+
+	return &kube_core_v1.Capabilities{
+		Drop: drop,
+	}
+}
+
+func containerSecurityContext(sc *SecurityContext, stepPrivileged bool) *kube_core_v1.SecurityContext {
+	var (
+		privileged               *bool
+		allowPrivilegeEscalation *bool
+		capabilities             *kube_core_v1.Capabilities
+	)
+
+	// A container may only run privileged when the step itself is privileged.
+	// If the step is privileged, the container is privileged by default unless
+	// explicitly disabled via securityContext.privileged=false.
+	if stepPrivileged && (sc == nil || sc.Privileged == nil || *sc.Privileged) {
+		privileged = newBool(true)
+	}
+
+	if sc != nil {
+		// allowPrivilegeEscalation can only be set to false.
+		if sc.AllowPrivilegeEscalation != nil && !*sc.AllowPrivilegeEscalation {
+			allowPrivilegeEscalation = sc.AllowPrivilegeEscalation
+		}
+
+		capabilities = containerCapabilities(sc.Capabilities)
+	}
+
+	if privileged == nil && capabilities == nil && allowPrivilegeEscalation == nil {
+		return nil
+	}
+
+	securityContext := &kube_core_v1.SecurityContext{
+		Privileged:               privileged,
+		AllowPrivilegeEscalation: allowPrivilegeEscalation,
+		Capabilities:             capabilities,
+	}
+
+	log.Trace().Msgf("container security context that will be used: %v", securityContext)
+	return securityContext
+}
+
+func mapToEnvVars(m map[string]string) []kube_core_v1.EnvVar {
+	var ev []kube_core_v1.EnvVar
+	for k, v := range m {
+		ev = append(ev, kube_core_v1.EnvVar{
+			Name:  k,
+			Value: v,
+		})
+	}
+	return ev
+}
+
+func dnsConfig(namespace, subdomain, clusterDomain string) *kube_core_v1.PodDNSConfig {
+	if clusterDomain == "" {
+		clusterDomain = defaultClusterDomain
+	}
+
+	return &kube_core_v1.PodDNSConfig{
+		Searches: []string{fmt.Sprintf("%s.%s.svc.%s", subdomain, namespace, clusterDomain)},
+	}
+}
+
+func startPod(ctx context.Context, engine *kube, step *types.Step, options BackendOptions, taskUUID string) (*kube_core_v1.Pod, error) {
+	podName, err := stepToPodName(step)
+	if err != nil {
+		return nil, err
+	}
+	engineConfig := engine.getConfig()
+	pod, err := mkPod(step, engineConfig, podName, engine.goos, options, taskUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Trace().Msgf("creating pod: %s", pod.Name)
+	return createRetryOnConflict(ctx, func() (*kube_core_v1.Pod, error) {
+		return engine.client.CoreV1().Pods(engineConfig.GetNamespace(step.OrgID)).Create(ctx, pod, kube_meta_v1.CreateOptions{})
+	})
+}
+
+func stopPod(ctx context.Context, engine *kube, step *types.Step, deleteOpts kube_meta_v1.DeleteOptions) error {
+	podName, err := stepToPodName(step)
+	if err != nil {
+		return err
+	}
+
+	log.Trace().Str("name", podName).Msg("deleting pod")
+
+	err = engine.client.CoreV1().Pods(engine.config.GetNamespace(step.OrgID)).Delete(ctx, podName, deleteOpts)
+	if errors.IsNotFound(err) {
+		// Don't abort on 404 errors from k8s, they most likely mean that the pod hasn't been created yet, usually because pipeline was canceled before running all steps.
+		return nil
+	}
+	return err
+}

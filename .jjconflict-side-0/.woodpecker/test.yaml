@@ -1,0 +1,103 @@
+# Any Linux agent on the AKS pool (kubernetes backend; services run as pods).
+#
+# RIG-2713: the heavy Go test suite is split across three workflow files
+# (test.yaml, test-checks.yaml, test-datastore.yaml). Each runs as its own
+# workflow on its own agent (WOODPECKER_MAX_WORKFLOWS=1), and within each file
+# the steps are chained strictly 1-wide (serial) so a 4 GiB agent never runs
+# more than one heavy Go compile at once — that bounds peak RAM and prevents the
+# OOM that expired task leases. Splitting across three files lets the three
+# chains run in parallel, keeping each workflow's wall time well under the
+# repo's 30-minute per-workflow timeout (a single fully-serial chain exceeded
+# it). This file is the push+PR Go-test spine.
+labels:
+  os: linux
+  cloud: azure
+  arch: x86_64
+
+variables:
+  - &golang_image 'docker.io/golang:1.27'
+  # Paths that gate the Go test suite. Mirrored verbatim in test-checks.yaml and
+  # test-datastore.yaml — YAML anchors do not cross workflow files, so the list
+  # is intentionally duplicated; keep the three copies in sync.
+  - &when_path
+    - '.woodpecker/test.yaml'
+    - '.woodpecker/test-checks.yaml'
+    - '.woodpecker/test-datastore.yaml'
+    - '.golangci.yaml'
+    # go source code
+    - '**/*.go'
+    - 'go.*'
+    # schema changes
+    - 'pipeline/schema/**'
+    # tools updates
+    - Makefile
+    - 'codecov.yaml'
+
+when:
+  - event: pull_request
+  - event: push
+    branch: ['${CI_REPO_DEFAULT_BRANCH}', rigel-release]
+    path: *when_path
+
+steps:
+  vendor:
+    image: *golang_image
+    commands:
+      - go mod vendor
+    when:
+      path:
+        - <<: *when_path
+        - '.woodpecker/**'
+
+  dummy-web:
+    depends_on:
+      - vendor
+    image: *golang_image
+    commands:
+      - mkdir -p web/dist/
+      - echo "test" > web/dist/index.html
+    when:
+      - path: *when_path
+
+  test:
+    depends_on:
+      - dummy-web
+    image: *golang_image
+    commands:
+      - make test-agent
+      - make test-server
+      - make test-cli
+      - make test-lib
+    when:
+      - path: *when_path
+
+  test-e2e:
+    depends_on:
+      - test
+    image: *golang_image
+    commands:
+      - make test-e2e
+    when:
+      - path: *when_path
+
+  test-fuzz:
+    depends_on:
+      - test-e2e
+    image: *golang_image
+    commands:
+      - make fuzz
+    environment:
+      FUZZ_TIME: 2s
+    when:
+      - path: *when_path
+
+  sqlite:
+    depends_on:
+      - test-fuzz
+    image: *golang_image
+    environment:
+      WOODPECKER_DATABASE_DRIVER: sqlite3
+    commands:
+      - make test-server-datastore-coverage
+    when:
+      - path: *when_path

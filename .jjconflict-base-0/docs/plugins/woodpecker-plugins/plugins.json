@@ -1,0 +1,379 @@
+{
+  "plugins": [
+    {
+      "name": "Clone plugin",
+      "docs": "https://raw.githubusercontent.com/woodpecker-ci/plugin-git/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Docker Buildx",
+      "docs": "https://codeberg.org/woodpecker-plugins/docker-buildx/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Codecov",
+      "docs": "https://raw.githubusercontent.com/woodpecker-ci/plugin-codecov/master/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Surge preview",
+      "docs": "https://codeberg.org/woodpecker-plugins/plugin-surge-preview/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "S3 upload",
+      "docs": "https://codeberg.org/woodpecker-plugins/plugin-s3/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Node PM",
+      "docs": "https://codeberg.org/woodpecker-plugins/node-pm/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Prettier",
+      "docs": "https://codeberg.org/woodpecker-plugins/prettier/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Extend env",
+      "docs": "https://raw.githubusercontent.com/woodpecker-ci/plugin-extend-env/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Regex check",
+      "docs": "https://codeberg.org/qwerty287/woodpecker-regex-check/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Gitea Create Pull Request",
+      "docs": "https://codeberg.org/woodpecker-community/gitea-pull-request-create-plugin/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Gitea Pull comment",
+      "docs": "https://raw.githubusercontent.com/markopolo123/gitea-comment-plugin/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Gitea publisher-golang",
+      "docs": "https://raw.githubusercontent.com/woodpecker-kit/woodpecker-gitea-publisher-golang/main/doc/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Git Push",
+      "docs": "https://raw.githubusercontent.com/appleboy/drone-git-push/master/DOCS.md",
+      "verified": false
+    },
+    {
+      "name": "WebDAV",
+      "docs": "https://raw.githubusercontent.com/ViViDboarder/drone-webdav/master/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Aptly publish",
+      "docs": "https://gitea.zionetrix.net/bn8/aptly-publish/raw/branch/master/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Trigger",
+      "docs": "https://codeberg.org/woodpecker-plugins/trigger/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Release",
+      "docs": "https://codeberg.org/woodpecker-plugins/release/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Sccache",
+      "docs": "https://seed.radicle.garden/raw/rad:zzmCBDptFLrfUEHSjcFsLJ2Aghav/head/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Woodpecker Email",
+      "docs": "https://gitnet.fr/deblan/woodpecker-email/raw/branch/develop/DOCS.md",
+      "verified": false
+    },
+    {
+      "name": "Woodpecker Feishu Bot",
+      "docs": "https://github.com/wenerme/wode/raw/main/apps/woodpecker-feishu-bot/README.md",
+      "verified": false
+    },
+    {
+      "name": "ntfy",
+      "docs": "https://codeberg.org/l-x/woodpecker-ntfy/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Trivy",
+      "docs": "https://codeberg.org/woodpecker-plugins/trivy/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "MkDocs",
+      "docs": "https://codeberg.org/woodpecker-plugins/mkdocs/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "TODO-Checker",
+      "docs": "https://codeberg.org/Epsilon_02/todo-checker/raw/branch/main/DOCS.md",
+      "verified": false
+    },
+    {
+      "name": "Nextcloud Upload",
+      "docs": "https://raw.githubusercontent.com/Ellpeck/WoodpeckerPlugins/main/nextcloud-upload/README.md",
+      "verified": false
+    },
+    {
+      "name": "Kubernetes Deployment or StatefulSet Update",
+      "docs": "https://raw.githubusercontent.com/euryecetelecom/woodpeckerci-kubernetes/master/README.md",
+      "verified": false
+    },
+    {
+      "name": "Dockle",
+      "docs": "https://raw.githubusercontent.com/euryecetelecom/woodpeckerci-dockle/master/README.md",
+      "verified": false
+    },
+    {
+      "name": "NixOS Remote Builder",
+      "docs": "https://codeberg.org/woodpecker-community/nix-remote-builder-plugin/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Release Helper",
+      "docs": "https://raw.githubusercontent.com/woodpecker-ci/plugin-ready-release-go/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Nix - Attic",
+      "docs": "https://git.vdx.hu/voidcontext/woodpecker-plugin-nix-attic/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Reviewdog golangci-lint",
+      "docs": "https://codeberg.org/woodpecker-plugins/reviewdog-golangci-lint/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Reviewdog ESLint",
+      "docs": "https://codeberg.org/woodpecker-plugins/reviewdog-eslint/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Ansible",
+      "docs": "https://codeberg.org/woodpecker-plugins/ansible/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Kaniko",
+      "docs": "https://raw.githubusercontent.com/woodpecker-ci/plugin-kaniko/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Gradle Wrapper Validation",
+      "docs": "https://codeberg.org/beaks/gradle-wrapper-validation/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Sonatype Nexus",
+      "docs": "https://raw.githubusercontent.com/rockdrilla/woodpecker-sonatype-nexus/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Mastodon Post",
+      "docs": "https://codeberg.org/woodpecker-plugins/mastodon-post/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Mastodon Profile",
+      "docs": "https://codeberg.org/woodpecker-plugins/mastodon-profile/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Bluesky Post",
+      "docs": "https://codeberg.org/woodpecker-plugins/bluesky-post/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Discord",
+      "docs": "https://raw.githubusercontent.com/appleboy/drone-discord/master/DOCS.md",
+      "verified": false
+    },
+    {
+      "name": "Forge deployments",
+      "docs": "https://raw.githubusercontent.com/woodpecker-ci/plugin-deployments/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Gitea Package",
+      "docs": "https://codeberg.org/woodpecker-community/gitea-package/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Is It Up Yet?",
+      "docs": "https://raw.githubusercontent.com/dvjn/woodpecker-is-it-up-yet-plugin/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Docker Tags",
+      "docs": "https://raw.githubusercontent.com/dvjn/woodpecker-docker-tags-plugin/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "SSH SCP",
+      "docs": "https://raw.githubusercontent.com/appleboy/drone-scp/refs/heads/master/DOCS.md",
+      "verified": false
+    },
+    {
+      "name": "Telegram",
+      "docs": "https://raw.githubusercontent.com/appleboy/drone-telegram/refs/heads/master/DOCS.md",
+      "verified": false
+    },
+    {
+      "name": "EditorConfig Checker",
+      "docs": "https://codeberg.org/woodpecker-plugins/editorconfig-checker/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "Microsoft Teams Notify",
+      "docs": "https://raw.githubusercontent.com/GECO-IT/woodpecker-plugin-teams-notify/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Basic Git Changelog",
+      "docs": "https://raw.githubusercontent.com/GECO-IT/woodpecker-plugin-git-basic-changelog/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Hugo",
+      "docs": "https://raw.githubusercontent.com/maurerle/woodpecker-hugo/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Home Assistant Notify",
+      "docs": "https://raw.githubusercontent.com/DHandspikerWade/woodpecker-plugin-ha-notify/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Microsoft Teams Notification (Advanced)",
+      "docs": "https://raw.githubusercontent.com/mobydeck/ci-teams-notification/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Pre-commit Runner",
+      "docs": "https://codeberg.org/sp1thas/woodpecker-ci-pre-commit/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Portainer Service Update",
+      "docs": "https://codeberg.org/woodpecker-community/portainer-service-update/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Peckify",
+      "docs": "https://codeberg.org/woodpecker-community/peckify/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "ASCII JUnit Test Report",
+      "docs": "https://raw.githubusercontent.com/brainbaking/woodpecker-ascii-junit/refs/heads/main/README.md",
+      "verified": false
+    },
+    {
+      "name": "SonarQube",
+      "docs": "https://raw.githubusercontent.com/j04n-f/woodpecker-sonar-plugin/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Github App Tokens",
+      "docs": "https://raw.githubusercontent.com/yyewolf/woodpecker-plugins/refs/heads/main/github-app-token/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Github Comment",
+      "docs": "https://raw.githubusercontent.com/yyewolf/woodpecker-plugins/refs/heads/main/github-comment/docs.md",
+      "verified": false
+    },
+    {
+      "name": "BunnyCDN Cache Purge",
+      "docs": "https://codeberg.org/bentasker/woodpecker-ci-bunnycdn-cache-flush/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Buildah",
+      "docs": "https://raw.githubusercontent.com/404systems/plugin-buildah/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Opengrep",
+      "docs": "https://raw.githubusercontent.com/KalvadTech/woodpecker-opengrep/refs/heads/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "AgentScan",
+      "docs": "https://codeberg.org/woodpecker-plugins/agentscan/raw/branch/main/docs.md",
+      "verified": true
+    },
+    {
+      "name": "S3 Cache",
+      "docs": "https://codeberg.org/landre/woodpecker-plugins/raw/branch/main/cache/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Laravel Forge",
+      "docs": "https://raw.githubusercontent.com/njaaazi/laravel-forge-woodpecker/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Podman",
+      "docs": "https://codeberg.org/head1328/woodpecker-ci-plugin-podman/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Git-pages",
+      "docs": "https://codeberg.org/gedankenstuecke/git-pages-woodpecker-plugin/raw/branch/main/README.md",
+      "verified": false
+    },
+    {
+      "name": "NestGuard",
+      "docs": "https://codeberg.org/woodpecker-community/nestguard/raw/branch/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Asyntai AI Chatbot Docs Sync",
+      "docs": "https://raw.githubusercontent.com/asyntai/woodpecker-ai-docs-sync/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Reviewdog PHPCS",
+      "docs": "https://raw.githubusercontent.com/njaaazi/woodpecker-reviewdog-phpcs/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Reviewdog PHPMD",
+      "docs": "https://raw.githubusercontent.com/njaaazi/woodpecker-reviewdog-phpmd/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Reviewdog PHPStan",
+      "docs": "https://raw.githubusercontent.com/njaaazi/woodpecker-reviewdog-phpstan/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "OpenArtifact",
+      "docs": "https://raw.githubusercontent.com/openartifact/drone-openartifact/refs/heads/main/DOCS.md",
+      "verified": false
+    },
+    {
+      "name": "Supabase Backup",
+      "docs": "https://raw.githubusercontent.com/backupdrill/woodpecker-backupdrill/main/docs.md",
+      "verified": false
+    },
+    {
+      "name": "Betterleaks",
+      "docs": "https://codeberg.org/woodpecker-plugins/betterleaks/raw/branch/main/docs.md",
+      "verified": true
+    }
+  ]
+}

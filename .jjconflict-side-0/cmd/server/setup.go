@@ -1,0 +1,326 @@
+// Copyright 2022 Woodpecker Authors
+// Copyright 2018 Drone.IO Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"context"
+	"encoding/base32"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog/log"
+	"github.com/tink-crypto/tink-go/v2/subtle/random"
+	"github.com/urfave/cli/v3"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server"
+	"go.woodpecker-ci.org/woodpecker/v3/server/cache"
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge/setup"
+	"go.woodpecker-ci.org/woodpecker/v3/server/logging"
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/pubsub/memory"
+	"go.woodpecker-ci.org/woodpecker/v3/server/queue"
+	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
+	"go.woodpecker-ci.org/woodpecker/v3/server/services"
+	service_log "go.woodpecker-ci.org/woodpecker/v3/server/services/log"
+	"go.woodpecker-ci.org/woodpecker/v3/server/services/log/addon"
+	"go.woodpecker-ci.org/woodpecker/v3/server/services/log/file"
+	"go.woodpecker-ci.org/woodpecker/v3/server/services/permissions"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
+)
+
+func setupStore(ctx context.Context, c *cli.Command) (store.Store, error) {
+	datasource := c.String("db-datasource")
+	driver := c.String("db-driver")
+	xorm := store.XORM{
+		Log:             c.Bool("db-log"),
+		ShowSQL:         c.Bool("db-log-sql"),
+		MaxOpenConns:    c.Int("db-max-open-connections"),
+		MaxIdleConns:    c.Int("db-max-idle-connections"),
+		ConnMaxLifetime: c.Duration("db-max-connection-timeout"),
+	}
+
+	if driver == "sqlite3" {
+		if datastore.SupportedDriver("sqlite3") {
+			log.Debug().Msg("server has sqlite3 support")
+		} else {
+			log.Debug().Msg("server was built without sqlite3 support!")
+		}
+	}
+
+	if !datastore.SupportedDriver(driver) {
+		return nil, fmt.Errorf("database driver '%s' not supported", driver)
+	}
+
+	if driver == "sqlite3" {
+		if err := checkSqliteFileExist(datasource); err != nil {
+			return nil, fmt.Errorf("check sqlite file: %w", err)
+		}
+	}
+
+	opts := &store.Opts{
+		Driver: driver,
+		Config: datasource,
+		XORM:   xorm,
+	}
+	log.Debug().Str("driver", driver).Any("xorm", xorm).Msg("setting up datastore")
+	store, err := datastore.NewEngine(opts)
+	if err != nil {
+		return nil, fmt.Errorf("could not open datastore: %w", err)
+	}
+
+	if err = store.Ping(); err != nil {
+		return nil, err
+	}
+
+	if err := store.Migrate(ctx, c.Bool("migrations-allow-long")); err != nil {
+		return nil, fmt.Errorf("could not migrate datastore: %w", err)
+	}
+
+	return store, nil
+}
+
+func checkSqliteFileExist(path string) error {
+	_, err := os.Stat(path)
+	if err != nil && os.IsNotExist(err) {
+		log.Warn().Msgf("no sqlite3 file found, will create one at '%s'", path)
+		return nil
+	}
+	return err
+}
+
+func setupQueue(ctx context.Context, s store.Store) (queue.Queue, error) {
+	return queue.New(ctx, queue.Config{
+		Backend: queue.TypeMemory,
+		Store:   s,
+	})
+}
+
+func setupMembershipService(_ context.Context, _store store.Store) cache.MembershipService {
+	return cache.NewMembershipService(_store)
+}
+
+func setupLogStore(c *cli.Command, s store.Store) (service_log.Service, error) {
+	switch c.String("log-store") {
+	case "file":
+		return file.NewLogStore(c.String("log-store-file-path"))
+	case "addon":
+		return addon.Load(c.String("log-store-file-path"))
+	default:
+		return s, nil
+	}
+}
+
+const jwtSecretID = "jwt-secret"
+
+func setupGrpcSecret(secret string) (string, bool) {
+	if secret != "" {
+		return secret, false
+	}
+
+	return base32.StdEncoding.EncodeToString(random.GetRandomBytes(32)), true
+}
+
+func setupJWTSecret(_store store.Store) (string, error) {
+	jwtSecret, err := _store.ServerConfigGet(jwtSecretID)
+	if errors.Is(err, types.ErrRecordNotExist) {
+		jwtSecret := base32.StdEncoding.EncodeToString(
+			random.GetRandomBytes(32),
+		)
+		err = _store.ServerConfigSet(jwtSecretID, jwtSecret)
+		if err != nil {
+			return "", err
+		}
+		log.Debug().Msg("created jwt secret")
+		return jwtSecret, nil
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	return jwtSecret, nil
+}
+
+func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err error) {
+	// services
+	server.Config.Services.Logs = logging.New()
+	server.Config.Services.Membership = setupMembershipService(ctx, s)
+	pubsub := memory.New()
+	queue, err := setupQueue(ctx, s)
+	if err != nil {
+		return fmt.Errorf("could not setup queue: %w", err)
+	}
+	server.Config.Services.Scheduler = scheduler.NewScheduler(ctx, s, queue, pubsub)
+	server.Config.Services.Manager, err = services.NewManager(c, s, setup.Forge)
+	if err != nil {
+		return fmt.Errorf("could not setup service manager: %w", err)
+	}
+	server.Config.Services.LogStore, err = setupLogStore(c, s)
+	if err != nil {
+		return fmt.Errorf("could not setup log store: %w", err)
+	}
+
+	// agents
+	server.Config.Agent.DisableUserRegisteredAgentRegistration = c.Bool("disable-user-agent-registration")
+
+	// authentication
+	server.Config.Pipeline.AuthenticatePublicRepos = c.Bool("authenticate-public-repos")
+	server.Config.Pipeline.SecretExtensionNetrc = c.Bool("secret-extension-netrc")
+	server.Config.Pipeline.RegistryExtensionNetrc = c.Bool("registry-extension-netrc")
+	server.Config.Server.AsyncRepositoryUpdate = c.Bool("async-repository-update")
+	server.Config.Server.WebhookSyncTimeout = c.Duration("webhook-sync-timeout")
+	server.Config.Server.CreationDrainTimeout = c.Duration("creation-drain-timeout")
+	server.Config.Server.HookDedupWindow = c.Duration("hook-dedup-window")
+	server.Config.Server.OrphanReapInterval = c.Duration("orphan-reap-interval")
+	server.Config.Server.OrphanReapGrace = c.Duration("orphan-reap-grace")
+	server.Config.Server.PendingTimeout = c.Duration("pending-timeout")
+	server.Config.Server.PendingUnmatchedTimeout = c.Duration("pending-unmatched-timeout")
+	server.Config.Server.CreationTimeout = pipelineCreationTimeout(c.Duration("extensions-timeout"), c.Duration("forge-timeout"), c.Uint("forge-retry"))
+
+	// Pull requests
+	server.Config.Pipeline.DefaultAllowPullRequests = c.Bool("default-allow-pull-requests")
+
+	// Approval mode
+	approvalMode := model.ApprovalMode(c.String("default-approval-mode"))
+	if !approvalMode.Valid() {
+		return fmt.Errorf("approval mode %s is not valid", approvalMode)
+	}
+	server.Config.Pipeline.DefaultApprovalMode = approvalMode
+
+	// Cloning
+	server.Config.Pipeline.DefaultClonePlugin = c.String("default-clone-plugin")
+	server.Config.Pipeline.TrustedClonePlugins = c.StringSlice("plugins-trusted-clone")
+	server.Config.Pipeline.TrustedClonePlugins = append(server.Config.Pipeline.TrustedClonePlugins, server.Config.Pipeline.DefaultClonePlugin)
+
+	// Execution
+	_events := c.StringSlice("default-cancel-previous-pipeline-events")
+	events := make([]model.WebhookEvent, 0, len(_events))
+	for _, v := range _events {
+		e := model.WebhookEvent(v)
+		if err := e.Validate(); err != nil {
+			return err
+		}
+		events = append(events, e)
+	}
+	server.Config.Pipeline.DefaultCancelPreviousPipelineEvents = events
+	server.Config.Pipeline.DefaultTimeout = c.Int64("default-pipeline-timeout")
+	server.Config.Pipeline.MaxTimeout = c.Int64("max-pipeline-timeout")
+
+	_labels := c.StringSlice("default-workflow-labels")
+	labels := make(map[string]string, len(_labels))
+	for _, v := range _labels {
+		name, value, ok := strings.Cut(v, "=")
+		if !ok {
+			return fmt.Errorf("invalid label filter: %s", v)
+		}
+		labels[name] = value
+	}
+	server.Config.Pipeline.DefaultWorkflowLabels = labels
+
+	// backend options for pipeline compiler
+	server.Config.Pipeline.Proxy.No = c.String("backend-no-proxy")
+	server.Config.Pipeline.Proxy.HTTP = c.String("backend-http-proxy")
+	server.Config.Pipeline.Proxy.HTTPS = c.String("backend-https-proxy")
+
+	// pipeline config paths
+	server.Config.Pipeline.ConfigPaths = c.StringSlice("default-pipeline-configs")
+	server.Config.Pipeline.ConfigExtensions = c.StringSlice("default-pipeline-config-extensions")
+
+	// server configuration
+	server.Config.Server.JWTSecret, err = setupJWTSecret(s)
+	if err != nil {
+		return fmt.Errorf("could not setup jwt secret: %w", err)
+	}
+	server.Config.Server.Cert = c.String("server-cert")
+	server.Config.Server.Key = c.String("server-key")
+	server.Config.Server.AgentToken = c.String("agent-secret")
+	serverHost := strings.TrimSuffix(c.String("server-host"), "/")
+	server.Config.Server.Host = serverHost
+	if c.IsSet("server-webhook-host") {
+		server.Config.Server.WebhookHost = c.String("server-webhook-host")
+	} else {
+		server.Config.Server.WebhookHost = serverHost
+	}
+	server.Config.Server.OAuthHost = serverHost
+	server.Config.Server.Port = c.String("server-addr")
+	server.Config.Server.PortTLS = c.String("server-addr-tls")
+	server.Config.Server.StatusContext = c.String("status-context")
+	server.Config.Server.StatusContextFormat = c.String("status-context-format")
+	server.Config.Server.StatusAggregate = c.Bool("status-aggregate")
+	server.Config.Server.StatusAggregateFormat = c.String("status-aggregate-format")
+	server.Config.Server.StatusMeta = c.Bool("status-meta")
+	server.Config.Server.StatusMetaContext = c.String("status-meta-context")
+	server.Config.Server.StatusPerWorkflow = c.Bool("status-per-workflow")
+	server.Config.Server.ReportSkippedWorkflows = c.Bool("report-skipped-workflows")
+	server.Config.Server.ReportSkippedToForge = c.Bool("report-skipped-to-forge")
+	server.Config.Server.SessionExpires = c.Duration("session-expires")
+	u, _ := url.Parse(server.Config.Server.Host)
+	rootPath := strings.TrimSuffix(u.Path, "/")
+	if rootPath != "" && !strings.HasPrefix(rootPath, "/") {
+		rootPath = "/" + rootPath
+	}
+	server.Config.Server.RootPath = rootPath
+	server.Config.Server.CustomCSSFile = strings.TrimSpace(c.String("custom-css-file"))
+	server.Config.Server.CustomJsFile = strings.TrimSpace(c.String("custom-js-file"))
+	server.Config.Pipeline.Networks = c.StringSlice("network")
+	server.Config.Pipeline.Volumes = c.StringSlice("volume")
+	server.Config.WebUI.EnableSwagger = c.Bool("enable-swagger")
+	server.Config.WebUI.SkipVersionCheck = c.Bool("skip-version-check")
+	server.Config.WebUI.MaxPipelineLogLineCount = c.Uint("max-pipeline-log-line-count")
+	server.Config.Pipeline.PrivilegedPlugins = c.StringSlice("plugins-privileged")
+	server.Config.Pipeline.SecretApprovers = c.StringSlice("secret-approvers")
+
+	// TODO: remove with version 4.x
+	server.Config.Pipeline.ForceIgnoreServiceFailure = c.Bool("force-ignore-service-failure")
+	if server.Config.Pipeline.ForceIgnoreServiceFailure {
+		log.Info().Msg("WOODPECKER_FORCE_IGNORE_SERVICE_FAILURE is true by default. To prepare for v4.0.0, set it to false and update your pipeline definitions if needed.")
+	}
+
+	// prometheus
+	server.Config.Prometheus.AuthToken = c.String("prometheus-auth-token")
+
+	// permissions
+	server.Config.Permissions.Open = c.Bool("open")
+	server.Config.Permissions.Admins = permissions.NewAdmins(c.StringSlice("admin"), c.Bool("admin-primary-forge-only"))
+	server.Config.Permissions.Orgs = permissions.NewOrgs(c.StringSlice("orgs"))
+	server.Config.Permissions.OwnersAllowlist = permissions.NewOwnersAllowlist(c.StringSlice("repo-owners"))
+	return nil
+}
+
+const (
+	extensionTries = 3 // matches the retry count in services/utils.Client.Send
+	// Config, secret and registry each may call a global then a repo extension, in sequence.
+	extensionCalls             = 6
+	defaultExtensionsTimeout   = 10 * time.Second // services/utils fallback for a zero or negative timeout
+	creationSlack              = time.Minute
+	minPipelineCreationTimeout = 2 * time.Minute
+)
+
+// pipelineCreationTimeout lets a background pipeline creation outlast every
+// try of each extension it calls plus every forge config read.
+func pipelineCreationTimeout(extensionsTimeout, forgeTimeout time.Duration, forgeRetries uint) time.Duration {
+	if extensionsTimeout <= 0 {
+		extensionsTimeout = defaultExtensionsTimeout
+	}
+	budget := extensionCalls*extensionTries*extensionsTimeout + time.Duration(forgeRetries)*forgeTimeout + creationSlack
+	return max(minPipelineCreationTimeout, budget)
+}

@@ -97,6 +97,9 @@ export interface Pipeline {
   cancel_info: CancelInfo;
 
   version: string;
+
+  // Only this workflow and its hard dependencies were run (manual pipelines).
+  selected_workflow?: string;
 }
 
 export type PipelineStatus =
@@ -125,6 +128,12 @@ export interface PipelineWorkflow {
   error?: string;
   children?: PipelineStep[];
   attempts?: number;
+}
+
+// WorkflowInfo is a workflow a repo config would run, as listed for a manual pipeline
+export interface WorkflowInfo {
+  name: string;
+  depends_on?: string[];
 }
 
 export interface PipelineStep {

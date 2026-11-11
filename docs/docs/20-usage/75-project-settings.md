@@ -33,6 +33,8 @@ Otherwise, these users will be able to steal secrets that are only available for
 
 To prevent malicious pipelines from extracting secrets or running harmful commands or to prevent accidental pipeline runs, you can require approval for an additional review process. Depending on the enabled option, a pipeline will be put on hold after creation and will only continue after approval. The default restrictive setting is `Approvals for forked repositories`.
 
+Also see [security boundaries](./17-security-boundaries.md#approval-of-pipelines).
+
 ## Trusted
 
 If you set your project to trusted, a pipeline step and by this the underlying containers gets access to escalated capabilities like mounting volumes.
@@ -43,6 +45,8 @@ Only server admins can set this option. If you are not a server admin this optio
 
 :::
 
+Also see [security boundaries](./17-security-boundaries.md#trusted-repositories).
+
 ## Custom trusted clone plugins
 
 For GitHub repositories with a configured GitHub App, Woodpecker can provide a short-lived, repository-scoped, read-only credential to clone and pipeline containers, including custom clone steps. Other forges and GitHub installations without an App do not receive this credential.
@@ -50,6 +54,8 @@ For GitHub repositories with a configured GitHub App, Woodpecker can provide a s
 The username and forge host are included at compile time. At dispatch, the server mints a fresh token and injects the password only when at least 10 minutes of its lifetime remain. GitHub App installation tokens last about 60 minutes from mint. Clone runs first, so a later step that fetches again after the token expires gets an authentication error.
 
 Pipeline code can read the current repository while the token is available, but it cannot push changes or access other repositories. To push changes, provide a separate credential as a secret or use a dedicated plugin, such as [appleboy/drone-git-push](https://woodpecker-ci.org/plugins/git-push).
+
+Also see [security boundaries](./17-security-boundaries.md#git-credentials).
 
 ## Project visibility
 

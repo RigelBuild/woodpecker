@@ -1,0 +1,662 @@
+// Copyright 2022 Woodpecker Authors
+// Copyright 2018 Drone.IO Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package datastore
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
+)
+
+func TestPipelines(t *testing.T) {
+	repo := &model.Repo{
+		UserID:   1,
+		FullName: "bradrydzewski/test",
+		Owner:    "bradrydzewski",
+		Name:     "test",
+	}
+
+	store, closer := newTestStore(t, new(model.Repo), new(model.Step), new(model.Pipeline))
+	defer closer()
+
+	assert.NoError(t, store.CreateRepo(repo))
+
+	// Fail when the repo is not existing
+	pipeline := model.Pipeline{
+		RepoID: 100,
+		Status: model.StatusSuccess,
+	}
+	err := store.CreatePipeline(&pipeline)
+	assert.Error(t, err)
+
+	count, err := store.GetPipelineCount()
+	assert.NoError(t, err)
+	assert.Zero(t, count)
+
+	// add pipeline
+	pipeline = model.Pipeline{
+		RepoID:          repo.ID,
+		Status:          model.StatusSuccess,
+		Commit:          "85f8c029b902ed9400bc600bac301a0aadb144ac",
+		Event:           model.EventPush,
+		Branch:          "some-branch",
+		PullRequestBody: "Fixes #1\n\nSpec-impact: none",
+	}
+	err = store.CreatePipeline(&pipeline)
+	assert.NoError(t, err)
+	assert.NotZero(t, pipeline.ID)
+	assert.EqualValues(t, 1, pipeline.Number)
+	assert.Equal(t, "85f8c029b902ed9400bc600bac301a0aadb144ac", pipeline.Commit)
+
+	count, err = store.GetPipelineCount()
+	assert.NoError(t, err)
+	assert.NotZero(t, count)
+
+	GetPipeline, err := store.GetPipeline(pipeline.ID)
+	assert.NoError(t, err)
+	assert.Equal(t, pipeline.ID, GetPipeline.ID)
+	assert.Equal(t, pipeline.RepoID, GetPipeline.RepoID)
+	assert.Equal(t, pipeline.Status, GetPipeline.Status)
+	assert.Equal(t, "Fixes #1\n\nSpec-impact: none", GetPipeline.PullRequestBody)
+
+	// update pipeline
+	pipeline.Status = model.StatusRunning
+	require.NoError(t, store.UpdatePipeline(&pipeline))
+	GetPipeline, err1 := store.GetPipeline(pipeline.ID)
+	require.NoError(t, err1)
+	assert.Equal(t, pipeline.ID, GetPipeline.ID)
+	assert.Equal(t, pipeline.RepoID, GetPipeline.RepoID)
+	assert.Equal(t, pipeline.Status, GetPipeline.Status)
+	assert.Equal(t, pipeline.Number, GetPipeline.Number)
+
+	pipeline2 := &model.Pipeline{
+		RepoID: repo.ID,
+		Status: model.StatusPending,
+		Event:  model.EventPush,
+		Branch: "main",
+	}
+	require.NoError(t, store.CreatePipeline(pipeline2, []*model.Step{}...))
+	GetPipeline, err3 := store.GetPipelineNumber(&model.Repo{ID: 1}, pipeline2.Number)
+	require.NoError(t, err3)
+	assert.Equal(t, pipeline2.ID, GetPipeline.ID)
+	assert.Equal(t, pipeline2.RepoID, GetPipeline.RepoID)
+	assert.Equal(t, pipeline2.Number, GetPipeline.Number)
+
+	GetPipeline, err4 := store.GetPipelineLastByBranch(&model.Repo{ID: repo.ID}, pipeline2.Branch)
+	require.NoError(t, err4)
+	assert.Equal(t, pipeline2.ID, GetPipeline.ID)
+	assert.Equal(t, pipeline2.RepoID, GetPipeline.RepoID)
+	assert.Equal(t, pipeline2.Number, GetPipeline.Number)
+	assert.Equal(t, pipeline2.Status, GetPipeline.Status)
+
+	pipeline3 := &model.Pipeline{
+		RepoID:   repo.ID,
+		Status:   model.StatusRunning,
+		Branch:   "main",
+		Event:    model.EventPull,
+		Commit:   "85f8c029b902ed9400bc600bac301a0aadb144aa",
+		ForgeURL: "example.com/id3",
+	}
+	require.NoError(t, store.CreatePipeline(pipeline3))
+
+	GetPipeline, err5 := store.GetPipelineLastBefore(&model.Repo{ID: 1}, pipeline3.Branch, pipeline3.Number)
+	require.NoError(t, err5)
+	assert.EqualValues(t, pipeline2, GetPipeline)
+}
+
+// TestPipelineBeforePersists pins Before to a real column. The config
+// extension reads it off a pipeline the store loaded, which is what a restart
+// hands to config.Fetch, so an in-memory-only field would read empty there and
+// silently narrow the compared range instead of failing.
+func TestPipelineBeforePersists(t *testing.T) {
+	const before = "2f780193b136b72bfea4eeb640786a8c4450c7a2"
+
+	repo := &model.Repo{
+		UserID:   1,
+		FullName: "bradrydzewski/test",
+		Owner:    "bradrydzewski",
+		Name:     "test",
+	}
+
+	store, closer := newTestStore(t, new(model.Repo), new(model.Step), new(model.Pipeline))
+	defer closer()
+
+	assert.NoError(t, store.CreateRepo(repo))
+
+	pipeline := model.Pipeline{
+		RepoID: repo.ID,
+		Status: model.StatusSuccess,
+		Event:  model.EventPush,
+		Branch: "some-branch",
+		Commit: "366701fde727cb7a9e7f21eb88264f59f6f9b89c",
+		Before: before,
+	}
+	assert.NoError(t, store.CreatePipeline(&pipeline))
+
+	// GetPipelineNumber is the accessor the restart path uses.
+	loaded, err := store.GetPipelineNumber(repo, pipeline.Number)
+	assert.NoError(t, err)
+	assert.Equal(t, before, loaded.Before)
+}
+
+func TestPipelineListFilter(t *testing.T) {
+	repo := &model.Repo{
+		UserID:   1,
+		FullName: "bradrydzewski/test",
+		Owner:    "bradrydzewski",
+		Name:     "test",
+	}
+
+	store, closer := newTestStore(t, new(model.Repo), new(model.Step), new(model.Pipeline))
+	defer closer()
+
+	assert.NoError(t, store.CreateRepo(repo))
+
+	pipeline1 := &model.Pipeline{
+		RepoID: repo.ID,
+		Status: model.StatusFailure,
+		Event:  model.EventCron,
+		Ref:    "refs/heads/some-branch",
+		Branch: "some-branch",
+	}
+	pipeline2 := &model.Pipeline{
+		RepoID: repo.ID,
+		Status: model.StatusSuccess,
+		Event:  model.EventPull,
+		Ref:    "refs/pull/32",
+		Branch: "main",
+	}
+	err := store.CreatePipeline(pipeline1, []*model.Step{}...)
+	assert.NoError(t, err)
+	time.Sleep(1 * time.Second)
+	before := time.Now().Unix()
+	err = store.CreatePipeline(pipeline2, []*model.Step{}...)
+	assert.NoError(t, err)
+
+	pipelines, err := store.GetPipelineList(&model.Repo{ID: 1}, &model.ListOptionsWithAll{ListOptions: &model.ListOptions{Page: 1, PerPage: 50}}, nil)
+	assert.NoError(t, err)
+	assert.Len(t, pipelines, 2)
+	assert.Equal(t, pipeline2.ID, pipelines[0].ID)
+	assert.Equal(t, pipeline2.RepoID, pipelines[0].RepoID)
+	assert.Equal(t, pipeline2.Status, pipelines[0].Status)
+
+	pipelines, err = store.GetPipelineList(&model.Repo{ID: 1}, nil, &model.PipelineFilter{
+		Branch: "main",
+	})
+	assert.NoError(t, err)
+	assert.Len(t, pipelines, 1)
+	assert.Equal(t, pipeline2.ID, pipelines[0].ID)
+
+	pipelines, err = store.GetPipelineList(&model.Repo{ID: 1}, nil, &model.PipelineFilter{
+		Events: []model.WebhookEvent{model.EventCron},
+	})
+	assert.NoError(t, err)
+	assert.Len(t, pipelines, 1)
+	assert.Equal(t, pipeline1.ID, pipelines[0].ID)
+
+	pipelines, err = store.GetPipelineList(&model.Repo{ID: 1}, nil, &model.PipelineFilter{
+		Events:      []model.WebhookEvent{model.EventCron, model.EventPull},
+		RefContains: "32",
+	})
+	assert.NoError(t, err)
+	assert.Len(t, pipelines, 1)
+	assert.Equal(t, pipeline2.ID, pipelines[0].ID)
+
+	pipelines, err3 := store.GetPipelineList(&model.Repo{ID: 1}, &model.ListOptionsWithAll{ListOptions: &model.ListOptions{Page: 1, PerPage: 50}}, &model.PipelineFilter{Before: before})
+	assert.NoError(t, err3)
+	assert.Len(t, pipelines, 1)
+	assert.Equal(t, pipeline1.ID, pipelines[0].ID)
+	assert.Equal(t, pipeline1.RepoID, pipelines[0].RepoID)
+
+	pipelines, err = store.GetPipelineList(&model.Repo{ID: 1}, nil, &model.PipelineFilter{
+		Status: model.StatusSuccess,
+	})
+	assert.NoError(t, err)
+	assert.Len(t, pipelines, 1)
+	assert.Equal(t, pipeline2.ID, pipelines[0].ID)
+	assert.Equal(t, model.StatusSuccess, pipelines[0].Status)
+}
+
+func TestPipelineIncrement(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline), new(model.Repo))
+	defer closer()
+
+	assert.NoError(t, store.CreateRepo(&model.Repo{ID: 1, Owner: "1", Name: "1", FullName: "1/1", ForgeRemoteID: "1"}))
+	assert.NoError(t, store.CreateRepo(&model.Repo{ID: 2, Owner: "2", Name: "2", FullName: "2/2", ForgeRemoteID: "2"}))
+
+	pipelineA := &model.Pipeline{RepoID: 1}
+	require.NoError(t, store.CreatePipeline(pipelineA))
+	assert.EqualValues(t, 1, pipelineA.Number)
+
+	pipelineB := &model.Pipeline{RepoID: 1}
+	assert.NoError(t, store.CreatePipeline(pipelineB))
+	assert.EqualValues(t, 2, pipelineB.Number)
+
+	pipelineC := &model.Pipeline{RepoID: 2}
+	assert.NoError(t, store.CreatePipeline(pipelineC))
+	assert.EqualValues(t, 1, pipelineC.Number)
+}
+
+// Duplicates must surface as ErrInsertDuplicateDetected so the retry sees them as retryable (#6067).
+func TestCreatePipelineDuplicateIsRetryable(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Repo), new(model.Step), new(model.Pipeline))
+	defer closer()
+
+	require.NoError(t, store.CreateRepo(&model.Repo{ID: 1, Owner: "1", Name: "1", FullName: "1/1", ForgeRemoteID: "1"}))
+
+	// Duplicate step: UNIQUE(pipeline_id, pid).
+	err := store.CreatePipeline(
+		&model.Pipeline{RepoID: 1},
+		&model.Step{PID: 1, Name: "clone"},
+		&model.Step{PID: 1, Name: "dup"},
+	)
+	assert.ErrorIs(t, err, types.ErrInsertDuplicateDetected)
+
+	// Every attempt rolled back.
+	count, err := store.GetPipelineCount()
+	assert.NoError(t, err)
+	assert.Zero(t, count)
+
+	// Same for the pipeline insert. Forced through the PK: the number is MAX+1, it can't collide on demand.
+	existing := &model.Pipeline{RepoID: 1}
+	require.NoError(t, store.CreatePipeline(existing))
+	assert.ErrorIs(t, store.CreatePipeline(&model.Pipeline{ID: existing.ID, RepoID: 1}), types.ErrInsertDuplicateDetected)
+}
+
+func TestDeletePipeline(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline), new(model.Repo), new(model.Workflow),
+		new(model.Step), new(model.LogEntry), new(model.PipelineConfig), new(model.Config))
+	defer closer()
+
+	err := wrapInsert(store.engine.Insert(
+		&model.Pipeline{
+			ID:     2,
+			Number: 2,
+			RepoID: 7,
+		},
+		&model.Pipeline{
+			ID:     5,
+			Number: 3,
+			RepoID: 7,
+		},
+		&model.Pipeline{
+			ID:     8,
+			Number: 4,
+			RepoID: 7,
+		},
+		&model.Config{
+			ID:     23,
+			Hash:   "1234",
+			Name:   "test",
+			RepoID: 7,
+		},
+		&model.Config{
+			ID:     25,
+			Hash:   "6789",
+			Name:   "test",
+			RepoID: 7,
+		},
+		&model.PipelineConfig{
+			PipelineID: 2,
+			ConfigID:   23,
+		},
+		&model.PipelineConfig{
+			PipelineID: 5,
+			ConfigID:   23,
+		},
+		&model.PipelineConfig{
+			PipelineID: 8,
+			ConfigID:   25,
+		},
+	))
+	assert.NoError(t, err)
+
+	// delete non existing pipeline
+	assert.ErrorIs(t, types.ErrRecordNotExist, store.DeletePipeline(&model.Pipeline{ID: 1}))
+
+	// delete pipeline with shares config
+	assert.NoError(t, store.DeletePipeline(&model.Pipeline{ID: 2}))
+	count, err := store.engine.Count(new(model.Config))
+	assert.NoError(t, err)
+	assert.EqualValues(t, 2, count)
+
+	// delete pipeline with unique config
+	assert.NoError(t, store.DeletePipeline(&model.Pipeline{ID: 8}))
+	count, err = store.engine.Count(new(model.Config))
+	assert.NoError(t, err)
+	assert.EqualValues(t, 1, count)
+}
+
+// TestGetRepoLatestPipelinesUsesNumber checks a repo's latest pipeline is
+// picked by number rather than by id, in the case where the two sequences
+// disagree: the newest pipeline of each repo is given the lowest id. TiDB can
+// produce that state, as it allocates auto-increment values from per-node
+// caches instead of in insertion order.
+func TestGetRepoLatestPipelinesUsesNumber(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	assert.NoError(t, wrapInsert(store.engine.Insert([]*model.Pipeline{
+		{ID: 900, RepoID: 1, Number: 1, Status: model.StatusFailure},
+		{ID: 100, RepoID: 1, Number: 2, Status: model.StatusRunning},
+		{ID: 800, RepoID: 2, Number: 1, Status: model.StatusFailure},
+		{ID: 200, RepoID: 2, Number: 2, Status: model.StatusKilled},
+	})))
+
+	pipelines, err := store.GetRepoLatestPipelines([]int64{1, 2})
+	assert.NoError(t, err)
+	assert.Len(t, pipelines, 2)
+
+	latest := make(map[int64]*model.Pipeline, len(pipelines))
+	for _, pipeline := range pipelines {
+		latest[pipeline.RepoID] = pipeline
+	}
+
+	assert.EqualValues(t, 2, latest[1].Number)
+	assert.EqualValues(t, model.StatusRunning, latest[1].Status)
+	assert.EqualValues(t, 2, latest[2].Number)
+	assert.EqualValues(t, model.StatusKilled, latest[2].Status)
+}
+
+func TestGetPipelinesByIDs(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	expected := []*model.Pipeline{
+		{ID: 10, RepoID: 1, Number: 1, Status: model.StatusSuccess},
+		{ID: 20, RepoID: 1, Number: 2, Status: model.StatusRunning},
+	}
+	require.NoError(t, wrapInsert(store.engine.Insert(expected)))
+
+	pipelines, err := store.GetPipelinesByIDs([]int64{20, 999, 10})
+	require.NoError(t, err)
+	require.Len(t, pipelines, 2)
+
+	got := make(map[int64]int64, len(pipelines))
+	for _, pipeline := range pipelines {
+		got[pipeline.ID] = pipeline.Number
+	}
+	assert.Equal(t, map[int64]int64{10: 1, 20: 2}, got)
+}
+
+// Rows on both sides of the 1000-ID chunk boundary must come back.
+func TestGetPipelinesByIDsSpansChunks(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	require.NoError(t, wrapInsert(store.engine.Insert([]*model.Pipeline{
+		{ID: 1, RepoID: 1, Number: 1, Status: model.StatusSuccess},
+		{ID: 1001, RepoID: 1, Number: 2, Status: model.StatusSuccess},
+	})))
+
+	ids := make([]int64, 0, 1001)
+	for id := int64(1); id <= 1001; id++ {
+		ids = append(ids, id)
+	}
+	pipelines, err := store.GetPipelinesByIDs(ids)
+	require.NoError(t, err)
+	got := make([]int64, 0, len(pipelines))
+	for _, pipeline := range pipelines {
+		got = append(got, pipeline.ID)
+	}
+	assert.ElementsMatch(t, []int64{1, 1001}, got)
+
+	empty, err := store.GetPipelinesByIDs(nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+// TestGetPipelineLastBeforeUsesNumber checks the preceding pipeline is found
+// by number, in the case where the two sequences disagree: the pipelines are
+// created in number order while their ids run the other way. TiDB can produce
+// that state, as it allocates auto-increment values from per-node caches
+// instead of in insertion order.
+func TestGetPipelineLastBeforeUsesNumber(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Repo), new(model.Pipeline))
+	defer closer()
+
+	repo := &model.Repo{ID: 1, Owner: "bradrydzewski", Name: "test", FullName: "bradrydzewski/test"}
+
+	assert.NoError(t, wrapInsert(store.engine.Insert([]*model.Pipeline{
+		{ID: 900, RepoID: repo.ID, Number: 1, Branch: "main", Status: model.StatusSuccess},
+		{ID: 800, RepoID: repo.ID, Number: 2, Branch: "main", Status: model.StatusFailure},
+		{ID: 700, RepoID: repo.ID, Number: 3, Branch: "main", Status: model.StatusRunning},
+	})))
+
+	previous, err := store.GetPipelineLastBefore(repo, "main", 3)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 2, previous.Number)
+	assert.EqualValues(t, model.StatusFailure, previous.Status)
+}
+
+// Approve and Decline both start from a blocked pipeline; only the first writer may
+// move it, so a declined run can never be approved into the queue.
+func TestUpdatePipelineIfStatus(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Repo), new(model.Step), new(model.Pipeline))
+	defer closer()
+
+	repo := &model.Repo{UserID: 1, FullName: "owner/test", Owner: "owner", Name: "test"}
+	require.NoError(t, store.CreateRepo(repo))
+	blocked := &model.Pipeline{RepoID: repo.ID, Status: model.StatusBlocked}
+	require.NoError(t, store.CreatePipeline(blocked))
+
+	declined := *blocked
+	declined.Status = model.StatusDeclined
+	require.NoError(t, store.UpdatePipelineIfStatus(&declined, model.StatusBlocked))
+
+	approved := *blocked
+	approved.Status = model.StatusPending
+	assert.ErrorIs(t, store.UpdatePipelineIfStatus(&approved, model.StatusBlocked), types.ErrUpdateConflict)
+
+	stored, err := store.GetPipeline(blocked.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusDeclined, stored.Status)
+}
+
+func TestOrphanedDispatchPipelines(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	const olderThan = int64(1000)
+	// Seed timestamps with auto-time disabled so updated keeps the given value.
+	_, err := store.engine.NoAutoTime().Insert([]*model.Pipeline{
+		{ID: 1, RepoID: 1, Number: 1, Status: model.StatusCreated, Updated: olderThan + 5}, // too young
+		{ID: 2, RepoID: 1, Number: 2, Status: model.StatusCreated, Updated: olderThan - 5}, // orphan
+		{ID: 3, RepoID: 1, Number: 3, Status: model.StatusBlocked, Updated: olderThan - 5}, // awaiting approval
+		{ID: 4, RepoID: 1, Number: 4, Status: model.StatusPending, Updated: olderThan - 5}, // created arm only
+		{ID: 5, RepoID: 1, Number: 5, Status: model.StatusCreated, Updated: olderThan - 1}, // orphan
+	})
+	require.NoError(t, err)
+
+	orphans, err := store.OrphanedDispatchPipelines(olderThan, 10)
+	require.NoError(t, err)
+	ids := make([]int64, 0, len(orphans))
+	for _, p := range orphans {
+		ids = append(ids, p.ID)
+	}
+	assert.Equal(t, []int64{2, 5}, ids)
+
+	orphans, err = store.OrphanedDispatchPipelines(olderThan, 1)
+	require.NoError(t, err)
+	require.Len(t, orphans, 1)
+	assert.EqualValues(t, 2, orphans[0].ID)
+}
+
+func TestPipelineDispatchClaim(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Pipeline))
+	defer closer()
+
+	_, err := store.engine.NoAutoTime().Insert(&model.Pipeline{
+		ID: 1, RepoID: 1, Number: 1, Status: model.StatusCreated, Updated: 100,
+	})
+	require.NoError(t, err)
+
+	seen, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	stale := *seen
+
+	const now = int64(5000)
+	ok, err := store.PipelineDispatchClaim(seen, now)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	stored, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	assert.EqualValues(t, now, stored.Updated)
+	assert.Equal(t, model.StatusCreated, stored.Status)
+
+	// A second claim with the stale updated value loses.
+	ok, err = store.PipelineDispatchClaim(&stale, now+1)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	// A claim after an interleaved creator write loses.
+	fresh, err := store.GetPipeline(1)
+	require.NoError(t, err)
+	creator := *fresh
+	creator.Status = model.StatusPending
+	require.NoError(t, store.UpdatePipeline(&creator))
+	ok, err = store.PipelineDispatchClaim(fresh, now+2)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	stored, err = store.GetPipeline(1)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, stored.Status)
+}
+
+func dispatchFlagStore(t *testing.T) (*storage, func()) {
+	return newTestStore(t, new(model.Pipeline), new(model.PipelineDispatchReport))
+}
+
+// dispatchClaimedAt is the claim time the dispatch flag tests use.
+const dispatchClaimedAt = int64(5000)
+
+// seedCreatedPipeline seeds a created pipeline claimed at dispatchClaimedAt.
+func seedCreatedPipeline(t *testing.T, s *storage) *model.Pipeline {
+	t.Helper()
+	p := &model.Pipeline{
+		ID: 1, RepoID: 7, Number: 3, Status: model.StatusCreated, Updated: dispatchClaimedAt,
+		Commit: "abc123", Event: model.EventPull,
+	}
+	_, err := s.engine.NoAutoTime().Insert(p)
+	require.NoError(t, err)
+	return p
+}
+
+func orphanErrors() []*pipeline_errors.PipelineError {
+	return []*pipeline_errors.PipelineError{{Type: pipeline_errors.PipelineErrorTypeGeneric, Message: "orphan"}}
+}
+
+func countReports(t *testing.T, s *storage) int64 {
+	t.Helper()
+	n, err := s.engine.Count(new(model.PipelineDispatchReport))
+	require.NoError(t, err)
+	return n
+}
+
+func TestPipelineDispatchFlag(t *testing.T) {
+	const claimedAt = dispatchClaimedAt
+
+	t.Run("matching row is flagged with a report", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+		p.Errors = orphanErrors()
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.True(t, ok)
+
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusError, stored.Status)
+		assert.Equal(t, orphanErrors(), stored.Errors)
+		assert.EqualValues(t, claimedAt, stored.Started)
+		assert.EqualValues(t, claimedAt, stored.Finished)
+		assert.EqualValues(t, claimedAt, stored.Updated)
+
+		reports := make([]*model.PipelineDispatchReport, 0)
+		require.NoError(t, s.engine.Find(&reports))
+		require.Len(t, reports, 1)
+		r := reports[0]
+		assert.EqualValues(t, p.ID, r.PipelineID)
+		assert.EqualValues(t, p.RepoID, r.RepoID)
+		assert.EqualValues(t, claimedAt, r.FlaggedAt)
+		assert.EqualValues(t, claimedAt, r.NextAttempt)
+		assert.Empty(t, r.Delivered)
+		require.NotNil(t, r.Snapshot)
+		assert.Equal(t, "abc123", r.Snapshot.Commit)
+		assert.Equal(t, model.EventPull, r.Snapshot.Event)
+		assert.EqualValues(t, 3, r.Snapshot.Number)
+	})
+
+	t.Run("interleaved creator write wins", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+		creator := *p
+		creator.Status = model.StatusPending
+		require.NoError(t, s.UpdatePipeline(&creator))
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusPending, stored.Status)
+		assert.Zero(t, stored.Finished)
+		assert.Zero(t, countReports(t, s))
+	})
+
+	t.Run("stale claim and second flag lose", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt-1)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Zero(t, countReports(t, s))
+
+		ok, err = s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.True(t, ok)
+		ok, err = s.PipelineDispatchFlag(p, claimedAt)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.EqualValues(t, 1, countReports(t, s))
+	})
+
+	t.Run("report insert error rolls back the flag", func(t *testing.T) {
+		s, closer := dispatchFlagStore(t)
+		defer closer()
+		p := seedCreatedPipeline(t, s)
+		_, err := s.engine.Insert(&model.PipelineDispatchReport{PipelineID: p.ID, RepoID: p.RepoID})
+		require.NoError(t, err)
+
+		ok, err := s.PipelineDispatchFlag(p, claimedAt)
+		assert.Error(t, err)
+		assert.False(t, ok)
+		stored, err := s.GetPipeline(p.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusCreated, stored.Status)
+	})
+}

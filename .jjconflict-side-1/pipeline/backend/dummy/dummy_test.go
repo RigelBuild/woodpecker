@@ -1,0 +1,260 @@
+// Copyright 2024 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package dummy_test
+
+import (
+	"context"
+	"io"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/dummy"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
+)
+
+func TestSmalPipelineDummyRun(t *testing.T) {
+	dummyEngine := dummy.New()
+	ctx := t.Context()
+
+	assert.True(t, dummyEngine.IsAvailable(ctx))
+	assert.EqualValues(t, "dummy", dummyEngine.Name())
+	_, err := dummyEngine.Load(ctx)
+	require.NoError(t, err)
+
+	assert.Error(t, dummyEngine.SetupWorkflow(ctx, nil, dummy.WorkflowSetupFailUUID))
+
+	t.Run("expect fail of step func with non setup workflow", func(t *testing.T) {
+		step := &types.Step{Name: "step1", UUID: "SID_1"}
+		nonExistWorkflowID := "WID_NONE"
+
+		err := dummyEngine.StartStep(ctx, step, nonExistWorkflowID)
+		assert.Error(t, err)
+
+		_, err = dummyEngine.TailStep(ctx, step, nonExistWorkflowID)
+		assert.Error(t, err)
+
+		_, err = dummyEngine.WaitStep(ctx, step, nonExistWorkflowID)
+		assert.Error(t, err)
+	})
+
+	t.Run("step exec successfully", func(t *testing.T) {
+		step := &types.Step{
+			Name:        "step1",
+			UUID:        "SID_1",
+			Type:        types.StepTypeCommands,
+			Environment: make(map[string]string),
+			Commands:    []string{"echo ja", "echo nein"},
+		}
+		workflowUUID := "WID_1"
+
+		assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, workflowUUID))
+
+		assert.NoError(t, dummyEngine.StartStep(ctx, step, workflowUUID))
+
+		reader, err := dummyEngine.TailStep(ctx, step, workflowUUID)
+		assert.NoError(t, err)
+		log, err := io.ReadAll(reader)
+		assert.NoError(t, err)
+		assert.EqualValues(t, `StepName: step1
+StepType: commands
+StepUUID: SID_1
+StepCommands:
+------------------
+echo ja
+echo nein
+------------------
+`, string(log))
+
+		state, err := dummyEngine.WaitStep(ctx, step, workflowUUID)
+		assert.NoError(t, err)
+		assert.NoError(t, state.Error)
+		assert.EqualValues(t, 0, state.ExitCode)
+
+		assert.NoError(t, dummyEngine.DestroyStep(ctx, step, workflowUUID))
+
+		assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, workflowUUID))
+	})
+
+	t.Run("step exec error", func(t *testing.T) {
+		step := &types.Step{
+			Name:        "dummy",
+			UUID:        "SID_2",
+			Type:        types.StepTypePlugin,
+			Environment: map[string]string{dummy.EnvKeyStepType: "plugin", dummy.EnvKeyStepExitCode: "1"},
+		}
+		workflowUUID := "WID_1"
+
+		assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, workflowUUID))
+
+		assert.NoError(t, dummyEngine.StartStep(ctx, step, workflowUUID))
+
+		_, err := dummyEngine.TailStep(ctx, step, workflowUUID)
+		assert.NoError(t, err)
+
+		state, err := dummyEngine.WaitStep(ctx, step, workflowUUID)
+		assert.NoError(t, err)
+		assert.NoError(t, state.Error)
+		assert.EqualValues(t, 1, state.ExitCode)
+
+		assert.NoError(t, dummyEngine.DestroyStep(ctx, step, workflowUUID))
+
+		assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, workflowUUID))
+	})
+
+	t.Run("step tail error", func(t *testing.T) {
+		step := &types.Step{
+			Name:        "dummy",
+			UUID:        "SID_2",
+			Environment: map[string]string{dummy.EnvKeyStepTailFail: "true"},
+		}
+		workflowUUID := "WID_1"
+
+		assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, workflowUUID))
+
+		assert.NoError(t, dummyEngine.StartStep(ctx, step, workflowUUID))
+
+		_, err := dummyEngine.TailStep(ctx, step, workflowUUID)
+		assert.Error(t, err)
+
+		_, err = dummyEngine.WaitStep(ctx, step, workflowUUID)
+		assert.NoError(t, err)
+
+		assert.NoError(t, dummyEngine.DestroyStep(ctx, step, workflowUUID))
+
+		assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, workflowUUID))
+	})
+
+	t.Run("step start fail", func(t *testing.T) {
+		step := &types.Step{
+			Name:        "dummy",
+			UUID:        "SID_2",
+			Type:        types.StepTypeService,
+			Environment: map[string]string{dummy.EnvKeyStepType: "service", dummy.EnvKeyStepStartFail: "true"},
+		}
+		workflowUUID := "WID_1"
+
+		assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, workflowUUID))
+
+		assert.Error(t, dummyEngine.StartStep(ctx, step, workflowUUID))
+
+		_, err := dummyEngine.TailStep(ctx, step, workflowUUID)
+		assert.Error(t, err)
+
+		state, err := dummyEngine.WaitStep(ctx, step, workflowUUID)
+		assert.Error(t, err)
+		assert.Error(t, state.Error)
+		assert.EqualValues(t, 0, state.ExitCode)
+
+		assert.Error(t, dummyEngine.DestroyStep(ctx, step, workflowUUID))
+
+		assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, workflowUUID))
+	})
+
+	t.Run("step wait fail", func(t *testing.T) {
+		step := &types.Step{
+			Name:        "dummy",
+			UUID:        "SID_2",
+			Environment: map[string]string{dummy.EnvKeyStepWaitFail: "true"},
+		}
+		workflowUUID := "WID_1"
+
+		assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, workflowUUID))
+		assert.NoError(t, dummyEngine.StartStep(ctx, step, workflowUUID))
+
+		state, err := dummyEngine.WaitStep(ctx, step, workflowUUID)
+		assert.EqualError(t, err, "expected fail to wait for step")
+		assert.Nil(t, state)
+
+		assert.NoError(t, dummyEngine.DestroyStep(ctx, step, workflowUUID))
+		assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, workflowUUID))
+	})
+
+	t.Run("step state error", func(t *testing.T) {
+		step := &types.Step{
+			Name:        "dummy",
+			UUID:        "SID_2",
+			Environment: map[string]string{dummy.EnvKeyStepStateError: "true"},
+		}
+		workflowUUID := "WID_1"
+
+		assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, workflowUUID))
+		assert.NoError(t, dummyEngine.StartStep(ctx, step, workflowUUID))
+
+		state, err := dummyEngine.WaitStep(ctx, step, workflowUUID)
+		assert.NoError(t, err)
+		require.NotNil(t, state)
+		assert.True(t, state.Exited)
+		assert.EqualValues(t, 0, state.ExitCode)
+		assert.EqualError(t, state.Error, "expected step state error")
+
+		assert.NoError(t, dummyEngine.DestroyStep(ctx, step, workflowUUID))
+		assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, workflowUUID))
+	})
+
+	t.Run("step destroy fail", func(t *testing.T) {
+		step := &types.Step{
+			Name:        "dummy",
+			UUID:        "SID_2",
+			Environment: map[string]string{dummy.EnvKeyStepDestroyFail: "true"},
+		}
+		workflowUUID := "WID_1"
+
+		assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, workflowUUID))
+		assert.NoError(t, dummyEngine.StartStep(ctx, step, workflowUUID))
+
+		state, err := dummyEngine.WaitStep(ctx, step, workflowUUID)
+		assert.NoError(t, err)
+		assert.NoError(t, state.Error)
+
+		assert.EqualError(t, dummyEngine.DestroyStep(ctx, step, workflowUUID), "expected fail to destroy step")
+		assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, workflowUUID))
+	})
+}
+
+func TestWaitStepCanceledBySleep(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+
+	dummyEngine := dummy.New()
+	_, err := dummyEngine.Load(ctx)
+	require.NoError(t, err)
+
+	const taskUUID = "cancel-task"
+	assert.NoError(t, dummyEngine.SetupWorkflow(ctx, nil, taskUUID))
+
+	step := &types.Step{
+		Name: "slow-step",
+		UUID: "slow-uuid",
+		Type: types.StepTypeCommands,
+		Environment: map[string]string{
+			dummy.EnvKeyStepSleep: "30s",
+		},
+	}
+	assert.NoError(t, dummyEngine.StartStep(ctx, step, taskUUID))
+
+	// Cancel before WaitStep — the pre-select ctx.Err() check handles this deterministically.
+	cancel(nil)
+
+	state, err := dummyEngine.WaitStep(ctx, step, taskUUID)
+	assert.NoError(t, err, "WaitStep should not return an error on cancellation")
+	assert.True(t, state.Exited, "step should be marked as exited")
+	assert.Equal(t, dummy.ExitCodeCanceled, state.ExitCode,
+		"canceled step must exit with code %d", dummy.ExitCodeCanceled)
+
+	// DestroyStep must succeed even though the step was canceled mid-sleep.
+	assert.NoError(t, dummyEngine.DestroyStep(ctx, step, taskUUID))
+	assert.NoError(t, dummyEngine.DestroyWorkflow(ctx, nil, taskUUID))
+}

@@ -1,0 +1,322 @@
+// Copyright 2022 Woodpecker Authors
+// Copyright 2018 Drone.IO Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package datastore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"xorm.io/xorm"
+	"xorm.io/xorm/contexts"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore/migration"
+)
+
+func TestWorkflowLoad(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+	defer closer()
+
+	wf := &model.Workflow{
+		PipelineID: 1,
+		PID:        1,
+		Name:       "woodpecker",
+		Children: []*model.Step{
+			{
+				UUID:       "ea6d4008-8ace-4f8a-ad03-53f1756465d9",
+				PipelineID: 1,
+				PID:        2,
+				PPID:       1,
+				State:      "success",
+			},
+			{
+				UUID:       "2bf387f7-2913-4907-814c-c9ada88707c0",
+				PipelineID: 1,
+				PID:        3,
+				PPID:       1,
+				Name:       "build",
+				State:      "success",
+			},
+		},
+	}
+	assert.NoError(t, store.WorkflowsCreate([]*model.Workflow{wf}))
+	workflowGet, err := store.WorkflowLoad(1)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 1, workflowGet.PipelineID)
+	assert.Equal(t, 1, workflowGet.PID)
+	assert.Len(t, workflowGet.Children, 0)
+}
+
+// TestWorkflowOnMetadataEditRoundTrip pins the persisted meta-gate column: a
+// workflow written with OnMetadataEdit=true reads it back true, and — the
+// migration-safety case — a LEGACY row written WITHOUT the column (via a shadow
+// struct that lacks the field) reads back false, never a garbage value. That
+// false is exactly what a pre-028 row must present so it is treated as a non-gate.
+func TestWorkflowOnMetadataEditRoundTrip(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+	defer closer()
+
+	gate := &model.Workflow{PipelineID: 1, PID: 1, Name: "gate", OnMetadataEdit: true}
+	assert.NoError(t, store.WorkflowsCreate([]*model.Workflow{gate}))
+
+	got, err := store.WorkflowLoad(gate.ID)
+	assert.NoError(t, err)
+	assert.True(t, got.OnMetadataEdit, "a persisted meta gate must read back as one")
+
+	// Legacy row: insert through a shadow struct with no OnMetadataEdit field,
+	// mapped to the same table, so the column is left at its DB default. A read
+	// through the real model must surface false, not a stray value.
+	type workflows struct {
+		ID         int64  `xorm:"pk autoincr 'id'"`
+		PipelineID int64  `xorm:"'pipeline_id'"`
+		PID        int    `xorm:"'pid'"`
+		Name       string `xorm:"'name'"`
+	}
+	legacy := &workflows{PipelineID: 1, PID: 2, Name: "legacy"}
+	inserted, err := store.engine.Table("workflows").Insert(legacy)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 1, inserted)
+
+	gotLegacy, err := store.WorkflowLoad(legacy.ID)
+	assert.NoError(t, err)
+	assert.False(t, gotLegacy.OnMetadataEdit, "a legacy row written without the column must read back false")
+}
+
+func TestWorkflowAttemptsAndDetachedRoundTrip(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+	defer closer()
+
+	wf := &model.Workflow{
+		PipelineID: 1,
+		PID:        1,
+		Attempts:   2,
+		Children: []*model.Step{{
+			UUID:       "ea6d4008-8ace-4f8a-ad03-53f1756465d9",
+			PipelineID: 1,
+			PID:        2,
+			PPID:       1,
+			Detached:   true,
+		}},
+	}
+	require.NoError(t, store.WorkflowsCreate([]*model.Workflow{wf}))
+
+	got, err := store.WorkflowGetTree(&model.Pipeline{ID: 1})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 2, got[0].Attempts)
+	require.Len(t, got[0].Children, 1)
+	assert.True(t, got[0].Children[0].Detached)
+}
+
+type legacyWorkflowSchema struct {
+	ID         int64             `xorm:"pk autoincr 'id'"`
+	PipelineID int64             `xorm:"UNIQUE(s) INDEX 'pipeline_id'"`
+	PID        int               `xorm:"UNIQUE(s) 'pid'"`
+	State      model.StatusValue `xorm:"state"`
+}
+
+func (legacyWorkflowSchema) TableName() string { return "workflows" }
+
+type legacyStepSchema struct {
+	ID         int64             `xorm:"pk autoincr 'id'"`
+	UUID       string            `xorm:"INDEX 'uuid'"`
+	PipelineID int64             `xorm:"UNIQUE(s) INDEX 'pipeline_id'"`
+	PID        int               `xorm:"UNIQUE(s) 'pid'"`
+	PPID       int               `xorm:"ppid"`
+	State      model.StatusValue `xorm:"state"`
+}
+
+func (legacyStepSchema) TableName() string { return "steps" }
+
+func TestWorkflowSyncAddsColumnsForLegacyRows(t *testing.T) {
+	engine, err := xorm.NewEngine("sqlite3", ":memory:")
+	require.NoError(t, err)
+	engine.SetMaxOpenConns(1)
+	engine.SetMaxIdleConns(1)
+	t.Cleanup(func() { require.NoError(t, engine.Close()) })
+
+	require.NoError(t, engine.Sync(new(legacyWorkflowSchema), new(legacyStepSchema)))
+	workflow := &legacyWorkflowSchema{PipelineID: 1, PID: 1, State: model.StatusPending}
+	_, err = engine.Insert(workflow)
+	require.NoError(t, err)
+	step := &legacyStepSchema{UUID: "ea6d4008-8ace-4f8a-ad03-53f1756465d9", PipelineID: 1, PID: 2, PPID: 1, State: model.StatusPending}
+	_, err = engine.Insert(step)
+	require.NoError(t, err)
+
+	require.NoError(t, migration.Migrate(t.Context(), engine, true))
+	store := storage{engine: engine}
+	gotWorkflow, err := store.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	gotStep, err := store.StepLoad(step.PipelineID, step.ID)
+	require.NoError(t, err)
+	assert.Zero(t, gotWorkflow.Attempts)
+	assert.False(t, gotStep.Detached)
+}
+
+func TestWorkflowGetTree(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+	defer closer()
+
+	wf := &model.Workflow{
+		PipelineID: 1,
+		PID:        1,
+		Name:       "woodpecker",
+		DependsOn:  []string{"lint"},
+		Children: []*model.Step{
+			{
+				UUID:       "ea6d4008-8ace-4f8a-ad03-53f1756465d9",
+				PipelineID: 1,
+				PID:        2,
+				PPID:       1,
+				Name:       "test",
+				State:      "success",
+			},
+			{
+				UUID:       "2bf387f7-2913-4907-814c-c9ada88707c0",
+				PipelineID: 1,
+				PID:        3,
+				PPID:       1,
+				Name:       "build",
+				DependsOn:  []string{"test"},
+				State:      "success",
+			},
+		},
+	}
+	assert.NoError(t, store.WorkflowsCreate([]*model.Workflow{wf}))
+
+	workflowsGet, err := store.WorkflowGetTree(&model.Pipeline{ID: 1})
+	assert.NoError(t, err)
+	assert.Len(t, workflowsGet, 1)
+	workflowGet := workflowsGet[0]
+	assert.Equal(t, "woodpecker", workflowGet.Name)
+	assert.Equal(t, []string{"lint"}, workflowGet.DependsOn)
+	assert.Len(t, workflowGet.Children, 2)
+	assert.Equal(t, 2, workflowGet.Children[0].PID)
+	assert.Equal(t, 3, workflowGet.Children[1].PID)
+	assert.Equal(t, []string{"test"}, workflowGet.Children[1].DependsOn)
+}
+
+func TestWorkflowSupersedePendingValidatesClosureAndRollsBack(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow), new(model.Task))
+	defer closer()
+	workflows := []*model.Workflow{
+		{PipelineID: 1, PID: 1, Name: "producer", State: model.StatusPending, Children: []*model.Step{{PipelineID: 1, PID: 2, PPID: 1, Name: "producer-step", State: model.StatusPending}}},
+		{PipelineID: 1, PID: 2, Name: "consumer", State: model.StatusPending, DependsOn: []string{"producer"}, Children: []*model.Step{{PipelineID: 1, PID: 3, PPID: 2, Name: "consumer-step", State: model.StatusPending}}},
+		{PipelineID: 1, PID: 3, Name: "unrelated", State: model.StatusRunning},
+	}
+	require.NoError(t, s.WorkflowsCreate(workflows))
+	require.NoError(t, s.TaskInsertBatch([]*model.Task{{ID: "1"}, {ID: "2"}}))
+	assert.ErrorIs(t, s.WorkflowSupersedePending(1, []int64{workflows[0].ID}, 99), store.ErrPendingConflict)
+	require.NoError(t, s.WorkflowSupersedePending(1, []int64{workflows[0].ID, workflows[1].ID}, 99))
+	for _, id := range []int64{workflows[0].ID, workflows[1].ID} {
+		got, err := s.WorkflowLoad(id)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusSkipped, got.State)
+		require.NotNil(t, got.SupersededBy)
+		assert.Equal(t, int64(99), *got.SupersededBy)
+	}
+	steps, err := s.StepList(1)
+	require.NoError(t, err)
+	for _, step := range steps {
+		assert.Equal(t, model.StatusCanceled, step.State)
+	}
+	tasks, err := s.TaskList()
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+
+	failed := &model.Workflow{
+		PipelineID: 2, PID: 1, Name: "failed", State: model.StatusPending,
+		Children: []*model.Step{{PipelineID: 2, PID: 1, PPID: 1, Name: "step", State: model.StatusPending}},
+	}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{failed}))
+	require.NoError(t, s.TaskInsert(&model.Task{ID: fmt.Sprint(failed.ID)}))
+	hook := &failWorkflowUpdateHook{}
+	s.engine.AddHook(hook)
+	err = s.WorkflowSupersedePending(2, []int64{failed.ID}, 100)
+	assert.Error(t, err)
+	hook.disabled = true
+	got, err := s.WorkflowLoad(failed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, got.State)
+	steps, err = s.StepList(2)
+	require.NoError(t, err)
+	require.Len(t, steps, 1)
+	assert.Equal(t, model.StatusPending, steps[0].State)
+	tasks, err = s.TaskList()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, fmt.Sprint(failed.ID), tasks[0].ID)
+}
+
+func TestWorkflowSupersedePendingAllowsLeaf(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow), new(model.Task))
+	defer closer()
+	workflows := []*model.Workflow{
+		{PipelineID: 1, PID: 1, Name: "root", State: model.StatusPending},
+		{PipelineID: 1, PID: 2, Name: "leaf", State: model.StatusPending, DependsOn: []string{"root"}},
+	}
+	require.NoError(t, s.WorkflowsCreate(workflows))
+	require.NoError(t, s.WorkflowSupersedePending(1, []int64{workflows[1].ID}, 2))
+	root, err := s.WorkflowLoad(workflows[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, root.State)
+	assert.Nil(t, root.SupersededBy)
+	leaf, err := s.WorkflowLoad(workflows[1].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSkipped, leaf.State)
+	assert.Equal(t, int64(2), *leaf.SupersededBy)
+}
+
+type failWorkflowUpdateHook struct{ disabled bool }
+
+func (hook *failWorkflowUpdateHook) BeforeProcess(h *contexts.ContextHook) (context.Context, error) {
+	if !hook.disabled && strings.Contains(strings.ToLower(h.SQL), "update") && strings.Contains(strings.ToLower(h.SQL), "workflows") {
+		return h.Ctx, errors.New("injected workflow update failure")
+	}
+	return h.Ctx, nil
+}
+
+func (*failWorkflowUpdateHook) AfterProcess(*contexts.ContextHook) error { return nil }
+
+func TestWorkflowUpdate(t *testing.T) {
+	store, closer := newTestStore(t, new(model.Step), new(model.Pipeline), new(model.Workflow))
+	defer closer()
+
+	wf := &model.Workflow{
+		PipelineID: 1,
+		PID:        1,
+		Name:       "woodpecker",
+		State:      "pending",
+	}
+	assert.NoError(t, store.WorkflowsCreate([]*model.Workflow{wf}))
+	workflowGet, err := store.WorkflowLoad(1)
+	assert.NoError(t, err)
+
+	assert.Equal(t, model.StatusValue("pending"), workflowGet.State)
+
+	wf.State = "success"
+
+	assert.NoError(t, store.WorkflowUpdate(wf))
+	workflowGet, err = store.WorkflowLoad(1)
+	assert.NoError(t, err)
+	assert.Equal(t, model.StatusValue("success"), workflowGet.State)
+}

@@ -1,0 +1,435 @@
+// Copyright 2024 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package bitbucketdatacenter
+
+import (
+	"net/url"
+	"testing"
+	"time"
+
+	"github.com/neticdk/go-bitbucket/bitbucket"
+	"github.com/stretchr/testify/assert"
+	"golang.org/x/oauth2"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+)
+
+func TestConvertStatus(t *testing.T) {
+	tests := []struct {
+		from model.StatusValue
+		to   bitbucket.BuildStatusState
+	}{
+		{
+			from: model.StatusPending,
+			to:   bitbucket.BuildStatusStateInProgress,
+		},
+		{
+			from: model.StatusRunning,
+			to:   bitbucket.BuildStatusStateInProgress,
+		},
+		{
+			from: model.StatusCreated,
+			to:   bitbucket.BuildStatusStateInProgress,
+		},
+		{
+			from: model.StatusSuccess,
+			to:   bitbucket.BuildStatusStateSuccessful,
+		},
+		{
+			from: model.StatusFailure,
+			to:   bitbucket.BuildStatusStateFailed,
+		},
+		{
+			from: model.StatusSkipped,
+			to:   bitbucket.BuildStatusStateFailed,
+		},
+		{
+			from: model.StatusCanceled,
+			to:   bitbucket.BuildStatusStateFailed,
+		},
+		{
+			from: model.StatusBlocked,
+			to:   bitbucket.BuildStatusStateFailed,
+		},
+		{
+			from: model.StatusValue("other"),
+			to:   bitbucket.BuildStatusStateFailed,
+		},
+	}
+	for _, tt := range tests {
+		to := convertStatus(tt.from)
+		assert.Equal(t, tt.to, to)
+	}
+}
+
+func TestConvertRepo(t *testing.T) {
+	from := &bitbucket.Repository{
+		ID:   uint64(1234),
+		Slug: "REPO",
+		Project: &bitbucket.Project{
+			Key: "PRJ",
+		},
+		Links: map[string][]bitbucket.Link{
+			"clone": {
+				{
+					Name: "http",
+					Href: "https://user@git.domain/clone",
+				},
+			},
+			"self": {
+				{
+					Href: "https://git.domain/self",
+				},
+			},
+		},
+	}
+	perm := &model.Perm{}
+	to := convertRepo(from, perm, "main")
+
+	assert.Equal(t, &model.Repo{
+		ForgeRemoteID: model.ForgeRemoteID("1234"),
+		Name:          "REPO",
+		Owner:         "PRJ",
+		Branch:        "main",
+		FullName:      "PRJ/REPO",
+		Perm:          perm,
+		Clone:         "https://git.domain/clone",
+		ForgeURL:      "https://git.domain/self",
+		PREnabled:     true,
+		IsSCMPrivate:  true,
+	}, to)
+}
+
+func TestConvertRepositoryPushEvent(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		from *bitbucket.RepositoryPushEvent
+		to   *model.Pipeline
+	}{
+		{
+			from: &bitbucket.RepositoryPushEvent{},
+			to:   nil,
+		},
+		{
+			from: &bitbucket.RepositoryPushEvent{
+				Changes: []bitbucket.RepositoryPushEventChange{
+					{
+						FromHash: "1234567890abcdef",
+						ToHash:   "0000000000000000000000000000000000000000",
+					},
+				},
+			},
+			to: nil,
+		},
+		{
+			from: &bitbucket.RepositoryPushEvent{
+				Changes: []bitbucket.RepositoryPushEventChange{
+					{
+						FromHash: "0000000000000000000000000000000000000000",
+						ToHash:   "1234567890abcdef",
+						Type:     bitbucket.RepositoryPushEventChangeTypeDelete,
+					},
+				},
+			},
+			to: nil,
+		},
+		{
+			from: &bitbucket.RepositoryPushEvent{
+				Date: bitbucket.ISOTime(now),
+				Actor: bitbucket.User{
+					Name:  "John Doe",
+					Email: "john.doe@mail.com",
+					Slug:  "john.doe_mail.com",
+				},
+				Repository: bitbucket.Repository{
+					Slug: "REPO",
+					Project: &bitbucket.Project{
+						Key: "PRJ",
+					},
+				},
+				Changes: []bitbucket.RepositoryPushEventChange{
+					{
+						Ref: bitbucket.RepositoryPushEventRef{
+							ID:        "refs/head/branch",
+							DisplayID: "branch",
+						},
+						RefId:  "refs/head/branch",
+						ToHash: "1234567890abcdef",
+					},
+				},
+			},
+			to: &model.Pipeline{
+				Commit:    "1234567890abcdef",
+				Branch:    "branch",
+				Message:   "",
+				Avatar:    "https://base.url/users/john.doe_mail.com/avatar.png",
+				Author:    "John Doe",
+				Email:     "john.doe@mail.com",
+				Timestamp: now.UTC().Unix(),
+				Ref:       "refs/head/branch",
+				ForgeURL:  "https://base.url/projects/PRJ/repos/REPO/commits/1234567890abcdef",
+				Event:     model.EventPush,
+			},
+		},
+	}
+	for _, tt := range tests {
+		to := convertRepositoryPushEvent(tt.from, "https://base.url")
+		assert.Equal(t, tt.to, to)
+	}
+}
+
+func TestConvertPullRequestEvent(t *testing.T) {
+	now := time.Now()
+	from := &bitbucket.PullRequestEvent{
+		Date:     bitbucket.ISOTime(now),
+		EventKey: bitbucket.EventKeyPullRequestFrom,
+		Actor: bitbucket.User{
+			Name:  "John Doe",
+			Email: "john.doe@mail.com",
+			Slug:  "john.doe_mail.com",
+		},
+		PullRequest: bitbucket.PullRequest{
+			ID:    123,
+			Title: "my title",
+			Source: bitbucket.PullRequestRef{
+				ID:        "refs/head/branch",
+				DisplayID: "branch",
+				Latest:    "1234567890abcdef",
+				Repository: bitbucket.Repository{
+					Slug: "REPO",
+					Project: &bitbucket.Project{
+						Key: "PRJ",
+					},
+				},
+			},
+			Target: bitbucket.PullRequestRef{
+				ID:        "refs/head/main",
+				DisplayID: "main",
+				Latest:    "abcdef1234567890",
+				Repository: bitbucket.Repository{
+					Slug: "REPO",
+					Project: &bitbucket.Project{
+						Key: "PRJ",
+					},
+				},
+			},
+		},
+	}
+	to := convertPullRequestEvent(from, "https://base.url")
+	assert.Equal(t, &model.Pipeline{
+		Commit:    "1234567890abcdef",
+		Branch:    "branch",
+		Avatar:    "https://base.url/users/john.doe_mail.com/avatar.png",
+		Author:    "John Doe",
+		Email:     "john.doe@mail.com",
+		Timestamp: now.UTC().Unix(),
+		Ref:       "refs/pull-requests/123/from",
+		ForgeURL:  "https://base.url/projects/PRJ/repos/REPO/commits/1234567890abcdef",
+		Event:     model.EventPull,
+		Refspec:   "branch:main",
+		Title:     "my title",
+		Message:   "my title",
+	}, to)
+}
+
+func TestConvertPullRequestCloseEvent(t *testing.T) {
+	now := time.Now()
+	from := &bitbucket.PullRequestEvent{
+		Date:     bitbucket.ISOTime(now),
+		EventKey: bitbucket.EventKeyPullRequestMerged,
+		Actor: bitbucket.User{
+			Name:  "John Doe",
+			Email: "john.doe@mail.com",
+			Slug:  "john.doe_mail.com",
+		},
+		PullRequest: bitbucket.PullRequest{
+			ID:    123,
+			Title: "my title",
+			Source: bitbucket.PullRequestRef{
+				ID:        "refs/head/branch",
+				DisplayID: "branch",
+				Latest:    "1234567890abcdef",
+				Repository: bitbucket.Repository{
+					Slug: "REPO",
+					Project: &bitbucket.Project{
+						Key: "PRJ",
+					},
+				},
+			},
+			Target: bitbucket.PullRequestRef{
+				ID:        "refs/head/main",
+				DisplayID: "main",
+				Latest:    "abcdef1234567890",
+				Repository: bitbucket.Repository{
+					Slug: "REPO",
+					Project: &bitbucket.Project{
+						Key: "PRJ",
+					},
+				},
+			},
+		},
+	}
+	to := convertPullRequestEvent(from, "https://base.url")
+	assert.Equal(t, &model.Pipeline{
+		Commit:    "1234567890abcdef",
+		Branch:    "branch",
+		Avatar:    "https://base.url/users/john.doe_mail.com/avatar.png",
+		Author:    "John Doe",
+		Email:     "john.doe@mail.com",
+		Timestamp: now.UTC().Unix(),
+		Ref:       "refs/pull-requests/123/from",
+		ForgeURL:  "https://base.url/projects/PRJ/repos/REPO/commits/1234567890abcdef",
+		Event:     model.EventPullClosed,
+		Refspec:   "branch:main",
+		Title:     "my title",
+		Message:   "my title",
+	}, to)
+}
+
+func TestAuthorLabel(t *testing.T) {
+	tests := []struct {
+		from string
+		to   string
+	}{
+		{
+			from: "Some Short Author",
+			to:   "Some Short Author",
+		},
+		{
+			from: "Some Very Long Author That May Include Multiple Names Here",
+			//nolint:misspell
+			to: "Some Very Long Author That May Includ...",
+		},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.to, authorLabel(tt.from))
+	}
+}
+
+func TestConvertUser(t *testing.T) {
+	from := &bitbucket.User{
+		Slug:  "slug",
+		Email: "john.doe@mail.com",
+		ID:    1,
+	}
+	to := convertUser(from, "https://base.url")
+	assert.Equal(t, &model.User{
+		Login:         "slug",
+		Avatar:        "https://base.url/users/slug/avatar.png",
+		Email:         "john.doe@mail.com",
+		ForgeRemoteID: "1",
+	}, to)
+}
+
+func TestConvertProjectsToTeams(t *testing.T) {
+	tests := []struct {
+		projects []*bitbucket.Project
+		baseURL  string
+		expected []*model.Team
+	}{
+		{
+			projects: []*bitbucket.Project{
+				{
+					Key: "PRJ1",
+				},
+				{
+					Key: "PRJ2",
+				},
+			},
+			baseURL: "https://base.url",
+			expected: []*model.Team{
+				{
+					Login:  "PRJ1",
+					Avatar: "https://base.url/projects/PRJ1/avatar.png",
+				},
+				{
+					Login:  "PRJ2",
+					Avatar: "https://base.url/projects/PRJ2/avatar.png",
+				},
+			},
+		},
+		{
+			projects: []*bitbucket.Project{},
+			baseURL:  "https://base.url",
+			expected: []*model.Team{},
+		},
+	}
+
+	for _, tt := range tests {
+		// Parse the baseURL string into a *url.URL
+		parsedURL, err := url.Parse(tt.baseURL)
+		assert.NoError(t, err)
+
+		mockClient := &bitbucket.Client{BaseURL: parsedURL}
+		actual := convertProjectsToTeams(tt.projects, mockClient)
+
+		assert.Equal(t, tt.expected, actual)
+	}
+}
+
+func TestConvertListOptions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("paged computes limit and start", func(t *testing.T) {
+		t.Parallel()
+		got := convertListOptions(&model.ListOptions{Page: 3, PerPage: 50})
+		assert.Equal(t, uint(50), got.Limit)
+		assert.Equal(t, uint(100), got.Start)
+	})
+
+	t.Run("first page has zero start", func(t *testing.T) {
+		t.Parallel()
+		got := convertListOptions(&model.ListOptions{Page: 1, PerPage: 25})
+		assert.Equal(t, uint(0), got.Start)
+	})
+}
+
+func TestUpdateUserCredentials(t *testing.T) {
+	t.Parallel()
+
+	u := &model.User{}
+	expiry := time.Unix(1700000000, 0)
+	updateUserCredentials(u, &oauth2.Token{
+		AccessToken:  "access",
+		RefreshToken: "refresh",
+		Expiry:       expiry,
+	})
+
+	assert.Equal(t, "access", u.AccessToken)
+	assert.Equal(t, "refresh", u.RefreshToken)
+	assert.Equal(t, expiry.UTC().Unix(), u.Expiry)
+}
+
+func TestAnonymizeLink(t *testing.T) {
+	t.Parallel()
+
+	t.Run("strips user info", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "https://example.com/repo.git",
+			anonymizeLink("https://user:pass@example.com/repo.git"))
+	})
+
+	t.Run("passes link through unchanged when no user info", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "https://example.com/repo.git",
+			anonymizeLink("https://example.com/repo.git"))
+	})
+
+	t.Run("returns original on parse error", func(t *testing.T) {
+		t.Parallel()
+		bad := "://not a url"
+		assert.Equal(t, bad, anonymizeLink(bad))
+	})
+}

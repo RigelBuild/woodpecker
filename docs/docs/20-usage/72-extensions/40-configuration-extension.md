@@ -48,6 +48,7 @@ class Request {
   repo: Repo;
   pipeline: Pipeline;
   netrc?: Netrc; // only included when netrc sending is enabled (see above)
+  restart: boolean; // true when the config is fetched to restart an existing pipeline
   configuration?: {
     // list of configurations. Not send if there was none.
     name: string; // filename of the configuration file
@@ -131,6 +132,7 @@ Example request:
     "updated_at": 0,
     "verified": false
   },
+  "restart": false,
   "configuration": [
     {
       "name": ".woodpecker.yaml",

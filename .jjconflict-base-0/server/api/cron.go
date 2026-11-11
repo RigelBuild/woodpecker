@@ -1,0 +1,322 @@
+// Copyright 2022 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package api
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server"
+	cron_scheduler "go.woodpecker-ci.org/woodpecker/v3/server/cron"
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
+	"go.woodpecker-ci.org/woodpecker/v3/server/router/middleware/session"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
+)
+
+// GetCron
+//
+//	@Summary	Get a cron job
+//	@Router		/repos/{repo_id}/cron/{cron} [get]
+//	@Produce	json
+//	@Success	200	{object}	Cron
+//	@Tags		Repository cron jobs
+//	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param		repo_id			path	int		true	"the repository id"
+//	@Param		cron			path	string	true	"the cron job id"
+func GetCron(c *gin.Context) {
+	repo := session.Repo(c)
+	id, err := strconv.ParseInt(c.Param("cron"), 10, 64)
+	if err != nil {
+		c.String(http.StatusBadRequest, "Error parsing cron id. %s", err)
+		return
+	}
+
+	cron, err := store.FromContext(c).CronFind(repo, id)
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, cron)
+}
+
+// RunCron
+//
+//	@Summary	Start a cron job now
+//	@Router		/repos/{repo_id}/cron/{cron} [post]
+//	@Produce	json
+//	@Success	200	{object}	Pipeline
+//	@Tags		Repository cron jobs
+//	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param		repo_id			path	int		true	"the repository id"
+//	@Param		cron			path	string	true	"the cron job id"
+func RunCron(c *gin.Context) {
+	repo := session.Repo(c)
+	_store := store.FromContext(c)
+	id, err := strconv.ParseInt(c.Param("cron"), 10, 64)
+	if err != nil {
+		c.String(http.StatusBadRequest, "Error parsing cron id. %s", err)
+		return
+	}
+
+	cron, err := _store.CronFind(repo, id)
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+
+	repo, newPipeline, err := cron_scheduler.CreatePipeline(c, _store, cron)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error creating pipeline for cron %q. %s", id, err)
+		return
+	}
+
+	pl, err := pipeline.Create(c, _store, repo, newPipeline)
+	if err != nil {
+		handlePipelineErr(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, pl)
+}
+
+// PostCron
+//
+//	@Summary	Create a cron job
+//	@Router		/repos/{repo_id}/cron [post]
+//	@Produce	json
+//	@Success	200	{object}	Cron
+//	@Tags		Repository cron jobs
+//	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param		repo_id			path	int		true	"the repository id"
+//	@Param		cronJob			body	Cron	true	"the new cron job"
+func PostCron(c *gin.Context) {
+	repo := session.Repo(c)
+	user := session.User(c)
+	_store := store.FromContext(c)
+	_forge, err := server.Config.Services.Manager.ForgeFromRepo(repo)
+	if err != nil {
+		log.Error().Err(err).Msg("Cannot get forge from repo")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	in := new(model.Cron)
+	if err := c.Bind(in); err != nil {
+		c.String(http.StatusBadRequest, "Error parsing request. %s", err)
+		return
+	}
+	cron := &model.Cron{
+		RepoID:    repo.ID,
+		Name:      strings.TrimSpace(in.Name),
+		CreatorID: user.ID,
+		Schedule:  strings.TrimSpace(in.Schedule),
+		Timezone:  strings.TrimSpace(in.Timezone),
+		Branch:    strings.TrimSpace(in.Branch),
+		Variables: in.Variables,
+		Enabled:   in.Enabled,
+	}
+	if cron.Timezone == "" {
+		cron.Timezone = "UTC"
+	}
+	if err := cron.Validate(); err != nil {
+		c.String(http.StatusUnprocessableEntity, "Error inserting cron. validate failed: %s", err)
+		return
+	}
+
+	nextExec, err := cron_scheduler.CalcNewNext(cron.Schedule, cron.Timezone, time.Now())
+	if err != nil {
+		c.String(http.StatusBadRequest, "Error inserting cron. schedule could not parsed: %s", err)
+		return
+	}
+	cron.NextExec = nextExec.Unix()
+
+	if in.Branch != "" {
+		// check if branch exists on forge
+		_, err := _forge.BranchHead(c, user, repo, cron.Branch)
+		if err != nil {
+			c.String(http.StatusBadRequest, "Error inserting cron. branch not resolved: %s", err)
+			return
+		}
+	}
+
+	if err := _store.CronCreate(cron); err != nil {
+		if errors.Is(err, types.ErrInsertDuplicateDetected) {
+			c.String(http.StatusConflict, "cron with this exists for this repo already")
+		} else {
+			c.String(http.StatusInternalServerError, "Error inserting cron %q. %s", in.Name, err)
+		}
+		return
+	}
+	c.JSON(http.StatusOK, cron)
+}
+
+// PatchCron
+//
+//	@Summary	Update a cron job
+//	@Router		/repos/{repo_id}/cron/{cron} [patch]
+//	@Produce	json
+//	@Success	200	{object}	Cron
+//	@Tags		Repository cron jobs
+//	@Param		Authorization	header	string		true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param		repo_id			path	int			true	"the repository id"
+//	@Param		cron			path	string		true	"the cron job id"
+//	@Param		cronJob			body	CronPatch	true	"the cron job data"
+func PatchCron(c *gin.Context) {
+	repo := session.Repo(c)
+	user := session.User(c)
+	_store := store.FromContext(c)
+	_forge, err := server.Config.Services.Manager.ForgeFromRepo(repo)
+	if err != nil {
+		log.Error().Err(err).Msg("Cannot get forge from repo")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	id, err := strconv.ParseInt(c.Param("cron"), 10, 64)
+	if err != nil {
+		c.String(http.StatusBadRequest, "Error parsing cron id. %s", err)
+		return
+	}
+
+	in := new(model.CronPatch)
+	err = c.Bind(in)
+	if err != nil {
+		c.String(http.StatusBadRequest, "Error parsing request. %s", err)
+		return
+	}
+
+	cron, err := _store.CronFind(repo, id)
+	if err != nil {
+		handleDBError(c, err)
+		return
+	}
+	if in.Branch != nil {
+		if branch := strings.TrimSpace(*in.Branch); branch != "" {
+			// check if branch exists on forge
+			_, err := _forge.BranchHead(c, user, repo, branch)
+			if err != nil {
+				c.String(http.StatusBadRequest, "Error inserting cron. branch not resolved: %s", err)
+				return
+			}
+			cron.Branch = branch
+		}
+	}
+	if in.Timezone != nil {
+		if tz := strings.TrimSpace(*in.Timezone); tz != "" {
+			nextExec, err := cron_scheduler.CalcNewNext(cron.Schedule, tz, time.Now())
+			if err != nil {
+				c.String(http.StatusBadRequest, "Error inserting cron. schedule could not parsed: %s", err)
+				return
+			}
+			cron.Timezone = tz
+			cron.NextExec = nextExec.Unix()
+		}
+	}
+	if in.Schedule != nil {
+		if schedule := strings.TrimSpace(*in.Schedule); schedule != "" {
+			nextExec, err := cron_scheduler.CalcNewNext(schedule, cron.Timezone, time.Now())
+			if err != nil {
+				c.String(http.StatusBadRequest, "Error inserting cron. schedule could not parsed: %s", err)
+				return
+			}
+			cron.Schedule = schedule
+			cron.NextExec = nextExec.Unix()
+		}
+	}
+	if in.Name != nil {
+		if name := strings.TrimSpace(*in.Name); name != "" {
+			cron.Name = name
+		}
+	}
+	if in.Enabled != nil {
+		cron.Enabled = *in.Enabled
+		// if we re-enable a cron we have to calc NextExec because it was not while disabled
+		if cron.Enabled {
+			nextExec, err := cron_scheduler.CalcNewNext(cron.Schedule, cron.Timezone, time.Now())
+			if err != nil {
+				c.String(http.StatusInternalServerError, "Cron schedule could not parsed: %s", err)
+				return
+			}
+			cron.NextExec = nextExec.Unix()
+		}
+	}
+	if in.Variables != nil {
+		cron.Variables = in.Variables
+	}
+	cron.CreatorID = user.ID
+
+	if err := cron.Validate(); err != nil {
+		c.String(http.StatusUnprocessableEntity, "Error inserting cron. validate failed: %s", err)
+		return
+	}
+	if err := _store.CronUpdate(repo, cron); err != nil {
+		c.String(http.StatusInternalServerError, "Error updating cron %q. %s", in.Name, err)
+		return
+	}
+	c.JSON(http.StatusOK, cron)
+}
+
+// GetCronList
+//
+//	@Summary	List cron jobs
+//	@Router		/repos/{repo_id}/cron [get]
+//	@Produce	json
+//	@Success	200	{array}	Cron
+//	@Tags		Repository cron jobs
+//	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param		repo_id			path	int		true	"the repository id"
+//	@Param		page			query	int		false	"for response pagination, page offset number"	default(1)
+//	@Param		perPage			query	int		false	"for response pagination, max items per page"	default(50)
+func GetCronList(c *gin.Context) {
+	repo := session.Repo(c)
+	list, err := store.FromContext(c).CronList(repo, session.Pagination(c).All())
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error getting cron list. %s", err)
+		return
+	}
+	c.JSON(http.StatusOK, list)
+}
+
+// DeleteCron
+//
+//	@Summary	Delete a cron job
+//	@Router		/repos/{repo_id}/cron/{cron} [delete]
+//	@Produce	plain
+//	@Success	204
+//	@Tags		Repository cron jobs
+//	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param		repo_id			path	int		true	"the repository id"
+//	@Param		cron			path	string	true	"the cron job id"
+func DeleteCron(c *gin.Context) {
+	repo := session.Repo(c)
+	id, err := strconv.ParseInt(c.Param("cron"), 10, 64)
+	if err != nil {
+		c.String(http.StatusBadRequest, "Error parsing cron id. %s", err)
+		return
+	}
+	if err := store.FromContext(c).CronDelete(repo, id); err != nil {
+		handleDBError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}

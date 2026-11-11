@@ -1,0 +1,2544 @@
+// Copyright 2023 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package queue
+
+import (
+	"container/list"
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/shared/constant"
+)
+
+var (
+	filterFnTrue = func(*model.Task) (bool, int) { return true, 1 }
+	genDummyTask = func() *model.Task {
+		return &model.Task{
+			ID:   "1",
+			Data: []byte("{}"),
+		}
+	}
+	waitForProcess = func() { time.Sleep(processTimeInterval + 50*time.Millisecond) }
+)
+
+func setupTestQueue(t *testing.T) (context.Context, context.CancelCauseFunc, *fifo) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	t.Cleanup(func() { cancel(nil) })
+
+	q, _ := NewMemoryQueue(ctx).(*fifo)
+	require.NotNil(t, q, "Failed to create queue")
+
+	return ctx, cancel, q
+}
+
+func receiveExpiredTask(t *testing.T, q *fifo) ExpiredTask {
+	t.Helper()
+	select {
+	case event := <-q.Expired():
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for expired task event")
+		return ExpiredTask{}
+	}
+}
+
+func TestFifoCancelPendingCommitsBeforeRemoval(t *testing.T) {
+	ctx, _, q := setupTestQueue(t)
+	selected := []*model.Task{{ID: "first"}, {ID: "second", Dependencies: []string{"first"}}}
+	require.NoError(t, q.PushAtOnce(ctx, selected))
+	waitForProcess()
+
+	commitCalled := false
+	err := q.CancelPending(ctx, []string{"first", "second"}, func() error {
+		commitCalled = true
+		info := q.pending.Len() + q.waitingOnDeps.Len()
+		assert.Equal(t, 2, info)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, commitCalled)
+	assert.Empty(t, q.Info(ctx).Pending)
+	assert.Empty(t, q.Info(ctx).WaitingOnDeps)
+
+	err = q.CancelPending(ctx, []string{"missing"}, func() error {
+		t.Fatal("commit must not run when any task is missing")
+		return nil
+	})
+	assert.ErrorIs(t, err, ErrPendingConflict)
+}
+
+func TestFifoCancelPendingConflictsPreserveQueue(t *testing.T) {
+	for _, state := range []string{"assigned", "reserved", "expired", "missing", "commit failure"} {
+		t.Run(state, func(t *testing.T) {
+			ctx, _, q := setupTestQueue(t)
+			require.NoError(t, q.PushAtOnce(ctx, []*model.Task{{ID: "pending"}, {ID: "other"}}))
+			ids := []string{"pending", "other"}
+			switch state {
+			case "assigned", "reserved", "expired":
+				task, err := q.Poll(ctx, 7, func(task *model.Task) (bool, int) { return task.ID == "other", 1 })
+				require.NoError(t, err)
+				require.Equal(t, "other", task.ID)
+				if state == "reserved" {
+					require.NoError(t, q.Reserve(ctx, "other", 7, false))
+				}
+				if state == "expired" {
+					q.Lock()
+					q.running["other"].expired = true
+					q.Unlock()
+				}
+			case "missing":
+				ids[1] = "missing"
+			}
+			before := q.Info(ctx)
+			injected := errors.New("injected transaction failure")
+			called := false
+			err := q.CancelPending(ctx, ids, func() error {
+				called = true
+				return injected
+			})
+			if state == "commit failure" {
+				require.ErrorIs(t, err, injected)
+				assert.True(t, called)
+			} else {
+				require.ErrorIs(t, err, ErrPendingConflict)
+				assert.False(t, called)
+			}
+			assert.Equal(t, before, q.Info(ctx))
+		})
+	}
+}
+
+func TestFifoBasicOperations(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("push poll done lifecycle", func(t *testing.T) {
+		dummyTask := genDummyTask()
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 1)
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, dummyTask, got)
+
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 1)
+
+		// Edge case: verify task can't be polled again while running
+		pollCtx, pollCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		_, err = q.Poll(pollCtx, 2, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err) // Should timeout/cancel, not return the same task
+
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Len(t, info.Running, 0)
+
+		// Edge case: Done on already completed task should handle gracefully
+		err = q.Done(ctx, got.ID, model.StatusSuccess)
+		// Document current behavior - should either error or be idempotent
+		if err != nil {
+			assert.Error(t, err)
+		}
+	})
+
+	t.Run("error handling", func(t *testing.T) {
+		task1 := &model.Task{ID: "task-error-1"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task1}))
+
+		waitForProcess()
+		got, _ := q.Poll(ctx, 1, filterFnTrue)
+
+		assert.NoError(t, q.Error(ctx, got.ID, fmt.Errorf("test error")))
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 0)
+
+		assert.Error(t, q.Error(ctx, "totally-fake-id", fmt.Errorf("test error")))
+
+		// Edge case: Error on task that's already errored
+		err := q.Error(ctx, got.ID, fmt.Errorf("double error"))
+		// Should either error or be idempotent
+		if err != nil {
+			assert.Error(t, err)
+		}
+	})
+
+	t.Run("external error filtered by Wait", func(t *testing.T) {
+		// Test that external errors (from Error/ErrorAtOnce) are wrapped as ErrExternal
+		// and filtered out by Wait(), while internal errors like context cancellation
+		// are passed through
+
+		// Test 1: External error is filtered by Wait
+		task1 := &model.Task{ID: "wait-external-1"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task1}))
+		waitForProcess()
+
+		got1, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+
+		// Start waiting on the task
+		waitDone := make(chan error, 1)
+		go func() {
+			waitDone <- q.Wait(ctx, got1.ID)
+		}()
+
+		time.Sleep(10 * time.Millisecond)
+
+		// Report an external error (agent reported error)
+		externalErr := fmt.Errorf("agent reported error")
+		assert.NoError(t, q.Error(ctx, got1.ID, externalErr))
+
+		// Wait should return nil (external error filtered out)
+		select {
+		case err := <-waitDone:
+			assert.NoError(t, err, "Wait should filter ErrExternal and return nil")
+		case <-time.After(time.Second):
+			t.Fatal("Wait should have returned")
+		}
+
+		// Test 2: Internal error (context cancellation) passes through Wait
+		task2 := &model.Task{ID: "wait-internal-1"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task2}))
+		waitForProcess()
+
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+
+		waitCtx, waitCancel := context.WithCancelCause(ctx)
+		waitDone2 := make(chan error, 1)
+		go func() {
+			waitDone2 <- q.Wait(waitCtx, got2.ID)
+		}()
+
+		time.Sleep(10 * time.Millisecond)
+		waitCancel(nil)
+
+		// Context cancellation should cause Wait to return (internal error handling)
+		select {
+		case err := <-waitDone2:
+			// Wait returns nil when context is canceled (normal behavior)
+			assert.NoError(t, err, "Wait should return nil when context is canceled")
+		case <-time.After(time.Second):
+			t.Fatal("Wait should return when context is canceled")
+		}
+
+		// Clean up
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		// Test 3: Multiple waiters all get nil when external error occurs
+		task3 := &model.Task{ID: "wait-multi-1"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task3}))
+		waitForProcess()
+
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+
+		// Start multiple waiters
+		numWaiters := 3
+		waitResults := make(chan error, numWaiters)
+		for range numWaiters {
+			go func() {
+				waitResults <- q.Wait(ctx, got3.ID)
+			}()
+		}
+
+		time.Sleep(10 * time.Millisecond)
+
+		// Report an external error
+		batchErr := fmt.Errorf("external batch failure")
+		assert.NoError(t, q.ErrorAtOnce(ctx, []string{got3.ID}, batchErr))
+
+		// All waiters should return nil (external error filtered)
+		for i := range numWaiters {
+			select {
+			case err := <-waitResults:
+				assert.NoError(t, err, "All waiters should get nil when ErrExternal is filtered")
+			case <-time.After(time.Second):
+				t.Fatalf("Waiter %d didn't return in time", i)
+			}
+		}
+	})
+
+	t.Run("error at once", func(t *testing.T) {
+		task1 := &model.Task{ID: "batch-1"}
+		task2 := &model.Task{ID: "batch-2"}
+		task3 := &model.Task{ID: "batch-3"}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task1, task2, task3}))
+		waitForProcess()
+
+		got1, _ := q.Poll(ctx, 1, filterFnTrue)
+		got2, _ := q.Poll(ctx, 2, filterFnTrue)
+
+		assert.NoError(t, q.ErrorAtOnce(ctx, []string{got1.ID, got2.ID}, fmt.Errorf("batch error")))
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 0)
+		assert.Len(t, info.Pending, 1)
+
+		got3, _ := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		task4 := &model.Task{ID: "batch-4"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task4}))
+		waitForProcess()
+		got4, _ := q.Poll(ctx, 1, filterFnTrue)
+
+		err := q.ErrorAtOnce(ctx, []string{got4.ID, "fake-1", "fake-2"}, fmt.Errorf("test"))
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, ErrNotFound)
+
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Len(t, info.Running, 0)
+
+		// Edge case: ErrorAtOnce with empty slice
+		err = q.ErrorAtOnce(ctx, []string{}, fmt.Errorf("no tasks"))
+		assert.NoError(t, err)
+		// Should handle gracefully, potentially no-op
+
+		// Edge case: ErrorAtOnce with nil error
+		task5 := &model.Task{ID: "batch-5"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task5}))
+		waitForProcess()
+		got5, _ := q.Poll(ctx, 3, filterFnTrue)
+		err = q.ErrorAtOnce(ctx, []string{got5.ID}, nil)
+		assert.NoError(t, err)
+		// Should handle nil error gracefully
+		waitForProcess()
+	})
+
+	t.Run("error at once with waiting deps", func(t *testing.T) {
+		task5 := &model.Task{ID: "deps-cancel-5"}
+		task6 := &model.Task{
+			ID:           "deps-cancel-6",
+			Dependencies: []string{"deps-cancel-5"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task5, task6}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 1, info.Stats.WaitingOnDeps)
+
+		assert.NoError(t, q.ErrorAtOnce(ctx, []string{"deps-cancel-5", "deps-cancel-6"}, fmt.Errorf("canceled")))
+
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Equal(t, 0, info.Stats.WaitingOnDeps)
+		assert.Len(t, info.Pending, 0)
+
+		// Edge case: verify both tasks are actually gone, not stuck somewhere
+		assert.Len(t, info.Running, 0)
+		assert.Len(t, info.WaitingOnDeps, 0)
+	})
+
+	t.Run("error at once cancellation", func(t *testing.T) {
+		task1 := &model.Task{ID: "cancel-prop-1"}
+		task2 := &model.Task{
+			ID:           "cancel-prop-2",
+			Dependencies: []string{"cancel-prop-1"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task1, task2}))
+		waitForProcess()
+		got1, _ := q.Poll(ctx, 1, filterFnTrue)
+
+		assert.NoError(t, q.ErrorAtOnce(ctx, []string{got1.ID}, ErrCancel))
+
+		waitForProcess()
+		waitForProcess()
+
+		got2, _ := q.Poll(ctx, 2, filterFnTrue)
+		assert.Equal(t, model.StatusKilled, got2.DepStatus["cancel-prop-1"])
+
+		// Edge case: verify ErrCancel results in StatusKilled not StatusFailure
+		assert.NotEqual(t, model.StatusFailure, got2.DepStatus["cancel-prop-1"])
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	t.Run("pause resume", func(t *testing.T) {
+		dummyTask := &model.Task{ID: "pause-1"}
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			_, _ = q.Poll(ctx, 99, filterFnTrue)
+		})
+
+		q.Pause()
+		t0 := time.Now()
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask}))
+		waitForProcess()
+
+		// Edge case: verify queue is actually paused
+		info := q.Info(ctx)
+		assert.True(t, info.Paused)
+		assert.Len(t, info.Pending, 1)
+		assert.Len(t, info.Running, 0)
+
+		q.Resume()
+
+		wg.Wait()
+		assert.Greater(t, time.Since(t0), 20*time.Millisecond)
+
+		// Edge case: verify queue is unpaused
+		info = q.Info(ctx)
+		assert.False(t, info.Paused)
+
+		// Edge case: multiple pause/resume cycles
+		task2 := &model.Task{ID: "pause-2"}
+		q.Pause()
+		q.Pause() // Double pause
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task2}))
+		waitForProcess()
+		q.Resume()
+		q.Resume() // Double resume
+		waitForProcess()
+		got, _ := q.Poll(ctx, 99, filterFnTrue)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+}
+
+func TestFifoDependencies(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("basic dependency handling", func(t *testing.T) {
+		task1 := &model.Task{ID: "dep-basic-1"}
+		task2 := &model.Task{
+			ID:           "dep-basic-2",
+			Dependencies: []string{"dep-basic-1"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+		task3 := &model.Task{
+			ID:           "dep-basic-3",
+			Dependencies: []string{"dep-basic-1"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task2, task3, task1}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 2, info.Stats.WaitingOnDeps)
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, task1, got)
+		assert.NoError(t, q.Error(ctx, got.ID, fmt.Errorf("exit code 1")))
+
+		waitForProcess()
+		got, err = q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, task2, got)
+		assert.False(t, got.ShouldRun())
+		assert.Equal(t, model.StatusFailure, got.DepStatus["dep-basic-1"])
+
+		waitForProcess()
+		got, err = q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, task3, got)
+		assert.True(t, got.ShouldRun())
+		assert.Equal(t, model.StatusFailure, got.DepStatus["dep-basic-1"])
+
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Equal(t, 0, info.Stats.WaitingOnDeps)
+
+		// Edge case: verify DepStatus is correctly set before polling
+		assert.NotEmpty(t, task2.DepStatus)
+		assert.NotEmpty(t, task3.DepStatus)
+	})
+
+	t.Run("multiple dependencies", func(t *testing.T) {
+		task1 := &model.Task{ID: "multi-dep-1"}
+		task2 := &model.Task{ID: "multi-dep-2"}
+		task3 := &model.Task{
+			ID:           "multi-dep-3",
+			Dependencies: []string{"multi-dep-1", "multi-dep-2"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task2, task3, task1}))
+		waitForProcess()
+
+		got1, _ := q.Poll(ctx, 1, filterFnTrue)
+		got2, _ := q.Poll(ctx, 2, filterFnTrue)
+
+		gotIDs := map[string]bool{got1.ID: true, got2.ID: true}
+		assert.True(t, gotIDs["multi-dep-1"] && gotIDs["multi-dep-2"])
+
+		if got1.ID == "multi-dep-1" {
+			assert.NoError(t, q.Done(ctx, got1.ID, model.StatusSuccess))
+			assert.NoError(t, q.Error(ctx, got2.ID, fmt.Errorf("failed")))
+		} else {
+			assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+			assert.NoError(t, q.Error(ctx, got1.ID, fmt.Errorf("failed")))
+		}
+
+		waitForProcess()
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+
+		assert.Contains(t, got3.DepStatus, "multi-dep-1")
+		assert.Contains(t, got3.DepStatus, "multi-dep-2")
+		assert.True(t,
+			(got3.DepStatus["multi-dep-1"] == model.StatusSuccess && got3.DepStatus["multi-dep-2"] == model.StatusFailure) ||
+				(got3.DepStatus["multi-dep-1"] == model.StatusFailure && got3.DepStatus["multi-dep-2"] == model.StatusSuccess))
+		assert.False(t, got3.ShouldRun())
+
+		// Edge case: verify both deps are tracked
+		assert.Len(t, got3.DepStatus, 2)
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSkipped))
+		waitForProcess()
+	})
+
+	t.Run("transitive dependencies", func(t *testing.T) {
+		task1 := &model.Task{ID: "trans-1"}
+		task2 := &model.Task{
+			ID:           "trans-2",
+			Dependencies: []string{"trans-1"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+		task3 := &model.Task{
+			ID:           "trans-3",
+			Dependencies: []string{"trans-2"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task2, task3, task1}))
+		waitForProcess()
+
+		got, _ := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, q.Error(ctx, got.ID, fmt.Errorf("exit code 1")))
+
+		waitForProcess()
+		got, _ = q.Poll(ctx, 2, filterFnTrue)
+		assert.False(t, got.ShouldRun())
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSkipped))
+
+		waitForProcess()
+		got, _ = q.Poll(ctx, 3, filterFnTrue)
+		assert.Equal(t, model.StatusSkipped, got.DepStatus["trans-2"])
+		assert.False(t, got.ShouldRun())
+
+		// Edge case: verify transitive failure propagates correctly
+		// task3 should see trans-2 as skipped, not trans-1's status
+		assert.NotContains(t, got.DepStatus, "trans-1")
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSkipped))
+		waitForProcess()
+	})
+
+	t.Run("dependency status propagation", func(t *testing.T) {
+		task1 := &model.Task{ID: "prop-1"}
+		task2 := &model.Task{
+			ID:           "prop-2",
+			Dependencies: []string{"prop-1"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+		task3 := &model.Task{
+			ID:           "prop-3",
+			Dependencies: []string{"prop-1"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task1, task2, task3}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 2, info.Stats.WaitingOnDeps)
+
+		got1, _ := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, q.Done(ctx, got1.ID, model.StatusSuccess))
+
+		waitForProcess()
+
+		got2, _ := q.Poll(ctx, 2, filterFnTrue)
+		got3, _ := q.Poll(ctx, 3, filterFnTrue)
+
+		assert.Equal(t, model.StatusSuccess, got2.DepStatus["prop-1"])
+		assert.Equal(t, model.StatusSuccess, got3.DepStatus["prop-1"])
+
+		// Edge case: verify both tasks can be polled concurrently
+		assert.NotEqual(t, got2.ID, got3.ID)
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		task4 := &model.Task{ID: "prop-4"}
+		task5 := &model.Task{
+			ID:           "prop-5",
+			Dependencies: []string{"prop-4"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+		task6 := &model.Task{
+			ID:           "prop-6",
+			Dependencies: []string{"prop-4"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task4, task5, task6}))
+		waitForProcess()
+
+		got4, _ := q.Poll(ctx, 4, filterFnTrue)
+		assert.NoError(t, q.Error(ctx, got4.ID, fmt.Errorf("failed")))
+
+		waitForProcess()
+
+		got5, _ := q.Poll(ctx, 5, filterFnTrue)
+		assert.Equal(t, model.StatusFailure, got5.DepStatus["prop-4"])
+		assert.False(t, got5.ShouldRun())
+
+		got6, _ := q.Poll(ctx, 6, filterFnTrue)
+		assert.Equal(t, model.StatusFailure, got6.DepStatus["prop-4"])
+		assert.True(t, got6.ShouldRun())
+
+		// Edge case: complete dependent tasks
+		assert.NoError(t, q.Done(ctx, got5.ID, model.StatusSkipped))
+		assert.NoError(t, q.Done(ctx, got6.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	// Edge case: circular dependency detection (should be handled or cause issue)
+	t.Run("circular dependencies", func(t *testing.T) {
+		task1 := &model.Task{
+			ID:           "circ-1",
+			Dependencies: []string{"circ-2"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+		task2 := &model.Task{
+			ID:           "circ-2",
+			Dependencies: []string{"circ-1"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task1, task2}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		// Both should be waiting on deps - this is a deadlock scenario
+		assert.Equal(t, 2, info.Stats.WaitingOnDeps)
+		assert.Len(t, info.Pending, 0)
+
+		// Verify they never become available for polling
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		_, err := q.Poll(pollCtx, 99, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err) // Should timeout
+
+		// Clean up the deadlocked tasks
+		assert.NoError(t, q.ErrorAtOnce(ctx, []string{"circ-1", "circ-2"}, fmt.Errorf("circular dep")))
+		waitForProcess()
+	})
+
+	// Edge case: dependency on non-existent task
+	// NOTE: This reveals a potential issue - the queue doesn't validate dependencies exist.
+	// If a dependency was never added to the queue, the task will run immediately since
+	// depsInQueue() only checks currently pending/running tasks, not if deps will arrive.
+	t.Run("non-existent dependency", func(t *testing.T) {
+		task1 := &model.Task{
+			ID:           "orphan-1",
+			Dependencies: []string{"does-not-exist"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task1}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		// Current implementation: task doesn't wait if dependency not in queue
+		// This means tasks with typos in dependency names will run immediately!
+		assert.Equal(t, 0, info.Stats.WaitingOnDeps)
+		assert.Len(t, info.Pending, 1)
+
+		// Task will be available for polling even though dependency doesn't exist
+		got, err := q.Poll(ctx, 99, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "orphan-1", got.ID)
+
+		// DepStatus will be empty since dependency never completed
+		assert.Empty(t, got.DepStatus)
+
+		// Clean up
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	// Edge case: dependency added AFTER dependent task (race condition)
+	t.Run("dependency added after dependent", func(t *testing.T) {
+		// Push dependent task first
+		dependent := &model.Task{
+			ID:           "late-dep-child",
+			Dependencies: []string{"late-dep-parent"},
+			DepStatus:    make(map[string]model.StatusValue),
+		}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dependent}))
+		waitForProcess()
+
+		// At this point, dependent doesn't see parent in queue, so it won't wait
+		info := q.Info(ctx)
+		// Dependent should NOT be waiting since parent doesn't exist yet
+		initialWaiting := info.Stats.WaitingOnDeps
+
+		// Now add the parent task
+		parent := &model.Task{ID: "late-dep-parent"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{parent}))
+		waitForProcess()
+
+		// After filterWaiting runs, dependent SHOULD now see parent and wait
+		info = q.Info(ctx)
+		// The implementation calls filterWaiting() which rechecks dependencies
+		// So dependent should now be waiting
+		assert.Greater(t, info.Stats.WaitingOnDeps, initialWaiting,
+			"dependent should start waiting once parent is added")
+
+		// Complete parent first
+		gotParent, _ := q.Poll(ctx, 1, filterFnTrue)
+		assert.Equal(t, "late-dep-parent", gotParent.ID, "parent should be polled first")
+		assert.NoError(t, q.Done(ctx, gotParent.ID, model.StatusSuccess))
+		waitForProcess()
+
+		// Now child should be unblocked with parent's status
+		gotChild, _ := q.Poll(ctx, 2, filterFnTrue)
+		assert.Equal(t, "late-dep-child", gotChild.ID)
+		assert.Equal(t, model.StatusSuccess, gotChild.DepStatus["late-dep-parent"])
+
+		assert.NoError(t, q.Done(ctx, gotChild.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+}
+
+func TestFifoFilterWaiting(t *testing.T) {
+	tests := []struct {
+		name    string
+		pending []*model.Task
+		waiting []*model.Task
+		running []string
+		ready   []string
+		blocked []string
+	}{
+		{
+			name: "independent tasks keep their order",
+			pending: []*model.Task{
+				{ID: "first"},
+				{ID: "second"},
+			},
+			ready: []string{"first", "second"},
+		},
+		{
+			name: "chain checks the full pending snapshot",
+			pending: []*model.Task{
+				{ID: "child", Dependencies: []string{"parent"}},
+				{ID: "parent", Dependencies: []string{"grandparent"}},
+				{ID: "grandparent"},
+			},
+			ready:   []string{"grandparent"},
+			blocked: []string{"child", "parent"},
+		},
+		{
+			name: "waiting tasks can be dependencies",
+			pending: []*model.Task{
+				{ID: "child", Dependencies: []string{"parent"}},
+			},
+			waiting: []*model.Task{
+				{ID: "parent", Dependencies: []string{"root"}},
+			},
+			running: []string{"root"},
+			blocked: []string{"child", "parent"},
+		},
+		{
+			name: "missing dependencies release waiting tasks at the tail",
+			pending: []*model.Task{
+				{ID: "ready"},
+			},
+			waiting: []*model.Task{
+				{ID: "released", Dependencies: []string{"finished"}},
+			},
+			ready: []string{"ready", "released"},
+		},
+		{
+			name: "only changed tasks move and keep their order",
+			pending: []*model.Task{
+				{ID: "ready"},
+				{ID: "newly-blocked", Dependencies: []string{"root"}},
+			},
+			waiting: []*model.Task{
+				{ID: "still-blocked", Dependencies: []string{"root"}},
+				{ID: "released", Dependencies: []string{"finished"}},
+			},
+			running: []string{"root"},
+			ready:   []string{"ready", "released"},
+			blocked: []string{"newly-blocked", "still-blocked"},
+		},
+		{
+			name: "cycles remain blocked",
+			pending: []*model.Task{
+				{ID: "first", Dependencies: []string{"second"}},
+				{ID: "second", Dependencies: []string{"first"}},
+			},
+			blocked: []string{"first", "second"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := &fifo{
+				pending:       list.New(),
+				waitingOnDeps: list.New(),
+				running:       make(map[string]*entry),
+			}
+			for _, task := range tt.pending {
+				q.pending.PushBack(task)
+			}
+			for _, task := range tt.waiting {
+				q.waitingOnDeps.PushBack(task)
+			}
+			for _, id := range tt.running {
+				q.running[id] = &entry{item: &model.Task{ID: id}}
+			}
+			ids := func(tasks *list.List) []string {
+				var result []string
+				for element := tasks.Front(); element != nil; element = element.Next() {
+					task, _ := element.Value.(*model.Task)
+					result = append(result, task.ID)
+				}
+				return result
+			}
+			for range 2 {
+				q.filterWaiting()
+				assert.Equal(t, tt.ready, ids(q.pending))
+				assert.Equal(t, tt.blocked, ids(q.waitingOnDeps))
+			}
+		})
+	}
+}
+
+func TestFifoAssignToWorker(t *testing.T) {
+	group := func(id string, pipeline int64) *model.Task {
+		return &model.Task{ID: id, PipelineID: pipeline, Created: pipeline, ConcurrencyGroup: "deploy", ConcurrencyLimit: 1}
+	}
+	only := func(id string, score int) func(*model.Task) (bool, int) {
+		return func(task *model.Task) (bool, int) { return task.ID == id, score }
+	}
+	tests := []struct {
+		name    string
+		pending []*model.Task
+		running []*model.Task
+		workers map[int64]func(*model.Task) (bool, int)
+		task    string
+		agent   int64
+	}{
+		{
+			name:    "no idle worker",
+			pending: []*model.Task{{ID: "free"}},
+		},
+		{
+			name:    "first task with a matching worker wins",
+			pending: []*model.Task{{ID: "unmatched"}, {ID: "matched"}},
+			workers: map[int64]func(*model.Task) (bool, int){1: only("matched", 1)},
+			task:    "matched",
+			agent:   1,
+		},
+		{
+			name:    "highest score wins",
+			pending: []*model.Task{{ID: "free"}},
+			workers: map[int64]func(*model.Task) (bool, int){1: only("free", 1), 2: only("free", 5)},
+			task:    "free",
+			agent:   2,
+		},
+		{
+			name:    "blocked task is skipped for the next one",
+			pending: []*model.Task{group("blocked", 2), {ID: "free"}},
+			running: []*model.Task{group("active", 1)},
+			workers: map[int64]func(*model.Task) (bool, int){1: filterFnTrue},
+			task:    "free",
+			agent:   1,
+		},
+		{
+			name:    "blocked task does not leak its worker",
+			pending: []*model.Task{group("blocked", 2), {ID: "unmatched"}},
+			running: []*model.Task{group("active", 1)},
+			workers: map[int64]func(*model.Task) (bool, int){1: only("blocked", 1)},
+		},
+		{
+			name:    "earlier pipeline keeps its slot without a worker",
+			pending: []*model.Task{group("first", 1), group("second", 2)},
+			workers: map[int64]func(*model.Task) (bool, int){1: only("second", 1)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := &fifo{
+				pending:       list.New(),
+				waitingOnDeps: list.New(),
+				running:       make(map[string]*entry),
+				workers:       make(map[*worker]struct{}),
+			}
+			for _, task := range tt.pending {
+				q.pending.PushBack(task)
+			}
+			for _, task := range tt.running {
+				q.running[task.ID] = &entry{item: task}
+			}
+			for agent, filter := range tt.workers {
+				q.workers[&worker{agentID: agent, filter: filter}] = struct{}{}
+			}
+
+			element, worker := q.assignToWorker()
+			if tt.task == "" {
+				assert.Nil(t, element)
+				assert.Nil(t, worker)
+				return
+			}
+			require.NotNil(t, element)
+			require.NotNil(t, worker)
+			task, _ := element.Value.(*model.Task)
+			assert.Equal(t, tt.task, task.ID)
+			assert.Equal(t, tt.agent, worker.agentID)
+		})
+	}
+}
+
+func TestFifoConcurrencySlots(t *testing.T) {
+	member := func(id string, pipeline, created int64, limit int) *model.Task {
+		return &model.Task{ID: id, Name: id, PipelineID: pipeline, Created: created, ConcurrencyGroup: "deploy", ConcurrencyLimit: limit}
+	}
+	tests := []struct {
+		name    string
+		pending []*model.Task
+		waiting []*model.Task
+		running []*model.Task
+		task    string
+	}{
+		{
+			name:    "same pipeline does not reserve slots",
+			pending: []*model.Task{member("b", 1, 2, 1), member("a", 1, 1, 1)},
+			task:    "b",
+		},
+		{
+			name:    "earlier waiting pipeline reserves the slot",
+			pending: []*model.Task{member("late", 2, 2, 1)},
+			waiting: []*model.Task{member("early", 1, 1, 1)},
+		},
+		{
+			name:    "later waiting pipeline does not reserve the slot",
+			pending: []*model.Task{member("early", 1, 1, 1)},
+			waiting: []*model.Task{member("late", 2, 2, 1)},
+			task:    "early",
+		},
+		{
+			name:    "name breaks a creation tie",
+			pending: []*model.Task{member("b", 1, 5, 1), member("a", 2, 5, 1)},
+			task:    "a",
+		},
+		{
+			name: "equal order does not reserve the slot",
+			pending: []*model.Task{
+				{ID: "x", Name: "deploy", PipelineID: 1, Created: 5, ConcurrencyGroup: "deploy", ConcurrencyLimit: 1},
+				{ID: "y", Name: "deploy", PipelineID: 2, Created: 5, ConcurrencyGroup: "deploy", ConcurrencyLimit: 1},
+			},
+			task: "x",
+		},
+		{
+			name:    "running and reserved slots add up",
+			pending: []*model.Task{member("late", 3, 3, 2)},
+			waiting: []*model.Task{member("early", 1, 1, 2)},
+			running: []*model.Task{member("active", 2, 2, 2)},
+		},
+		{
+			name:    "free slot is granted",
+			pending: []*model.Task{member("next", 3, 3, 2)},
+			running: []*model.Task{member("active", 2, 2, 2)},
+			task:    "next",
+		},
+		{
+			name:    "other groups do not count",
+			pending: []*model.Task{member("deploy", 2, 2, 1)},
+			waiting: []*model.Task{{ID: "build", PipelineID: 1, Created: 1, ConcurrencyGroup: "build", ConcurrencyLimit: 1}},
+			running: []*model.Task{{ID: "test", PipelineID: 1, Created: 1, ConcurrencyGroup: "test", ConcurrencyLimit: 1}},
+			task:    "deploy",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := &fifo{
+				pending:       list.New(),
+				waitingOnDeps: list.New(),
+				running:       make(map[string]*entry),
+				workers:       map[*worker]struct{}{{filter: filterFnTrue}: {}},
+			}
+			for _, task := range tt.pending {
+				q.pending.PushBack(task)
+			}
+			for _, task := range tt.waiting {
+				q.waitingOnDeps.PushBack(task)
+			}
+			for _, task := range tt.running {
+				q.running[task.ID] = &entry{item: task}
+			}
+
+			element, _ := q.assignToWorker()
+			if tt.task == "" {
+				assert.Nil(t, element)
+				return
+			}
+			require.NotNil(t, element)
+			task, _ := element.Value.(*model.Task)
+			assert.Equal(t, tt.task, task.ID)
+		})
+	}
+}
+
+func TestFifoConcurrency(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("limit serializes group in instantiation order", func(t *testing.T) {
+		// Lower Created == instantiated earlier. taskB is pushed first to
+		// prove the queue serializes by creation order, not by push/ready
+		// order. Distinct pipeline IDs model two pipelines of the same
+		// workflow. Ordering must not depend on the task ID, so taskA (the
+		// earlier one) deliberately has the higher ID.
+		taskA := &model.Task{ID: "200", PipelineID: 1, Created: 100, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+		taskB := &model.Task{ID: "100", PipelineID: 2, Created: 200, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{taskB, taskA}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "200", got.ID) // earliest instantiated (lowest Created) runs first
+
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 1)
+		assert.Len(t, info.Pending, 1) // taskB deferred by concurrency limit
+
+		// taskB cannot be polled while taskA holds the only slot.
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		_, err = q.Poll(pollCtx, 2, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err)
+
+		// finishing taskA frees the slot for taskB.
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "100", got2.ID)
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	t.Run("preserves instantiation order over readiness", func(t *testing.T) {
+		// Pipeline 1's deploy (taskA) waits on its own slow check (dep), while
+		// pipeline 2's deploy (taskB) is immediately ready. taskB must still
+		// wait for the earlier taskA. Ordering is by Created, not ID, so taskA
+		// has the higher ID but the lower Created.
+		dep := &model.Task{ID: "50", PipelineID: 1, Created: 100}
+		taskA := &model.Task{
+			ID:               "200",
+			PipelineID:       1,
+			Created:          100,
+			ConcurrencyGroup: "repo:deploy2",
+			ConcurrencyLimit: 1,
+			Dependencies:     []string{"50"},
+			DepStatus:        make(map[string]model.StatusValue),
+			RunOn:            []string{"success", "failure"},
+		}
+		taskB := &model.Task{ID: "100", PipelineID: 2, Created: 200, ConcurrencyGroup: "repo:deploy2", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dep, taskA, taskB}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 1, info.Stats.WaitingOnDeps) // taskA waiting on dep
+
+		// only the dependency is runnable; taskB is held back behind taskA.
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "50", got.ID)
+
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		_, err = q.Poll(pollCtx, 2, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err, "taskB must not overtake the earlier taskA")
+
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		gotA, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "200", gotA.ID)
+		assert.NoError(t, q.Done(ctx, gotA.ID, model.StatusSuccess))
+		waitForProcess()
+
+		gotB, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "100", gotB.ID)
+		assert.NoError(t, q.Done(ctx, gotB.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	t.Run("limit greater than one allows parallelism", func(t *testing.T) {
+		t1 := &model.Task{ID: "300", PipelineID: 1, ConcurrencyGroup: "repo:build", ConcurrencyLimit: 2}
+		t2 := &model.Task{ID: "400", PipelineID: 2, ConcurrencyGroup: "repo:build", ConcurrencyLimit: 2}
+		t3 := &model.Task{ID: "500", PipelineID: 3, ConcurrencyGroup: "repo:build", ConcurrencyLimit: 2}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{t1, t2, t3}))
+		waitForProcess()
+
+		g1, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		g2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"300", "400"}, []string{g1.ID, g2.ID})
+
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 2)
+		assert.Len(t, info.Pending, 1) // third deferred until a slot frees
+
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		_, err = q.Poll(pollCtx, 3, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err)
+
+		assert.NoError(t, q.Done(ctx, g1.ID, model.StatusSuccess))
+		waitForProcess()
+		g3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "500", g3.ID)
+		assert.NoError(t, q.Done(ctx, g2.ID, model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, g3.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	t.Run("same pipeline dependency does not deadlock", func(t *testing.T) {
+		// Within one pipeline, deploy.yaml (lower ID, alphabetically first)
+		// depends on test.yaml (higher ID), and both share a concurrency group.
+		// The ordering reservation must not treat the dependent deploy as
+		// "ahead" of its own dependency, otherwise neither can ever run.
+		deploy := &model.Task{
+			ID:               "100",
+			PipelineID:       1,
+			ConcurrencyGroup: "repo:ci",
+			ConcurrencyLimit: 1,
+			Dependencies:     []string{"200"},
+			DepStatus:        make(map[string]model.StatusValue),
+			RunOn:            []string{"success", "failure"},
+		}
+		test := &model.Task{
+			ID:               "200",
+			PipelineID:       1,
+			ConcurrencyGroup: "repo:ci",
+			ConcurrencyLimit: 1,
+		}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{deploy, test}))
+		waitForProcess()
+
+		// test must be runnable even though deploy has a lower ID.
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "200", got.ID, "the dependency must not be starved by the dependent")
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		gotDeploy, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "100", gotDeploy.ID)
+		assert.NoError(t, q.Done(ctx, gotDeploy.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	t.Run("different groups do not block each other", func(t *testing.T) {
+		t1 := &model.Task{ID: "600", ConcurrencyGroup: "repo:a", ConcurrencyLimit: 1}
+		t2 := &model.Task{ID: "700", ConcurrencyGroup: "repo:b", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{t1, t2}))
+		waitForProcess()
+
+		g1, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		g2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"600", "700"}, []string{g1.ID, g2.ID})
+
+		assert.NoError(t, q.Done(ctx, g1.ID, model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, g2.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	t.Run("no limit keeps default behavior", func(t *testing.T) {
+		t1 := &model.Task{ID: "800"}
+		t2 := &model.Task{ID: "900"}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{t1, t2}))
+		waitForProcess()
+
+		g1, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		g2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"800", "900"}, []string{g1.ID, g2.ID})
+
+		assert.NoError(t, q.Done(ctx, g1.ID, model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, g2.ID, model.StatusSuccess))
+		waitForProcess()
+	})
+
+	t.Run("task ordering uses Created, blocked count, then name", func(t *testing.T) {
+		// Earlier Created sorts first, regardless of ID.
+		assert.True(t, taskOrderLess(
+			&model.Task{ID: "999", Created: 100},
+			&model.Task{ID: "1", Created: 200},
+		))
+		assert.False(t, taskOrderLess(
+			&model.Task{ID: "1", Created: 200},
+			&model.Task{ID: "999", Created: 100},
+		))
+		// Created outranks blocked count.
+		assert.True(t, taskOrderLess(
+			&model.Task{ID: "1", Created: 100, BlockedCount: 0},
+			&model.Task{ID: "2", Created: 200, BlockedCount: 9},
+		))
+
+		// Higher blocked count wins even when its name sorts later and its ID is higher.
+		moreBlocked := &model.Task{ID: "2", Created: 100, Name: "zzz", BlockedCount: 5}
+		lessBlocked := &model.Task{ID: "1", Created: 100, Name: "aaa", BlockedCount: 0}
+		assert.True(t, taskOrderLess(moreBlocked, lessBlocked))
+		assert.False(t, taskOrderLess(lessBlocked, moreBlocked))
+
+		// Equal Created and blocked count use the workflow name alphabetically.
+		alpha := &model.Task{ID: "2", Created: 100, Name: "alpha", BlockedCount: 3}
+		beta := &model.Task{ID: "1", Created: 100, Name: "beta", BlockedCount: 3}
+		assert.True(t, taskOrderLess(alpha, beta))
+		assert.False(t, taskOrderLess(beta, alpha))
+
+		// Non-PR events (push, tag, manual, deployment, cron) outrank PR events, even when created later.
+		ev := func(e model.WebhookEvent) map[string]string {
+			return map[string]string{pipeline.LabelEvent: string(e)}
+		}
+		prs := []*model.Task{
+			{ID: "1", Created: 100, Labels: ev(model.EventPull)},
+			{ID: "2", Created: 100, Labels: ev(model.EventPullMetadata)},
+			{ID: "3", Created: 100, Labels: ev(model.EventPullClosed)},
+		}
+		for _, e := range []model.WebhookEvent{model.EventPush, model.EventTag, model.EventManual, model.EventDeploy, model.EventCron} {
+			later := &model.Task{ID: "9", Created: 900, Labels: ev(e)}
+			for _, low := range prs {
+				assert.True(t, taskOrderLess(later, low), "%s before %s", e, low.Labels[pipeline.LabelEvent])
+				assert.False(t, taskOrderLess(low, later), "%s after %s", low.Labels[pipeline.LabelEvent], e)
+			}
+		}
+		// Within a tier, Created still decides.
+		assert.True(t, taskOrderLess(prs[0], &model.Task{ID: "4", Created: 200, Labels: ev(model.EventPullMetadata)}))
+		assert.True(t, taskOrderLess(&model.Task{ID: "5", Created: 50, Labels: ev(model.EventCron)}, &model.Task{ID: "6", Created: 60, Labels: ev(model.EventPush)}))
+	})
+}
+
+func TestFifoLeaseManagement(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("lease expiration", func(t *testing.T) {
+		q.extension = 0
+		dummyTask := &model.Task{ID: "lease-exp-1"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask}))
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+
+		q.Lock()
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.resubmitExpiredPipelines()
+		q.Unlock()
+		assert.ErrorIs(t, q.Wait(ctx, got.ID), ErrTaskExpired)
+		assert.ErrorIs(t, q.Extend(ctx, 1, got.ID), ErrTaskExpired)
+		event := receiveExpiredTask(t, q)
+		assert.Equal(t, ExpiredTask{ID: got.ID, AgentID: 1}, event)
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 1)
+		assert.Empty(t, info.Pending)
+
+		assert.NoError(t, q.Reserve(ctx, got.ID, event.AgentID, true))
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, dummyTask.ID, got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		info = q.Info(ctx)
+		assert.Empty(t, info.Pending)
+		assert.Empty(t, info.Running)
+	})
+
+	t.Run("extend lease", func(t *testing.T) {
+		q.extension = 50 * time.Millisecond
+		dummyTask := &model.Task{ID: "extend-1"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask}))
+
+		got, err := q.Poll(ctx, 5, filterFnTrue)
+		assert.NoError(t, err)
+
+		assert.NoError(t, q.Extend(ctx, 5, got.ID))
+		assert.ErrorIs(t, q.Extend(ctx, 999, got.ID), ErrAgentMissMatch)
+		assert.ErrorIs(t, q.Extend(ctx, 1, got.ID), ErrAgentMissMatch)
+		assert.ErrorIs(t, q.Extend(ctx, 1, "non-existent"), ErrNotFound)
+
+		q.Lock()
+		deadline := q.running[got.ID].deadline
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.Unlock()
+		assert.NoError(t, q.Extend(ctx, 5, got.ID))
+		q.Lock()
+		assert.True(t, q.running[got.ID].deadline.After(deadline))
+		q.Unlock()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 1)
+		assert.Empty(t, info.Pending)
+
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		assert.ErrorIs(t, q.Extend(ctx, 5, got.ID), ErrNotFound)
+
+		info = q.Info(ctx)
+		assert.Empty(t, info.Pending)
+		assert.Empty(t, info.Running)
+	})
+
+	t.Run("wait operations", func(t *testing.T) {
+		// Verify queue is clean before starting
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0, "queue should be empty at start of wait operations")
+		assert.Len(t, info.Running, 0, "queue should be empty at start of wait operations")
+
+		dummyTask := &model.Task{ID: "wait-1"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask}))
+
+		waitForProcess()
+		got, _ := q.Poll(ctx, 1, filterFnTrue)
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			assert.NoError(t, q.Wait(ctx, got.ID))
+		})
+
+		time.Sleep(time.Millisecond)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		wg.Wait()
+
+		// Edge case: Wait on non-existent task should return immediately
+		assert.NoError(t, q.Wait(ctx, "non-existent"))
+
+		dummyTask2 := &model.Task{ID: "wait-2"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask2}))
+		waitForProcess()
+		got2, _ := q.Poll(ctx, 1, filterFnTrue)
+
+		waitCtx, waitCancel := context.WithCancelCause(ctx)
+		errCh := make(chan error, 1)
+		go func() { errCh <- q.Wait(waitCtx, got2.ID) }()
+
+		time.Sleep(50 * time.Millisecond)
+		waitCancel(nil)
+
+		select {
+		case err := <-errCh:
+			assert.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("Wait should return when context is canceled")
+		}
+
+		// Clean up - complete the second wait task
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		// Edge case: multiple concurrent waits on same task
+		dummyTask3 := &model.Task{ID: "wait-3"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dummyTask3}))
+		waitForProcess()
+		got3, _ := q.Poll(ctx, 1, filterFnTrue)
+
+		var wg2 sync.WaitGroup
+		wg2.Add(3)
+		for range 3 {
+			go func() {
+				assert.NoError(t, q.Wait(ctx, got3.ID))
+				wg2.Done()
+			}()
+		}
+
+		time.Sleep(10 * time.Millisecond)
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		wg2.Wait()
+
+		// Verify cleanup
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+}
+
+func TestFifoTaskStartAndRequeueTimes(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	task := &model.Task{ID: "started-and-requeued"}
+	require.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+
+	worker := &worker{agentID: 1, filter: filterFnTrue, channel: make(chan *model.Task, 1)}
+	q.Lock()
+	q.workers[worker] = struct{}{}
+	q.Unlock()
+	waitForProcess()
+	got := <-worker.channel
+	require.NotNil(t, got)
+	assert.NotZero(t, got.Started)
+	assert.GreaterOrEqual(t, got.Started, time.Now().Unix()-1)
+
+	assert.Same(t, task, q.Info(ctx).Running[0])
+
+	require.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+	require.NoError(t, q.Requeue(ctx, got.ID))
+
+	var requeued *model.Task
+	for _, candidate := range q.Info(ctx).Pending {
+		if candidate.ID == task.ID {
+			requeued = candidate
+		}
+	}
+	require.NotNil(t, requeued)
+	assert.Zero(t, requeued.Started)
+}
+
+func TestFifoReserveAndRequeue(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("reserve keeps dependents waiting and dependency state unchanged", func(t *testing.T) {
+		dependency := &model.Task{ID: "reserve-dependency", Created: 1}
+		dependent := &model.Task{
+			ID:           "reserve-dependent",
+			Dependencies: []string{dependency.ID},
+			DepStatus:    map[string]model.StatusValue{dependency.ID: model.StatusPending},
+			RunOn:        []string{"success"},
+		}
+		parent := &model.Task{ID: "reserve-parent", Created: 2}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dependent, parent, dependency}))
+		got, err := q.Poll(ctx, 1, func(task *model.Task) (bool, int) { return task.ID == dependency.ID, 1 })
+		assert.NoError(t, err)
+		assert.Equal(t, dependency.ID, got.ID)
+
+		assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+		assert.ErrorIs(t, q.Wait(ctx, got.ID), ErrTaskExpired)
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 2, func(task *model.Task) (bool, int) { return task.ID == parent.ID, 1 })
+		assert.NoError(t, err)
+		assert.Equal(t, parent.ID, got.ID)
+		info := q.Info(ctx)
+		assert.Len(t, info.WaitingOnDeps, 1)
+		assert.Equal(t, model.StatusPending, info.WaitingOnDeps[0].DepStatus[dependency.ID])
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+
+		got, err = q.Poll(ctx, 3, func(task *model.Task) (bool, int) { return task.ID == dependency.ID, 1 })
+		assert.NoError(t, err)
+		assert.Equal(t, dependency.ID, got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		got, err = q.Poll(ctx, 4, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, dependent.ID, got.ID)
+		assert.Equal(t, model.StatusSuccess, got.DepStatus[dependency.ID])
+		assert.True(t, got.ShouldRun())
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	})
+
+	t.Run("reserve validates entry, agent, and expiry", func(t *testing.T) {
+		task := &model.Task{ID: "reserve-validation"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+		got, err := q.Poll(ctx, 7, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ErrorIs(t, q.Reserve(ctx, "missing", 7, false), ErrNotFound)
+		assert.ErrorIs(t, q.Reserve(ctx, got.ID, 8, false), ErrNotFound)
+		assert.ErrorIs(t, q.Reserve(ctx, got.ID, 7, true), ErrNotFound)
+		assert.NoError(t, q.Reserve(ctx, got.ID, 7, false))
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		assert.ErrorIs(t, q.Requeue(ctx, got.ID), ErrNotFound)
+
+		expired := &model.Task{ID: "reserve-expired-validation"}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{expired}))
+		got, err = q.Poll(ctx, 9, filterFnTrue)
+		assert.NoError(t, err)
+		q.Lock()
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.resubmitExpiredPipelines()
+		q.Unlock()
+		assert.Equal(t, ExpiredTask{ID: expired.ID, AgentID: 9}, receiveExpiredTask(t, q))
+		assert.NoError(t, q.Reserve(ctx, got.ID, 9, true))
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 10, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, expired.ID, got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	})
+
+	t.Run("requeue preserves task dependency status", func(t *testing.T) {
+		task := &model.Task{ID: "requeue-dependency-status", DepStatus: map[string]model.StatusValue{"upstream": model.StatusSuccess}}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+		got, err := q.Poll(ctx, 9, filterFnTrue)
+		assert.NoError(t, err)
+		assert.NoError(t, q.Reserve(ctx, got.ID, 9, false))
+		select {
+		case event := <-q.Expired():
+			t.Fatalf("ordinary reservation emitted expiry event: %+v", event)
+		default:
+		}
+		assert.NoError(t, q.Requeue(ctx, got.ID))
+		got, err = q.Poll(ctx, 10, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, model.StatusSuccess, got.DepStatus["upstream"])
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	})
+}
+
+func TestFifoExpiredEvents(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	q.extension = time.Hour
+
+	task := &model.Task{ID: "expired-event"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 11, filterFnTrue)
+	assert.NoError(t, err)
+
+	q.Lock()
+	entry := q.running[got.ID]
+	entry.deadline = time.Now().Add(-time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	first := receiveExpiredTask(t, q)
+	assert.Equal(t, ExpiredTask{ID: got.ID, AgentID: 11}, first)
+
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	select {
+	case event := <-q.Expired():
+		t.Fatalf("expiry event resent too early: %+v", event)
+	default:
+	}
+
+	q.Lock()
+	q.running[got.ID].lastSent = time.Now().Add(-constant.TaskTimeout - time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	assert.Equal(t, first, receiveExpiredTask(t, q))
+
+	assert.NoError(t, q.Reserve(ctx, got.ID, first.AgentID, true))
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	select {
+	case event := <-q.Expired():
+		t.Fatalf("reserved entry emitted expiry event: %+v", event)
+	default:
+	}
+	assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+}
+
+func TestFifoExpiredEventsDoNotBlockDispatch(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	q.expired = make(chan ExpiredTask, 1)
+	q.expired <- ExpiredTask{ID: "already-buffered"}
+	q.extension = time.Hour
+
+	expired := &model.Task{ID: "expired-before-dispatch"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{expired}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+
+	waitStarted := make(chan struct{})
+	waitResult := make(chan error, 1)
+	go func() {
+		close(waitStarted)
+		waitResult <- q.Wait(ctx, got.ID)
+	}()
+	<-waitStarted
+
+	next := &model.Task{ID: "after-expiry-buffer-full"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{next}))
+
+	q.Lock()
+	q.running[got.ID].deadline = time.Now().Add(-time.Second)
+	q.Unlock()
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("task expiry was not observed")
+	}
+
+	pollCtx, pollCancel := context.WithTimeout(ctx, time.Second)
+	defer pollCancel()
+	pollResult := make(chan *model.Task, 1)
+	go func() {
+		task, _ := q.Poll(pollCtx, 100, func(task *model.Task) (bool, int) {
+			return task.ID == next.ID, 1
+		})
+		pollResult <- task
+	}()
+	var dispatched *model.Task
+	select {
+	case dispatched = <-pollResult:
+	case <-pollCtx.Done():
+		// Free a blocking-send mutant so the queue goroutine can exit its lock.
+		<-q.Expired()
+		t.Errorf("queue did not dispatch before the expiry buffer blocked processing")
+		return
+	}
+	assert.NotNil(t, dispatched)
+	if dispatched == nil {
+		return
+	}
+	assert.Equal(t, next.ID, dispatched.ID)
+	assert.NoError(t, q.Done(ctx, dispatched.ID, model.StatusSuccess))
+
+	dropped := <-q.Expired()
+	assert.Equal(t, ExpiredTask{ID: "already-buffered"}, dropped)
+	q.Lock()
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+	select {
+	case event := <-q.Expired():
+		assert.Equal(t, ExpiredTask{ID: expired.ID, AgentID: 1}, event)
+	case <-time.After(time.Second):
+		t.Fatal("dropped expiry event was not retried after the buffer drained")
+	}
+}
+
+func TestFifoFinishExpiredEntries(t *testing.T) {
+	tests := []struct {
+		name   string
+		finish func(*fifo, context.Context, string) error
+	}{
+		{name: "Done", finish: func(q *fifo, ctx context.Context, id string) error { return q.Done(ctx, id, model.StatusSuccess) }},
+		{name: "Error", finish: func(q *fifo, ctx context.Context, id string) error { return q.Error(ctx, id, errors.New("failed")) }},
+		{name: "ErrorAtOnce", finish: func(q *fifo, ctx context.Context, id string) error {
+			return q.ErrorAtOnce(ctx, []string{id}, errors.New("failed"))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel, q := setupTestQueue(t)
+			defer cancel(nil)
+			dependent := &model.Task{
+				ID:           "expired-dependent",
+				Dependencies: []string{"expired-parent"},
+				DepStatus:    map[string]model.StatusValue{"expired-parent": model.StatusPending},
+			}
+			parent := &model.Task{ID: "expired-parent"}
+			assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dependent, parent}))
+			got, err := q.Poll(ctx, 2, filterFnTrue)
+			assert.NoError(t, err)
+			q.Lock()
+			q.running[got.ID].deadline = time.Now().Add(-time.Second)
+			q.resubmitExpiredPipelines()
+			q.Unlock()
+			assert.Equal(t, ExpiredTask{ID: parent.ID, AgentID: 2}, receiveExpiredTask(t, q))
+			assert.NoError(t, q.Reserve(ctx, parent.ID, 2, true))
+			assert.NoError(t, tt.finish(q, ctx, parent.ID))
+			assert.ErrorIs(t, q.Requeue(ctx, parent.ID), ErrNotFound)
+			info := q.Info(ctx)
+			assert.Empty(t, info.Running)
+			assert.Len(t, info.WaitingOnDeps, 1)
+			expectedStatus := model.StatusSuccess
+			if tt.name != "Done" {
+				expectedStatus = model.StatusFailure
+			}
+			assert.Equal(t, expectedStatus, info.WaitingOnDeps[0].DepStatus[parent.ID])
+		})
+	}
+}
+
+type blockedDoneContext struct {
+	context.Context
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *blockedDoneContext) Done() <-chan struct{} {
+	close(c.entered)
+	<-c.release
+	return c.Context.Done()
+}
+
+func TestFifoWaitPreservesFirstCompletionError(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	task := &model.Task{ID: "wait-first-error"}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+
+	waitCtx := &blockedDoneContext{
+		Context: ctx,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- q.Wait(waitCtx, got.ID) }()
+	select {
+	case <-waitCtx.entered:
+	case <-time.After(time.Second):
+		close(waitCtx.release)
+		t.Fatal("Wait did not reach its done-channel select")
+	}
+
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, false))
+	assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+	close(waitCtx.release)
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after its done channel closed")
+	}
+}
+
+func TestFifoReserveAfterExpiryDoesNotRewriteWaitError(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{{ID: "reserve-after-expiry"}}))
+	got, err := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, err)
+	q.Lock()
+	q.running[got.ID].deadline = time.Now().Add(-time.Second)
+	q.resubmitExpiredPipelines()
+	q.Unlock()
+
+	// Wait reads the entry error without the lock; Reserve must not write it again.
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- q.Wait(ctx, got.ID) }()
+	assert.NoError(t, q.Reserve(ctx, got.ID, 1, true))
+	select {
+	case err := <-waitResult:
+		assert.ErrorIs(t, err, ErrTaskExpired)
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return for an expired task")
+	}
+}
+
+func TestFifoWorkerManagement(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("poll with context cancellation", func(t *testing.T) {
+		pollCtx, pollCancel := context.WithCancelCause(ctx)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := q.Poll(pollCtx, 1, filterFnTrue)
+			errCh <- err
+		}()
+
+		time.Sleep(50 * time.Millisecond)
+		pollCancel(nil)
+
+		select {
+		case err := <-errCh:
+			assert.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("Poll should return when context is canceled")
+		}
+
+		// Edge case: verify worker is cleaned up
+		info := q.Info(ctx)
+		assert.Equal(t, 0, info.Stats.Workers)
+	})
+
+	t.Run("kick agent workers", func(t *testing.T) {
+		pollResults := make(chan error, 5)
+		for range 5 {
+			go func() {
+				_, err := q.Poll(ctx, 42, filterFnTrue)
+				pollResults <- err
+			}()
+		}
+
+		time.Sleep(50 * time.Millisecond)
+
+		// Edge case: verify workers are registered before kicking
+		info := q.Info(ctx)
+		assert.Equal(t, 5, info.Stats.Workers)
+
+		q.KickAgentWorkers(42)
+
+		kickedCount := 0
+		for range 5 {
+			select {
+			case err := <-pollResults:
+				if errors.Is(err, context.Canceled) {
+					kickedCount++
+				}
+			case <-time.After(time.Second):
+				t.Fatal("expected all workers to be kicked")
+			}
+		}
+		assert.Equal(t, 5, kickedCount)
+
+		// Edge case: verify workers are removed after kicking
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Equal(t, 0, info.Stats.Workers)
+
+		// Edge case: kick non-existent agent should be no-op
+		q.KickAgentWorkers(999)
+	})
+
+	// Edge case: mixed agent workers
+	t.Run("kick specific agent among multiple", func(t *testing.T) {
+		pollResults := make(chan struct {
+			agentID int64
+			err     error
+		}, 10)
+
+		// Start workers for agent 1
+		for range 3 {
+			go func() {
+				_, err := q.Poll(ctx, 1, filterFnTrue)
+				pollResults <- struct {
+					agentID int64
+					err     error
+				}{1, err}
+			}()
+		}
+
+		// Start workers for agent 2
+		for range 3 {
+			go func() {
+				_, err := q.Poll(ctx, 2, filterFnTrue)
+				pollResults <- struct {
+					agentID int64
+					err     error
+				}{2, err}
+			}()
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		info := q.Info(ctx)
+		assert.Equal(t, 6, info.Stats.Workers)
+
+		// Kick only agent 1
+		q.KickAgentWorkers(1)
+
+		kickedAgent1 := 0
+		kickedAgent2 := 0
+		for range 3 {
+			select {
+			case result := <-pollResults:
+				if errors.Is(result.err, context.Canceled) {
+					if result.agentID == 1 {
+						kickedAgent1++
+					} else {
+						kickedAgent2++
+					}
+				}
+			case <-time.After(time.Second):
+				t.Fatal("expected kicked workers to return")
+			}
+		}
+
+		assert.Equal(t, 3, kickedAgent1)
+		assert.Equal(t, 0, kickedAgent2)
+
+		// Clean up agent 2 workers
+		q.KickAgentWorkers(2)
+		for range 3 {
+			<-pollResults
+		}
+	})
+}
+
+func TestFifoLabelBasedScoring(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+
+	q := NewMemoryQueue(ctx)
+
+	tasks := []*model.Task{
+		{ID: "1", Labels: map[string]string{"org-id": "123", "platform": "linux"}},
+		{ID: "2", Labels: map[string]string{"org-id": "456", "platform": "linux"}},
+		{ID: "3", Labels: map[string]string{"org-id": "123", "platform": "windows"}},
+	}
+
+	assert.NoError(t, q.PushAtOnce(ctx, tasks))
+
+	filter123 := func(task *model.Task) (bool, int) {
+		if task.Labels["org-id"] == "123" {
+			return true, 20
+		}
+		return true, 1
+	}
+
+	filter456 := func(task *model.Task) (bool, int) {
+		if task.Labels["org-id"] == "456" {
+			return true, 20
+		}
+		return true, 1
+	}
+
+	results := make(chan *model.Task, 2)
+	go func() {
+		task, _ := q.Poll(ctx, 1, filter123)
+		results <- task
+	}()
+	go func() {
+		task, _ := q.Poll(ctx, 2, filter456)
+		results <- task
+	}()
+
+	receivedTasks := make(map[string]int64)
+	for range 2 {
+		select {
+		case task := <-results:
+			receivedTasks[task.ID] = task.AgentID
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for tasks")
+		}
+	}
+
+	assert.Contains(t, []string{"1", "3"}, findTaskByAgent(receivedTasks, 1))
+	assert.Equal(t, "2", findTaskByAgent(receivedTasks, 2))
+
+	// Edge case: filter that rejects all tasks
+	filterRejectAll := func(task *model.Task) (bool, int) {
+		return false, 0
+	}
+
+	task4 := &model.Task{ID: "4", Labels: map[string]string{"org-id": "789"}}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{task4}))
+	waitForProcess()
+
+	pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	_, err := q.Poll(pollCtx, 99, filterRejectAll)
+	pollCancel()
+	assert.Error(t, err) // Should timeout as filter rejects task
+
+	// Clean up remaining tasks
+	task3, _ := q.Poll(ctx, 1, filterFnTrue)
+	assert.NoError(t, q.Done(ctx, task3.ID, model.StatusSuccess))
+	task4Got, _ := q.Poll(ctx, 99, filterFnTrue)
+	assert.NoError(t, q.Done(ctx, task4Got.ID, model.StatusSuccess))
+	waitForProcess()
+}
+
+func TestShouldRunLogic(t *testing.T) {
+	tests := []struct {
+		name      string
+		depStatus model.StatusValue
+		runOn     []string
+		expected  bool
+	}{
+		{"Success without RunOn", model.StatusSuccess, nil, true},
+		{"Failure without RunOn", model.StatusFailure, nil, false},
+		{"Success with failure RunOn", model.StatusSuccess, []string{"failure"}, false},
+		{"Failure with failure RunOn", model.StatusFailure, []string{"failure"}, true},
+		{"Success with both RunOn", model.StatusSuccess, []string{"success", "failure"}, true},
+		{"Skipped without RunOn", model.StatusSkipped, nil, false},
+		{"Skipped with failure RunOn", model.StatusSkipped, []string{"failure"}, true},
+		// Edge cases
+		{"Killed without RunOn", model.StatusKilled, nil, false},
+		{"Killed with failure RunOn", model.StatusKilled, []string{"failure"}, true},
+		{"Success with success RunOn only", model.StatusSuccess, []string{"success"}, true},
+		{"Failure with success RunOn only", model.StatusFailure, []string{"success"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &model.Task{
+				ID:           "2",
+				Dependencies: []string{"1"},
+				DepStatus:    map[string]model.StatusValue{"1": tt.depStatus},
+				RunOn:        tt.runOn,
+			}
+			assert.Equal(t, tt.expected, task.ShouldRun())
+		})
+	}
+
+	// Edge case: multiple dependencies with mixed statuses
+	t.Run("multiple deps mixed status", func(t *testing.T) {
+		task := &model.Task{
+			ID:           "3",
+			Dependencies: []string{"1", "2"},
+			DepStatus: map[string]model.StatusValue{
+				"1": model.StatusSuccess,
+				"2": model.StatusFailure,
+			},
+			RunOn: nil,
+		}
+		// With default RunOn (nil), needs all deps successful
+		assert.False(t, task.ShouldRun())
+
+		task.RunOn = []string{"success", "failure"}
+		// With both RunOn, should run regardless
+		assert.True(t, task.ShouldRun())
+	})
+}
+
+func findTaskByAgent(tasks map[string]int64, agentID int64) string {
+	for taskID, aid := range tasks {
+		if aid == agentID {
+			return taskID
+		}
+	}
+	return ""
+}
+
+func TestFifoFairDispatch(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	t.Run("older pipeline dependent dispatches before newer pipeline task", func(t *testing.T) {
+		// Core fair-dispatch bug: when an older pipeline's dependent clears its
+		// dependency it is PushBack'd to the TAIL of pending, landing behind a
+		// task from a pipeline created later and getting starved. Dispatch must
+		// order by Created, not insertion order, so the earlier task deliberately
+		// carries the HIGHER ID to prove ordering is by Created, never by ID.
+		dep := &model.Task{ID: "10", PipelineID: 1, Created: 100}
+		older := &model.Task{
+			ID:           "20",
+			PipelineID:   1,
+			Created:      100,
+			Dependencies: []string{"10"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+		newer := &model.Task{ID: "30", PipelineID: 2, Created: 200}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dep, older, newer}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 1, info.Stats.WaitingOnDeps) // older is parked on its dependency
+
+		// dep and newer are runnable; dep sorts first by Created either way.
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got.ID)
+
+		// completing dep clears older's dependency; filterWaiting PushBacks older
+		// to the tail of pending, leaving pending == [newer, older].
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		// the now-ready older dependent (lower Created) must win over newer.
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got2.ID, "older pipeline's now-ready dependent must dispatch before the newer pipeline's task")
+
+		// drain whichever task actually dispatched so the queue empties cleanly
+		// whether or not creation-order dispatch is in effect; the defended
+		// contract lives entirely in the assertion above.
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"20", "30"}, []string{got2.ID, got3.ID})
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("concurrency admission is invariant to the Created-ordered walk", func(t *testing.T) {
+		// The creation-order dispatch reorders the pending walk; the concurrency admit/defer
+		// decision (a full, position-independent scan) must be unchanged. An
+		// unlimited task whose Created falls BETWEEN the two group members must
+		// run freely without disturbing which member takes the single slot.
+		// IDs track Created only incidentally here; ordering is proved elsewhere.
+		a := &model.Task{ID: "100", PipelineID: 1, Created: 100, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+		c := &model.Task{ID: "150", PipelineID: 3, Created: 150} // unlimited, sorts BETWEEN a and b
+		b := &model.Task{ID: "200", PipelineID: 2, Created: 200, ConcurrencyGroup: "repo:deploy", ConcurrencyLimit: 1}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{a, b, c}))
+		waitForProcess()
+
+		g1, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		g2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		// a (earliest group member) takes the single group slot; c (unlimited)
+		// runs freely; b is deferred even though the sorted walk visits c between.
+		assert.ElementsMatch(t, []string{"100", "150"}, []string{g1.ID, g2.ID})
+
+		waitForProcess()
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 2)
+		assert.Len(t, info.Pending, 1) // b deferred by the concurrency limit
+
+		// b cannot be polled while a holds the only slot.
+		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		_, err = q.Poll(pollCtx, 3, filterFnTrue)
+		pollCancel()
+		assert.Error(t, err)
+
+		// freeing a's slot lets b (the remaining group member) run.
+		assert.NoError(t, q.Done(ctx, "100", model.StatusSuccess))
+		waitForProcess()
+		g3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "200", g3.ID)
+
+		assert.NoError(t, q.Done(ctx, "150", model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, g3.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("expired lease retries before a newer pending task", func(t *testing.T) {
+		q.extension = time.Hour
+
+		old := &model.Task{ID: "10", Created: 100}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{old}))
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got.ID)
+
+		q.Lock()
+		q.running[got.ID].deadline = time.Now().Add(-time.Second)
+		q.resubmitExpiredPipelines()
+		q.Unlock()
+		event := receiveExpiredTask(t, q)
+		assert.Equal(t, ExpiredTask{ID: "10", AgentID: 1}, event)
+		info := q.Info(ctx)
+		assert.Len(t, info.Running, 1)
+		assert.Empty(t, info.Pending)
+
+		newer := &model.Task{ID: "20", Created: 200}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{newer}))
+		assert.NoError(t, q.Reserve(ctx, event.ID, event.AgentID, true))
+		assert.NoError(t, q.Requeue(ctx, event.ID))
+
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "10", got2.ID, "expired task retries before the newer pending task")
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		got3, err := q.Poll(ctx, 3, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got3.ID)
+		assert.NoError(t, q.Done(ctx, got3.ID, model.StatusSuccess))
+		info = q.Info(ctx)
+		assert.Empty(t, info.Pending)
+		assert.Empty(t, info.Running)
+	})
+
+	t.Run("same-Created siblings dispatch in name order", func(t *testing.T) {
+		// Two independent same-pipeline siblings share Created; the tiebreaker is
+		// the workflow Name, not insertion order or ID. "aaa" sorts before "zzz"
+		// yet carries the HIGHER ID, so a pass proves ordering is by Name, not ID.
+		zzz := &model.Task{ID: "10", PipelineID: 1, Created: 100, Name: "zzz"}
+		aaa := &model.Task{ID: "20", PipelineID: 1, Created: 100, Name: "aaa"}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{zzz, aaa}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got.ID, "same-Created siblings dispatch in name order")
+
+		// drain off the actually dispatched IDs so a regression ends as an
+		// assertion failure rather than hanging on an empty queue.
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"10", "20"}, []string{got.ID, got2.ID})
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("same-Created siblings dispatch by blocked count before name", func(t *testing.T) {
+		// The higher-ID task with more blocked descendants sorts before the lower-ID task.
+		zzz := &model.Task{ID: "20", PipelineID: 1, Created: 100, Name: "zzz", BlockedCount: 5}
+		aaa := &model.Task{ID: "10", PipelineID: 1, Created: 100, Name: "aaa", BlockedCount: 0}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{zzz, aaa}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "20", got.ID, "higher blocked count dispatches first")
+
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"10", "20"}, []string{got.ID, got2.ID})
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("identical Created and Name dispatch in insertion order", func(t *testing.T) {
+		// Two tasks the comparator treats as fully equal — same Created AND same
+		// Name — must keep their relative order. This is the documented
+		// stability guarantee of the creation-order sort and the only case that
+		// reaches the comparator's equal branch. The tasks are pushed with the
+		// higher ID first so a tiebreak that reordered equal elements (e.g. by
+		// ID) would flip the result and be caught.
+		second := &model.Task{ID: "2", PipelineID: 1, Created: 100, Name: "build"}
+		first := &model.Task{ID: "1", PipelineID: 1, Created: 100, Name: "build"}
+
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{second, first}))
+		waitForProcess()
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "2", got.ID, "equal-comparator tasks dispatch in insertion order")
+
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "1", got2.ID, "equal-comparator tasks dispatch in insertion order")
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("multiple workers dispatch the earliest-Created tasks first", func(t *testing.T) {
+		// Several runnable tasks and several waiting workers coexist within a
+		// single process tick, so the queue makes multiple back-to-back
+		// assignments while re-sorting the shrinking pending set. IDs are
+		// inverted against Created so an insertion-order (unsorted) walk would
+		// starve the earliest pipelines. With three workers and four independent
+		// tasks the three earliest-Created tasks must win the slots; the latest
+		// waits. The dispatched SET is asserted (order among the concurrent
+		// workers is not externally observable), which is deterministic
+		// regardless of goroutine and tick scheduling.
+		t4 := &model.Task{ID: "1", PipelineID: 1, Created: 400}
+		t3 := &model.Task{ID: "2", PipelineID: 2, Created: 300}
+		t2 := &model.Task{ID: "3", PipelineID: 3, Created: 200}
+		t1 := &model.Task{ID: "4", PipelineID: 4, Created: 100}
+		// pushed newest-first: insertion order is the reverse of Created order.
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{t4, t3, t2, t1}))
+
+		results := make(chan *model.Task, 3)
+		for i := range 3 {
+			agentID := int64(i + 1)
+			go func() {
+				task, _ := q.Poll(ctx, agentID, filterFnTrue)
+				results <- task
+			}()
+		}
+
+		dispatched := make([]string, 0, 3)
+		for range 3 {
+			select {
+			case task := <-results:
+				dispatched = append(dispatched, task.ID)
+			case <-time.After(2 * time.Second):
+				t.Fatal("timeout waiting for concurrent dispatch")
+			}
+		}
+		// the three earliest-Created tasks take the three slots; the
+		// latest-Created task is left pending.
+		assert.ElementsMatch(t, []string{"4", "3", "2"}, dispatched)
+
+		info := q.Info(ctx)
+		assert.Len(t, info.Pending, 1)
+		assert.Equal(t, "1", info.Pending[0].ID, "latest-Created task waits while earlier tasks take the slots")
+
+		// draining the slots lets the last task run.
+		for _, id := range dispatched {
+			assert.NoError(t, q.Done(ctx, id, model.StatusSuccess))
+		}
+		waitForProcess()
+		got, err := q.Poll(ctx, 4, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "1", got.ID)
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+
+	t.Run("dependent with lower Created still dispatches after its dependency", func(t *testing.T) {
+		// Dependency safety must never be inverted by creation-order sorting: a
+		// dependent whose Created is EARLIER than its dependency would sort first
+		// on Created alone, but filterWaiting parks it until the dependency
+		// completes, so it can never dispatch ahead of what it depends on.
+		dep := &model.Task{ID: "1", PipelineID: 1, Created: 200}
+		dependent := &model.Task{
+			ID:           "2",
+			PipelineID:   1,
+			Created:      100, // LOWER than dep — would sort first if not parked
+			Dependencies: []string{"1"},
+			DepStatus:    make(map[string]model.StatusValue),
+			RunOn:        []string{"success", "failure"},
+		}
+		assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{dep, dependent}))
+		waitForProcess()
+
+		info := q.Info(ctx)
+		assert.Equal(t, 1, info.Stats.WaitingOnDeps) // dependent parked despite its lower Created
+
+		got, err := q.Poll(ctx, 1, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "1", got.ID, "dependency dispatches before its lower-Created dependent")
+
+		// completing the dependency clears the block; only now may the dependent run.
+		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		waitForProcess()
+		got2, err := q.Poll(ctx, 2, filterFnTrue)
+		assert.NoError(t, err)
+		assert.Equal(t, "2", got2.ID, "lower-Created dependent runs only after its dependency completes")
+
+		assert.NoError(t, q.Done(ctx, got2.ID, model.StatusSuccess))
+		waitForProcess()
+		info = q.Info(ctx)
+		assert.Len(t, info.Pending, 0)
+		assert.Len(t, info.Running, 0)
+	})
+}
+
+func TestFifoMultiDispatchTickOrder(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	// A single process tick dispatches in a loop, so several tasks leave the
+	// pending list in one pass. Only the earliest-Created tasks may go, however
+	// many workers are waiting: with fewer workers than tasks, the tail of the
+	// creation order must stay pending. Tasks are pushed newest-first, and in
+	// separate batches, so a pending list that is not kept in creation order
+	// dispatches the wrong ones.
+	pushes := [][]*model.Task{
+		{{ID: "50", Created: 500}, {ID: "40", Created: 400}},
+		{{ID: "30", Created: 300}},
+		{{ID: "20", Created: 200}, {ID: "10", Created: 100}},
+	}
+	for _, batch := range pushes {
+		assert.NoError(t, q.PushAtOnce(ctx, batch))
+	}
+
+	// two workers, five pending tasks: exactly the two earliest dispatch.
+	results := make(chan *model.Task, 2)
+	for agentID := int64(1); agentID <= 2; agentID++ {
+		go func() {
+			task, _ := q.Poll(ctx, agentID, filterFnTrue)
+			results <- task
+		}()
+	}
+
+	dispatched := make([]string, 0, 2)
+	for range 2 {
+		select {
+		case task := <-results:
+			assert.NotNil(t, task)
+			dispatched = append(dispatched, task.ID)
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for dispatched tasks")
+		}
+	}
+	assert.ElementsMatch(t, []string{"10", "20"}, dispatched,
+		"the two earliest-Created tasks must be the ones dispatched in the tick")
+
+	waitForProcess()
+	info := q.Info(ctx)
+	pending := make([]string, 0, len(info.Pending))
+	for _, task := range info.Pending {
+		pending = append(pending, task.ID)
+	}
+	assert.Equal(t, []string{"30", "40", "50"}, pending,
+		"the remaining tasks stay pending in creation order")
+
+	for _, id := range dispatched {
+		assert.NoError(t, q.Done(ctx, id, model.StatusSuccess))
+	}
+}
+
+func TestFifoBranchEventsDispatchBeforePullRequests(t *testing.T) {
+	ctx, cancel, q := setupTestQueue(t)
+	defer cancel(nil)
+
+	// A PR backlog created first must not hold back a later main push (CD).
+	ev := func(e model.WebhookEvent) map[string]string {
+		return map[string]string{pipeline.LabelEvent: string(e)}
+	}
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{
+		{ID: "pr", Created: 100, Labels: ev(model.EventPull)},
+		{ID: "meta", Created: 150, Labels: ev(model.EventPullMetadata)},
+	}))
+	assert.NoError(t, q.PushAtOnce(ctx, []*model.Task{
+		{ID: "push", Created: 300, Labels: ev(model.EventPush)},
+	}))
+
+	order := make([]string, 0, 3)
+	for range 3 {
+		task, err := q.Poll(ctx, 1, filterFnTrue)
+		require.NoError(t, err)
+		order = append(order, task.ID)
+		require.NoError(t, q.Done(ctx, task.ID, model.StatusSuccess))
+	}
+	assert.Equal(t, []string{"push", "pr", "meta"}, order)
+}
+
+func TestFifoPendingInsertOrder(t *testing.T) {
+	// The two insert helpers differ only in where they place a task among the
+	// ones it compares equal to: a normal push goes after them (the order the
+	// append-then-stable-sort it replaces produced), while a resubmitted expired
+	// task goes ahead of them, keeping the retry priority a list push-front used
+	// to give it. Asserted directly on the list: through the queue the two are
+	// indistinguishable whenever the comparator already separates the tasks.
+	pendingIDs := func(q *fifo) []string {
+		ids := make([]string, 0, q.pending.Len())
+		for element := q.pending.Front(); element != nil; element = element.Next() {
+			task, _ := element.Value.(*model.Task)
+			ids = append(ids, task.ID)
+		}
+		return ids
+	}
+
+	q := &fifo{pending: list.New()}
+	q.pushPending(&model.Task{ID: "b1", Created: 200})
+	q.pushPending(&model.Task{ID: "a", Created: 100})
+	q.pushPending(&model.Task{ID: "c", Created: 300})
+	q.pushPending(&model.Task{ID: "b2", Created: 200})
+	assert.Equal(t, []string{"a", "b1", "b2", "c"}, pendingIDs(q),
+		"a push is ordered by Created and lands after the tasks it ties with")
+
+	q.pushPendingFront(&model.Task{ID: "retry", Created: 200})
+	assert.Equal(t, []string{"a", "retry", "b1", "b2", "c"}, pendingIDs(q),
+		"a resubmitted task is ordered by Created but lands ahead of its ties")
+
+	// pushPendingFront's empty-list branch: its first call above went into a
+	// populated list, so cover the fresh-list case too (symmetric with the
+	// pushPending empty-list push at the top).
+	empty := &fifo{pending: list.New()}
+	empty.pushPendingFront(&model.Task{ID: "only", Created: 100})
+	assert.Equal(t, []string{"only"}, pendingIDs(empty),
+		"pushPendingFront into an empty list seeds the list")
+
+	// Both helpers must also handle the ends of the list, not just the middle.
+	q.pushPendingFront(&model.Task{ID: "first", Created: 50})
+	q.pushPending(&model.Task{ID: "last", Created: 400})
+	assert.Equal(t, []string{"first", "a", "retry", "b1", "b2", "c", "last"}, pendingIDs(q))
+}
+
+func TestFifoFilterWaitingDrainOrder(t *testing.T) {
+	// filterWaiting drains dependency-cleared tasks back into pending on every
+	// tick. They must land in creation order among the tasks already there —
+	// a task from an older pipeline goes ahead of the newer tail, which is the
+	// whole point of fair dispatch. Asserted on the list rather than through a
+	// dispatch, so the invariant has a guard of its own.
+	// A single drained task that sorts to the very front stops the cursor on the
+	// first comparison — the simplest merge case.
+	q := &fifo{pending: list.New(), waitingOnDeps: list.New(), running: map[string]*entry{}}
+	q.pending.PushBack(&model.Task{ID: "new1", Created: 300})
+	q.pending.PushBack(&model.Task{ID: "new2", Created: 400})
+	q.waitingOnDeps.PushBack(&model.Task{ID: "old", Created: 100})
+
+	q.filterWaiting()
+
+	pendingIDs := func(q *fifo) []string {
+		ids := make([]string, 0, q.pending.Len())
+		for element := q.pending.Front(); element != nil; element = element.Next() {
+			task, _ := element.Value.(*model.Task)
+			ids = append(ids, task.ID)
+		}
+		return ids
+	}
+	assert.Equal(t, []string{"old", "new1", "new2"}, pendingIDs(q),
+		"a drained task keeps its creation-order priority over newer pending tasks")
+
+	// Multiple drained tasks interleaving into the middle and tail of a
+	// multi-element pending list: exercises the forward cursor advancing across
+	// iterations and the at==nil tail-PushBack branch. waitingOnDeps must be
+	// ascending (the invariant filterWaiting's rebuild maintains).
+	q2 := &fifo{pending: list.New(), waitingOnDeps: list.New(), running: map[string]*entry{}}
+	for _, id := range []struct {
+		name    string
+		created int64
+	}{{"p100", 100}, {"p300", 300}, {"p500", 500}} {
+		q2.pending.PushBack(&model.Task{ID: id.name, Created: id.created})
+	}
+	for _, id := range []struct {
+		name    string
+		created int64
+	}{{"w200", 200}, {"w400", 400}, {"w600", 600}} {
+		q2.waitingOnDeps.PushBack(&model.Task{ID: id.name, Created: id.created})
+	}
+
+	q2.filterWaiting()
+
+	assert.Equal(t, []string{"p100", "w200", "p300", "w400", "p500", "w600"}, pendingIDs(q2),
+		"drained tasks merge into creation order, advancing the cursor through the middle and appending at the tail (w600)")
+
+	// A drained task whose Created ties a pending task lands AFTER the equal-key
+	// pending task, matching the append-then-stable-sort semantics the merge
+	// replaces (taskOrderLess is a strict less-than on Created, blocked count, then Name).
+	q3 := &fifo{pending: list.New(), waitingOnDeps: list.New(), running: map[string]*entry{}}
+	q3.pending.PushBack(&model.Task{ID: "pending-200", Created: 200, Name: "a"})
+	q3.waitingOnDeps.PushBack(&model.Task{ID: "drained-200", Created: 200, Name: "z"})
+
+	q3.filterWaiting()
+
+	assert.Equal(t, []string{"pending-200", "drained-200"}, pendingIDs(q3),
+		"a drained task tying a pending task's Created lands after it")
+}

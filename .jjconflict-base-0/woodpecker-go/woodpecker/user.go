@@ -1,0 +1,110 @@
+// Copyright 2024 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package woodpecker
+
+import (
+	"fmt"
+	"net/url"
+)
+
+const (
+	pathSelf  = "%s/api/user"
+	pathRepos = "%s/api/user/repos"
+	pathUsers = "%s/api/users"
+	pathUser  = "%s/api/users/%s?forge_id=%d"
+)
+
+type RepoListOptions struct {
+	All bool // query all repos, including inactive ones
+}
+
+type UserListOptions struct {
+	ListOptions
+}
+
+// QueryEncode returns the URL query parameters for the RepoListOptions.
+func (opt *RepoListOptions) QueryEncode() string {
+	query := make(url.Values)
+	if opt.All {
+		query.Add("all", "true")
+	}
+	return query.Encode()
+}
+
+// Self returns the currently authenticated user.
+func (c *client) Self() (*User, error) {
+	out := new(User)
+	uri := fmt.Sprintf(pathSelf, c.addr)
+	err := c.get(uri, out)
+	return out, err
+}
+
+// User returns a user by login.
+// It is recommended to specify forgeID (default is 1).
+func (c *client) User(login string, forgeID ...int64) (*User, error) {
+	out := new(User)
+	if len(forgeID) == 0 {
+		forgeID = []int64{primaryForgeID}
+	}
+	err := c.get(fmt.Sprintf(pathUser, c.addr, login, forgeID[0]), out)
+	return out, err
+}
+
+// UserList returns a list of all registered users.
+func (c *client) UserList(opt UserListOptions) ([]*User, error) {
+	var out []*User
+	uri, _ := url.Parse(fmt.Sprintf(pathUsers, c.addr))
+	uri.RawQuery = opt.getURLQuery().Encode()
+	err := c.get(uri.String(), &out)
+	return out, err
+}
+
+// UserPost creates a new user account.
+func (c *client) UserPost(in *User) (*User, error) {
+	out := new(User)
+	uri := fmt.Sprintf(pathUsers, c.addr)
+	err := c.post(uri, in, out)
+	return out, err
+}
+
+// UserPatch updates a user account.
+func (c *client) UserPatch(in *User) (*User, error) {
+	if in.ForgeID < primaryForgeID {
+		in.ForgeID = primaryForgeID
+	}
+	out := new(User)
+	uri := fmt.Sprintf(pathUser, c.addr, in.Login, in.ForgeID)
+	err := c.patch(uri, in, out)
+	return out, err
+}
+
+// UserDel deletes a user account.
+// It is recommended to specify forgeID (default is 1).
+func (c *client) UserDel(login string, forgeID ...int64) error {
+	if len(forgeID) == 0 {
+		forgeID = []int64{primaryForgeID}
+	}
+	return c.delete(fmt.Sprintf(pathUser, c.addr, login, forgeID[0]))
+}
+
+// RepoList returns a list of all repositories to which
+// the user has explicit access in the host system.
+func (c *client) RepoList(opt RepoListOptions) ([]*Repo, error) {
+	var out []*Repo
+	uri, _ := url.Parse(fmt.Sprintf(pathRepos, c.addr))
+	uri.RawQuery = opt.QueryEncode()
+	err := c.get(uri.String(), &out)
+	return out, err
+}

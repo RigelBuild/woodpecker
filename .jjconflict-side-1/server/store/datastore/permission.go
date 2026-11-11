@@ -1,0 +1,99 @@
+// Copyright 2021 Woodpecker Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package datastore
+
+import (
+	"fmt"
+	"time"
+
+	"xorm.io/builder"
+	"xorm.io/xorm"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+)
+
+func (s storage) PermFind(user *model.User, repo *model.Repo) (*model.Perm, error) {
+	perm := new(model.Perm)
+	return perm, wrapGet(s.engine.
+		Where(builder.Eq{"user_id": user.ID, "repo_id": repo.ID}).
+		Get(perm))
+}
+
+func (s storage) PermUpsert(perm *model.Perm) error {
+	return retryWrite(func() error {
+		sess := s.engine.NewSession()
+		defer sess.Close()
+		if err := sess.Begin(); err != nil {
+			return err
+		}
+		if err := s.permUpsert(sess, perm); err != nil {
+			return err
+		}
+		return sess.Commit()
+	})
+}
+
+func (s storage) permUpsert(sess *xorm.Session, perm *model.Perm) error {
+	if perm.RepoID == 0 {
+		return fmt.Errorf("could not determine repo for permission: %v", perm)
+	}
+
+	if perm.UserID == 0 {
+		return fmt.Errorf("could not determine user for permission: %v", perm)
+	}
+
+	exist, err := sess.Where(userIDAndRepoIDCond(perm)).Exist(new(model.Perm))
+	if err != nil {
+		return err
+	}
+
+	if exist {
+		perm.Updated = time.Now().Unix()
+		err = wrapUpdate(sess.Where(userIDAndRepoIDCond(perm)).AllCols().Update(perm))
+	} else {
+		// insert will set auto created ID back to perm object
+		perm.Created = time.Now().Unix()
+		perm.Updated = perm.Created
+		err = wrapInsert(sess.Insert(perm))
+	}
+	return err
+}
+
+// userPushOrAdminCondition return condition where user must have push or admin rights
+// if used make sure to have permission table ("perms") joined.
+func userPushOrAdminCondition(userID int64) builder.Cond {
+	return builder.Eq{"perms.user_id": userID}.
+		And(builder.Eq{"perms.push": true}.
+			Or(builder.Eq{"perms.admin": true}))
+}
+
+func userIDAndRepoIDCond(perm *model.Perm) builder.Cond {
+	return builder.Eq{"user_id": perm.UserID, "repo_id": perm.RepoID}
+}
+
+// PermPrune deletes all permission rows for a user
+// where the repo_id is NOT IN the provided keepRepoIDs list. If keepRepoIDs
+// is empty, all permissions for the user are deleted.
+func (s storage) PermPrune(userID int64, keepRepoIDs []int64) error {
+	if len(keepRepoIDs) == 0 {
+		_, err := s.engine.Where(builder.Eq{"user_id": userID}).Delete(new(model.Perm))
+		return err
+	}
+
+	_, err := s.engine.Where(builder.Eq{"user_id": userID}).
+		And(builder.NotIn("repo_id", keepRepoIDs)).
+		Delete(new(model.Perm))
+	return err
+}

@@ -1,0 +1,319 @@
+// Copyright 2018 Drone.IO Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package api
+
+import (
+	"context"
+	"encoding/base32"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
+	"github.com/tink-crypto/tink-go/v2/subtle/random"
+
+	"go.woodpecker-ci.org/woodpecker/v3/server"
+	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/router/middleware/session"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/shared/token"
+	"go.woodpecker-ci.org/woodpecker/v3/shared/utils"
+)
+
+// GetSelf
+//
+//	@Summary	Get the currently authenticated user
+//	@Router		/user [get]
+//	@Produce	json
+//	@Success	200	{object}	User
+//	@Tags		User
+//	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+func GetSelf(c *gin.Context) {
+	c.JSON(http.StatusOK, session.User(c))
+}
+
+// GetFeed
+//
+//	@Summary		Get the currently authenticated users pipeline feed
+//	@Description	The feed lists the most recent pipeline for the currently authenticated user.
+//	@Router			/user/feed [get]
+//	@Produce		json
+//	@Success		200	{array}	Feed
+//	@Tags			User
+//	@Param			Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+func GetFeed(c *gin.Context) {
+	_store := store.FromContext(c)
+
+	user := session.User(c)
+	latest, _ := strconv.ParseBool(c.Query("latest"))
+
+	if latest {
+		feed, err := _store.RepoListLatest(user)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Error fetching feed. %s", err)
+		} else {
+			c.JSON(http.StatusOK, feed)
+		}
+		return
+	}
+
+	feed, err := _store.UserFeed(user)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error fetching user feed. %s", err)
+		return
+	}
+	var fs []*model.APIFeed
+	for _, f := range feed {
+		fs = append(fs, f.ToAPIModel())
+	}
+	c.JSON(http.StatusOK, fs)
+}
+
+// GetRepos
+//
+//	@Summary		Get user's repositories
+//	@Description	Retrieve the currently authenticated User's Repository list
+//	@Router			/user/repos [get]
+//	@Produce		json
+//	@Success		200	{array}	RepoLastPipeline
+//	@Tags			User
+//	@Param			Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+//	@Param			all				query	bool	false	"query all repos, including inactive ones"
+//	@Param			name			query	string	false	"filter repos by name"
+func GetRepos(c *gin.Context) {
+	_store := store.FromContext(c)
+	user := session.User(c)
+	_forge, err := server.Config.Services.Manager.ForgeFromUser(user)
+	if err != nil {
+		log.Error().Err(err).Msg("Cannot get forge from user")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	all, _ := strconv.ParseBool(c.Query("all"))
+	filter := &model.RepoFilter{
+		Name: c.Query("name"),
+	}
+
+	if all {
+		dbRepos, err := _store.RepoList(user, true, false, filter)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Error fetching repository list. %s", err)
+			return
+		}
+
+		dbReposMap := make(map[model.ForgeRemoteID]*model.Repo)
+		dbStaleReposMap := make(map[int64]*model.Repo)
+		dbReposFullNameMap := make(map[string]*model.Repo)
+		for _, r := range dbRepos {
+			dbReposMap[r.ForgeRemoteID] = r
+			dbReposFullNameMap[strings.ToLower(r.FullName)] = r
+			dbStaleReposMap[r.ID] = r
+		}
+
+		// Same slow shape as the permission sync below: paging against the forge
+		// can outrun the server-wide WriteTimeout, which bounds total handler
+		// runtime. This is the "add repository" listing, so a large account is
+		// the expected case rather than the edge one.
+		onPage := slowHandlerProgress(c, newResponseController(c.Writer))
+		_repos, err := utils.Paginate(func(page int) ([]*model.Repo, error) {
+			if err := onPage(); err != nil {
+				return nil, err
+			}
+			return _forge.Repos(c, user, &model.ListOptions{
+				Page:    page,
+				PerPage: perPage,
+			})
+		}, maxPage)
+		if err != nil {
+			// The error may be onPage's rather than the forge's: the client went
+			// away mid-paging, so there is no listing to return and no fault to
+			// report.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				log.Debug().Err(err).Msgf("get repos: client has gone away while listing repositories for user %s", user.Login)
+				c.AbortWithStatus(statusClientClosedRequest)
+				return
+			}
+			c.String(http.StatusInternalServerError, "Error fetching repository list. %s", err)
+			return
+		}
+
+		var repos []*model.Repo
+		for _, r := range _repos {
+			// make sure forgeID is set
+			r.ForgeID = user.ForgeID
+
+			if r.Perm.Push && server.Config.Permissions.OwnersAllowlist.IsAllowed(r) {
+				if existingRepo := dbReposMap[r.ForgeRemoteID]; existingRepo != nil {
+					// update repo with forge response
+					existingRepo.Update(r)
+					// re-apply active info
+					existingRepo.IsActive = dbReposMap[r.ForgeRemoteID].IsActive
+					// add to final return list
+					repos = append(repos, existingRepo)
+					// not stale, so remove it
+					delete(dbStaleReposMap, existingRepo.ID)
+				} else if r.Perm.Admin {
+					// you must be admin of the remote repo to enable the repo
+					repos = append(repos, r)
+				}
+			}
+		}
+
+		// detect conflicts
+		for _, r := range repos {
+			// calc if we have a remote repo with different remote id but same name as a stored one
+			if existingRepo := dbReposFullNameMap[strings.ToLower(r.FullName)]; existingRepo != nil && existingRepo.ForgeRemoteID != r.ForgeRemoteID {
+				r.ID = existingRepo.ID
+				r.HasForgeNameConflict = true
+
+				// not stale, so remove it
+				delete(dbStaleReposMap, existingRepo.ID)
+			}
+		}
+
+		// return stale repos
+		for _, staleRepo := range dbStaleReposMap {
+			staleRepo.HasNoForgeRepo = true
+			repos = append(repos, staleRepo)
+		}
+
+		c.JSON(http.StatusOK, repos)
+		return
+	}
+
+	activeRepos, err := _store.RepoList(user, true, true, filter)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error fetching repository list. %s", err)
+		return
+	}
+
+	repoIDs := make([]int64, len(activeRepos))
+	for i, repo := range activeRepos {
+		repoIDs[i] = repo.ID
+	}
+
+	pipelines, err := _store.GetRepoLatestPipelines(repoIDs)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error fetching repository list. %s", err)
+		return
+	}
+
+	latestPipelines := make(map[int64]*model.Pipeline, len(activeRepos))
+	for _, pipeline := range pipelines {
+		latestPipelines[pipeline.RepoID] = pipeline
+	}
+
+	repos := make([]*model.RepoLastPipeline, len(activeRepos))
+	for i, repo := range activeRepos {
+		var lastAPIPipeline *model.APIPipeline
+		lastPipeline, ok := latestPipelines[repo.ID]
+		if ok {
+			lastAPIPipeline = lastPipeline.ToAPIModel()
+		}
+
+		repos[i] = &model.RepoLastPipeline{
+			Repo:         repo,
+			LastPipeline: lastAPIPipeline,
+		}
+	}
+
+	c.JSON(http.StatusOK, repos)
+}
+
+func RefreshRepos(c *gin.Context) {
+	_store := store.FromContext(c)
+	user := session.User(c)
+
+	_forge, err := server.Config.Services.Manager.ForgeFromUser(user)
+	if err != nil {
+		log.Error().Err(err).Msg("Cannot get forge from user")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	// The sync pages against the forge and can outrun the server-wide
+	// WriteTimeout, which bounds total handler runtime; re-arm per page so a
+	// refresh over a large account still returns its 200, and stop paging once
+	// the client has gone away.
+	onPage := slowHandlerProgress(c, newResponseController(c.Writer))
+	if err := updateRepoPermissions(c, user, _store, _forge, user.ForgeID, onPage); err != nil {
+		// onPage stopped the sync because the client went away, not because the
+		// sync failed. A 500 here would report our own healthy refresh as a
+		// server fault.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log.Debug().Err(err).Msgf("refresh repos: client has gone away while syncing repo permissions for user %s", user.Login)
+			c.AbortWithStatus(statusClientClosedRequest)
+			return
+		}
+		log.Error().Err(err).Msgf("Can't update repo permissions for user %s in forge %s", user.Login, _forge.Name())
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	c.JSON(http.StatusOK, "Ok")
+}
+
+// PostToken
+//
+//	@Summary	Return the token of the current user as string
+//	@Router		/user/token [post]
+//	@Produce	plain
+//	@Success	200
+//	@Tags		User
+//	@Param		Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+func PostToken(c *gin.Context) {
+	user := session.User(c)
+	t := token.New(token.UserToken)
+	t.Set("user-id", strconv.FormatInt(user.ID, 10))
+	tokenString, err := t.Sign(user.Hash)
+	if err != nil {
+		_ = c.AbortWithError(http.StatusInternalServerError, err)
+		return
+	}
+	c.String(http.StatusOK, tokenString)
+}
+
+// DeleteToken
+//
+//	@Summary		Reset a token
+//	@Description	Reset's the current personal access token of the user and returns a new one.
+//	@Router			/user/token [delete]
+//	@Produce		plain
+//	@Success		200
+//	@Tags			User
+//	@Param			Authorization	header	string	true	"Insert your personal access token"	default(Bearer <personal access token>)
+func DeleteToken(c *gin.Context) {
+	_store := store.FromContext(c)
+
+	user := session.User(c)
+	user.Hash = base32.StdEncoding.EncodeToString(
+		random.GetRandomBytes(32),
+	)
+	if err := _store.UpdateUser(user); err != nil {
+		c.String(http.StatusInternalServerError, "Error revoking tokens. %s", err)
+		return
+	}
+
+	t := token.New(token.UserToken)
+	t.Set("user-id", strconv.FormatInt(user.ID, 10))
+	tokenString, err := t.Sign(user.Hash)
+	if err != nil {
+		_ = c.AbortWithError(http.StatusInternalServerError, err)
+		return
+	}
+	c.String(http.StatusOK, tokenString)
+}
