@@ -59,14 +59,18 @@ const (
 )
 
 type kube struct {
-	client              kubernetes.Interface
-	config              *config
-	goos                string
-	openLogStream       func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
-	logRetryNow         func() time.Time
-	logRetryTimeout     time.Duration
-	waitLogReopen       func(context.Context, time.Duration) error
+	client          kubernetes.Interface
+	config          *config
+	goos            string
+	openLogStream   func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
+	logRetryNow     func() time.Time
+	logRetryTimeout time.Duration
+	waitLogReopen   func(context.Context, time.Duration) error
+	// snapshotObserved is called after WaitStep's informer stores a Running snapshot for the pod.
+	// Only tests set it; production leaves it nil.
+	snapshotObserved    func(podName string)
 	nodes               sync.Map
+	started             sync.Map
 	workflowResourcesMu sync.RWMutex
 	workflowResources   map[string]Resources
 }
@@ -182,17 +186,7 @@ func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) 
 			log.Error().Msgf("could not parse pod: %v", obj)
 			return
 		}
-		if pod.Name != podName {
-			return
-		}
-		e.recordNode(pod)
-		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
-			upOnce.Do(func() { close(up) })
-		}
-		switch pod.Status.Phase {
-		case kube_core_v1.PodRunning, kube_core_v1.PodSucceeded, kube_core_v1.PodFailed:
-			upOnce.Do(func() { close(up) })
-		}
+		e.observePodUp(pod, podName, up, &upOnce)
 	}
 	podDeleted := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
@@ -464,13 +458,8 @@ func (e *kube) SetupWorkflow(ctx context.Context, conf *types.Config, taskUUID s
 
 // StartStep starts the pipeline step.
 func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string) error {
-	options, err := parseBackendOptions(step)
-	if err != nil {
-		log.Error().Err(err).Msg("could not parse backend options")
-	}
-	if step.Type == types.StepTypeClone && len(options.Resources.Requests) == 0 && len(options.Resources.Limits) == 0 {
-		options.Resources = e.getWorkflowResources(taskUUID)
-	}
+	options := e.stepBackendOptions(step, taskUUID)
+	var err error
 
 	if needsRegistrySecret(step) {
 		err = startRegistrySecret(ctx, e, step)
@@ -491,7 +480,8 @@ func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string)
 	return err
 }
 
-func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
+// waitStepAttempt waits for one step pod attempt; WaitStep decides whether to recreate it.
+func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
 	podName, err := stepToPodName(step)
 	if err != nil {
 		return nil, err
@@ -499,6 +489,9 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	log.Trace().Str("taskUUID", taskUUID).Msgf("waiting for pod: %s", podName)
 
 	var last atomic.Pointer[kube_core_v1.Pod]
+	// deleted is closed once, only by a watch DELETED event for this pod: not a tombstone, not a bare Get.
+	deleted := make(chan struct{})
+	var deletedOnce sync.Once
 	finished := make(chan struct{})
 	var finishedOnce sync.Once
 	podChanged := func(obj any) {
@@ -512,6 +505,9 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 		}
 		last.Store(pod.DeepCopy())
 		e.recordNode(pod)
+		if e.snapshotObserved != nil && pod.Status.Phase == kube_core_v1.PodRunning {
+			e.snapshotObserved(podName)
+		}
 		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
 			finishedOnce.Do(func() { close(finished) })
 		}
@@ -526,6 +522,7 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	podDeleted := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
 		if !ok {
+			// A tombstone carries a possibly stale object; it ends the wait but proves no observed delete.
 			tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 			if !ok {
 				return
@@ -534,8 +531,14 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if !ok {
 				return
 			}
+			if pod.Name == podName {
+				podChanged(pod)
+				finishedOnce.Do(func() { close(finished) })
+			}
+			return
 		}
 		if pod.Name == podName {
+			deletedOnce.Do(func() { close(deleted) })
 			podChanged(pod)
 			finishedOnce.Do(func() { close(finished) })
 		}
@@ -568,7 +571,8 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+			observed := awaitObservedDelete(ctx, deleted)
+			return nil, deletedLoss(newest, observed, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		return nil, err
 	} else {
@@ -618,7 +622,8 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+			observed := awaitObservedDelete(ctx, deleted)
+			return nil, deletedLoss(newest, observed, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
 		}
 		if !types.InTeardown(ctx) {
 			newest := last.Load()
@@ -1133,6 +1138,7 @@ func (e *kube) DestroyStep(ctx context.Context, step *types.Step, taskUUID strin
 	}
 	if podName, nameErr := stepToPodName(step); nameErr == nil {
 		e.nodes.Delete(podName)
+		e.started.Delete(podName)
 	} else {
 		errs = append(errs, nameErr)
 	}
@@ -1148,6 +1154,7 @@ func (e *kube) DestroyWorkflow(ctx context.Context, conf *types.Config, taskUUID
 		for _, step := range stage.Steps {
 			if podName, err := stepToPodName(step); err == nil {
 				e.nodes.Delete(podName)
+				e.started.Delete(podName)
 			}
 			err := stopPod(ctx, e, step, e.config.newDefaultDeleteOptions())
 			if err != nil {
