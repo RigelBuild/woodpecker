@@ -160,7 +160,7 @@ func TestAffinityFromCliContext(t *testing.T) {
 	t.Setenv("WOODPECKER_BACKEND_K8S_POD_AFFINITY_ALLOW_FROM_STEP", "false")
 
 	cmd := &cli.Command{
-		Flags: Flags,
+		Flags: newFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			ctx = context.WithValue(ctx, types.CliCommand, c)
 			config, err := configFromCliContext(ctx)
