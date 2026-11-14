@@ -48,6 +48,7 @@ done
 [ "$(yq -r '.jobs.release-binaries.if' "$publisher")" = "github.event_name == 'push'" ] || fail 'release binaries are tag-push-only'
 [ "$(yq -r '.jobs.release-binaries.steps | map(select((.run // "") | test("build-release-binaries.sh"))) | length' "$publisher")" = 1 ] || fail 'release binaries built by the script'
 [ "$(yq -r '.jobs.release-binaries.permissions.contents // "read"' "$publisher")" = read ] || fail 'release binaries use contents read permission'
+grep -Fq 'targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)' "$root/.github/scripts/build-release-binaries.sh" || fail 'release binaries cover all flake systems'
 grep -Fq 'version.Version' "$root/.github/scripts/build-release-binaries.sh" || fail 'release binaries set version ldflag'
 grep -Fq 'tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner' "$root/.github/scripts/build-release-binaries.sh" || fail 'release archives are deterministic'
 grep -Fq 'gzip -n' "$root/.github/scripts/build-release-binaries.sh" || fail 'release gzip header is deterministic'
@@ -55,6 +56,9 @@ grep -Fq "go-version: '1.27.x'" "$publisher" || fail 'release binaries use Go 1.
 grep -Fq 'check-latest: true' "$publisher" || fail 'release binaries check latest Go patch'
 grep -Fq 'cache: false' "$publisher" || fail 'release binaries disable Go cache'
 grep -Fq 'persist-credentials: false' "$publisher" || fail 'release binaries checkout has no persisted credentials'
+download_index="$(yq -r '.jobs.finalize.steps | map(.name) | index("Download release binaries")' "$publisher")"
+create_index="$(yq -r '.jobs.finalize.steps | map(.name) | index("Create GitHub Release")' "$publisher")"
+[ "$download_index" != null ] && [ "$create_index" != null ] && [ "$download_index" -lt "$create_index" ] || fail 'finalize downloads binaries before release creation'
 grep -Fq 'gh release create "$tag" --verify-tag --generate-notes dist/assets/*' "$publisher" || fail 'new release includes release binaries'
 grep -Fq 'gh release download "$tag" --pattern "$name"' "$publisher" || fail 'existing release asset is downloaded for comparison'
 grep -Fq 'Release asset $name exists with a different sha256' "$publisher" || fail 'existing release assets must match checksums'
