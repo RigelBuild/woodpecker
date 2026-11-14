@@ -80,7 +80,7 @@ func parsePipeline(
 	}
 
 	// Filters run first so unusable secrets fail instead of blocking. Caller-variable
-	// runs only share restricted secrets when allowlisted.
+	// runs never get gated secrets, and get branch-filtered secrets only when allowlisted.
 	trunkMerge := isTrunkMergeRun(currentPipeline)
 	callerVariables := hasCallerVariables(currentPipeline, envs)
 	manualSecretsAllowlisted := manualSecretVariablesAllowed(
