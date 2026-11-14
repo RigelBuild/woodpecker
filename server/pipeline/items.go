@@ -105,7 +105,7 @@ func parsePipeline(
 		if !branchAllowed {
 			continue
 		}
-		if withholdForCallerVariables && (sec.RequireApproval || len(sec.Branches) > 0) {
+		if (callerVariables && sec.RequireApproval) || (withholdForCallerVariables && len(sec.Branches) > 0) {
 			continue
 		}
 		if sec.RequireApproval && trunkMerge {

@@ -79,7 +79,7 @@ func parseWithSecrets(t *testing.T, pipeline *model.Pipeline, secs []*model.Secr
 	return parseWithService(t, pipeline, secretService, approval, yaml)
 }
 
-func parseWithService(t *testing.T, pipeline *model.Pipeline, secretService secret.Service, approval *Approval, yaml string) ([]*builder.Item, error) {
+func parseWithService(t *testing.T, pipeline *model.Pipeline, secretService secret.Service, approval *Approval, yaml string, callerEnvs ...map[string]string) ([]*builder.Item, error) {
 	t.Helper()
 
 	user := &model.User{ID: 1, Login: "test-owner"}
@@ -104,6 +104,11 @@ func parseWithService(t *testing.T, pipeline *model.Pipeline, secretService secr
 	manager.On("RegistryServiceFromRepo", mock.Anything).Return(registryService).Maybe()
 	manager.On("EnvironmentService").Return(nil).Maybe()
 
+	var envs map[string]string
+	if len(callerEnvs) > 0 {
+		envs = callerEnvs[0]
+	}
+
 	return parsePipeline(
 		t.Context(),
 		forge,
@@ -112,7 +117,7 @@ func parseWithService(t *testing.T, pipeline *model.Pipeline, secretService secr
 		user,
 		repo,
 		[]*forge_types.FileMeta{{Name: "woodpecker.yml", Data: []byte(yaml)}},
-		nil,
+		envs,
 		approval,
 	)
 }
@@ -305,8 +310,43 @@ func TestParsePipelineGatedSecretEventMismatchDoesNotBlock(t *testing.T) {
 	assertNoSecretValue(t, items, gatedSecretValue)
 }
 
+func TestManualSecretVariablesAllowed(t *testing.T) {
+	t.Parallel()
+
+	const key = "PETREL_CD_TARGETS"
+	tests := []struct {
+		name      string
+		pipeline  model.Pipeline
+		repo      model.Repo
+		envs      map[string]string
+		allowlist []string
+		want      bool
+	}{
+		{name: "allowed additional variable", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main", AdditionalVariables: map[string]string{key: "api"}}, repo: model.Repo{Branch: "main"}, allowlist: []string{key}, want: true},
+		{name: "allowed restart env", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main"}, repo: model.Repo{Branch: "main"}, envs: map[string]string{key: "api"}, allowlist: []string{key}, want: true},
+		{name: "cron", pipeline: model.Pipeline{Event: model.EventCron, Branch: "main", AdditionalVariables: map[string]string{key: "api"}}, repo: model.Repo{Branch: "main"}, allowlist: []string{key}},
+		{name: "push", pipeline: model.Pipeline{Event: model.EventPush, Branch: "main", AdditionalVariables: map[string]string{key: "api"}}, repo: model.Repo{Branch: "main"}, allowlist: []string{key}},
+		{name: "restart env unlisted", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main"}, repo: model.Repo{Branch: "main"}, envs: map[string]string{"BASH_ENV": "/tmp/payload"}, allowlist: []string{key}},
+		{name: "empty default branch", pipeline: model.Pipeline{Event: model.EventManual, Branch: "", AdditionalVariables: map[string]string{key: "api"}}, repo: model.Repo{}, allowlist: []string{key}},
+		{name: "non-default branch", pipeline: model.Pipeline{Event: model.EventManual, Branch: "feature", AdditionalVariables: map[string]string{key: "api"}}, repo: model.Repo{Branch: "main"}, allowlist: []string{key}},
+		{name: "case variant", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main", AdditionalVariables: map[string]string{"petrel_cd_targets": "api"}}, repo: model.Repo{Branch: "main"}, allowlist: []string{key}},
+		{name: "allowed env and unlisted additional variable", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main", AdditionalVariables: map[string]string{"BASH_ENV": "/tmp/payload"}}, repo: model.Repo{Branch: "main"}, envs: map[string]string{key: "api"}, allowlist: []string{key}},
+		{name: "allowed additional variable and unlisted env", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main", AdditionalVariables: map[string]string{key: "api"}}, repo: model.Repo{Branch: "main"}, envs: map[string]string{"BASH_ENV": "/tmp/payload"}, allowlist: []string{key}},
+		{name: "empty allowlist", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main", AdditionalVariables: map[string]string{key: "api"}}, repo: model.Repo{Branch: "main"}},
+		{name: "no caller variables", pipeline: model.Pipeline{Event: model.EventManual, Branch: "main"}, repo: model.Repo{Branch: "main"}, allowlist: []string{key}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, manualSecretVariablesAllowed(&tt.pipeline, &tt.repo, tt.envs, tt.allowlist))
+		})
+	}
+}
+
 // Caller variables share restricted secrets only when every key is explicitly trusted for a manual default-branch run.
 func TestParsePipelineCallerVariablesWithholdRestrictedSecrets(t *testing.T) {
+	useApprovers(t, "test-owner")
+
 	branchFiltered := &model.Secret{
 		ID: 3, RepoID: 1, Name: "PULUMI_ACCESS_TOKEN", Value: "branch-filtered-value",
 		Events: []model.WebhookEvent{model.EventManual, model.EventPush}, Branches: []string{"main", "feature"},
@@ -318,6 +358,7 @@ func TestParsePipelineCallerVariablesWithholdRestrictedSecrets(t *testing.T) {
 		branch     string
 		allowlist  []string
 		variables  map[string]string
+		envs       map[string]string
 		wantSecret bool
 	}{
 		{
@@ -329,6 +370,14 @@ func TestParsePipelineCallerVariablesWithholdRestrictedSecrets(t *testing.T) {
 				"PETREL_CD_TARGETS":      "api",
 				"SECRETS_ROTATE_TARGETS": "registry",
 			},
+			wantSecret: true,
+		},
+		{
+			name:       "allowlisted restart envs on the default branch are kept",
+			event:      model.EventManual,
+			branch:     "main",
+			allowlist:  []string{"PETREL_CD_TARGETS"},
+			envs:       map[string]string{"PETREL_CD_TARGETS": "api"},
 			wantSecret: true,
 		},
 		{
@@ -366,6 +415,7 @@ func TestParsePipelineCallerVariablesWithholdRestrictedSecrets(t *testing.T) {
 		t.Run(sec.Name, func(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
+					useManualSecretVariableAllowlist(t, tt.allowlist...)
 					testSecret := *sec
 					if testSecret.Name == gatedSecretName {
 						testSecret.Events = nil
@@ -382,15 +432,18 @@ func TestParsePipelineCallerVariablesWithholdRestrictedSecrets(t *testing.T) {
 					if tt.event == model.EventManual {
 						config = requestingManualYAML(testSecret.Name)
 					}
-					items, err := parseWithSecrets(
+					secretService := secret_service_mocks.NewMockService(t)
+					secretService.On("SecretListPipeline", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+						Return([]*model.Secret{&testSecret}, nil)
+					items, err := parseWithService(
 						t,
 						pipeline,
-						[]*model.Secret{&testSecret},
-						nil,
+						secretService,
 						&Approval{Login: "test-owner", Session: true},
 						config,
+						tt.envs,
 					)
-					if tt.wantSecret {
+					if tt.wantSecret && !testSecret.RequireApproval {
 						require.NoError(t, err)
 						require.Len(t, items, 1)
 						step := items[0].Config.Stages[len(items[0].Config.Stages)-1].Steps[0]
