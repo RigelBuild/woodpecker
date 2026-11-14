@@ -22,13 +22,14 @@ import (
 )
 
 type Item struct {
-	Workflow         *Workflow
-	Labels           map[string]string
-	DependsOn        constraint.DependsOn
-	RunsOn           []string
-	ConcurrencyLimit int
-	ConcurrencyGroup string
-	Config           *backend_types.Config
+	Workflow                 *Workflow
+	Labels                   map[string]string
+	DependsOn                constraint.DependsOn
+	RunsOn                   []string
+	ConcurrencyLimit         int
+	ConcurrencyGroup         string
+	ConcurrencyPipelineOrder bool
+	Config                   *backend_types.Config
 	// Skipped marks a workflow whose `when` conditions did not match. It carries
 	// no compiled config and is not scheduled, but is persisted and reported so
 	// it can surface as a skipped check on the forge.

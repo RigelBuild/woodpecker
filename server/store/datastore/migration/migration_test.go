@@ -204,3 +204,34 @@ func TestAddTaskQueueTimestampsPreservesLegacyRows(t *testing.T) {
 	assert.Zero(t, got.Enqueued)
 	assert.Zero(t, got.Started)
 }
+
+type taskPipelineOrderV037 struct {
+	ID                       string `xorm:"PK UNIQUE 'id'"`
+	ConcurrencyPipelineOrder bool   `xorm:"NOT NULL DEFAULT false 'concurrency_pipeline_order'"`
+}
+
+func (taskPipelineOrderV037) TableName() string { return "tasks" }
+
+func TestAddTaskPipelineOrderPreservesLegacyRows(t *testing.T) {
+	engine, closeDB := testDB(t, true)
+	defer closeDB()
+	require.NoError(t, engine.Sync(new(taskBeforeQueueTimestamps)))
+	_, err := engine.Insert(&taskBeforeQueueTimestamps{ID: "legacy-task"})
+	require.NoError(t, err)
+	sess := engine.NewSession()
+	defer sess.Close()
+	require.NoError(t, addTaskPipelineOrder.MigrateSession(sess))
+	require.NoError(t, sess.Commit())
+	var got taskPipelineOrderV037
+	has, err := engine.ID("legacy-task").Get(&got)
+	require.NoError(t, err)
+	require.True(t, has)
+	assert.False(t, got.ConcurrencyPipelineOrder)
+	_, err = engine.Insert(&taskPipelineOrderV037{ID: "ordered-task", ConcurrencyPipelineOrder: true})
+	require.NoError(t, err)
+	var gotOrdered taskPipelineOrderV037
+	has, err = engine.ID("ordered-task").Get(&gotOrdered)
+	require.NoError(t, err)
+	require.True(t, has)
+	assert.True(t, gotOrdered.ConcurrencyPipelineOrder)
+}
