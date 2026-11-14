@@ -79,10 +79,17 @@ func parsePipeline(
 		return nil, fmt.Errorf("error getting secrets for %s#%d: %w", repo.FullName, currentPipeline.Number, err)
 	}
 
-	// Filters run first so an unusable secret fails the run rather than blocking it;
-	// merge-queue and caller-variable runs never get a gated or branch-filtered secret.
+	// Filters run first so unusable secrets fail instead of blocking. Caller-variable
+	// runs never get gated secrets, and get branch-filtered secrets only when allowlisted.
 	trunkMerge := isTrunkMergeRun(currentPipeline)
 	callerVariables := hasCallerVariables(currentPipeline, envs)
+	manualSecretsAllowlisted := manualSecretVariablesAllowed(
+		currentPipeline,
+		repo,
+		envs,
+		server.Config.Pipeline.ManualSecretVariableAllowlist,
+	)
+	withholdForCallerVariables := callerVariables && !manualSecretsAllowlisted
 	released := secretReleased(approval, server.Config.Pipeline.SecretApprovers)
 	branches := &branchProof{ctx: ctx, forge: forgeClient, user: user, repo: repo, p: currentPipeline}
 	var secrets []compiler.Secret
@@ -98,7 +105,7 @@ func parsePipeline(
 		if !branchAllowed {
 			continue
 		}
-		if callerVariables && (sec.RequireApproval || len(sec.Branches) > 0) {
+		if (callerVariables && sec.RequireApproval) || (withholdForCallerVariables && len(sec.Branches) > 0) {
 			continue
 		}
 		if sec.RequireApproval && trunkMerge {

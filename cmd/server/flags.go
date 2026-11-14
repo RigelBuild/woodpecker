@@ -287,6 +287,14 @@ var flags = append([]cli.Flag{
 		},
 	},
 	&cli.StringSliceFlag{
+		Sources: cli.EnvVars("WOODPECKER_MANUAL_SECRET_VARIABLE_ALLOWLIST"),
+		Name:    "manual-secret-variable-allowlist",
+		Usage:   "variable names allowed with restricted secrets on default-branch manual runs",
+		Config: cli.StringConfig{
+			TrimSpace: true,
+		},
+	},
+	&cli.StringSliceFlag{
 		Sources: cli.EnvVars("WOODPECKER_PLUGINS_TRUSTED_CLONE"),
 		Name:    "plugins-trusted-clone",
 		Usage:   "Lint allowlist for clone images; unlisted images trigger a warning but do not block credential injection",

@@ -96,7 +96,7 @@ Push, cron and manual pipelines on other branches do not get the secret, so the 
 An empty list allows all branches.
 Pull requests are not filtered by branch; use the events filter to keep a secret away from them.
 
-A manual pipeline, cron or restart that sets custom variables never gets a branch-filtered secret, because a variable such as `BASH_ENV` can run code in every step.
+A manual pipeline, cron or restart that sets custom variables does not get a branch-filtered secret, because a variable such as `BASH_ENV` can run code in every step. An exception is a manual run on the default branch where every caller-supplied variable is listed in the server's [manual secret variable allowlist](../30-administration/10-configuration/10-server.md#manual_secret_variable_allowlist).
 
 A deployment, tag or release pipeline gets a branch-filtered secret only when its commit is the current head of an allowed branch, because the forge takes the branch of these events from data the sender chooses.
 So a deployment that rolls back to an older commit of `main`, or a tag or release on an older `main` commit, does not get a `main`-only secret.

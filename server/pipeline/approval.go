@@ -135,6 +135,28 @@ func hasCallerVariables(p *model.Pipeline, envs map[string]string) bool {
 	return len(p.AdditionalVariables) > 0 || len(envs) > 0
 }
 
+// manualSecretVariablesAllowed trusts listed variables only on the repo's
+// default-branch manual run.
+func manualSecretVariablesAllowed(p *model.Pipeline, repo *model.Repo, envs map[string]string, allowlist []string) bool {
+	if len(allowlist) == 0 || p.Event != model.EventManual || repo.Branch == "" || p.Branch != repo.Branch {
+		return false
+	}
+	if !hasCallerVariables(p, envs) {
+		return false
+	}
+	for key := range p.AdditionalVariables {
+		if !slices.Contains(allowlist, key) {
+			return false
+		}
+	}
+	for key := range envs {
+		if !slices.Contains(allowlist, key) {
+			return false
+		}
+	}
+	return true
+}
+
 // blockForApproval parks a pipeline whose only blocking errors are withheld
 // secrets, so an approver can release it through Approve.
 func blockForApproval(ctx context.Context, forge forge.Forge, store store.Store, pipeline *model.Pipeline, repo *model.Repo, user *model.User) error {
