@@ -183,8 +183,7 @@ concurrency:
   group: deploy
   pipeline_order: true
 ```
-
-Pending and dependency-blocked workflows hold their pipeline's turn. Eligible workflows in that pipeline can run together up to the limit; dependencies within the pipeline do not reserve slots against each other. Assigned and running work is never cancelled. If live configurations differ, any opt-in enables ordering for the group and the smallest positive live limit applies until those workflows finish. Equal creation times are ordered by pipeline ID.
+Pending and dependency-blocked workflows hold their pipeline's turn. Eligible workflows in that pipeline can run together up to the limit; dependencies within the pipeline do not reserve slots against each other. Assigned and running work is never cancelled. If live configurations differ, any opt-in enables ordering for the group and the smallest positive live limit applies until those workflows finish. Equal creation times are ordered by pipeline ID. `pipeline_order` only applies when `limit` is a positive number.
 
 ### Groups
 
