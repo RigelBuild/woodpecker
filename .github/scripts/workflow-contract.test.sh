@@ -52,18 +52,20 @@ grep -Fq 'targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)' "$root/.g
 grep -Fq 'version.Version' "$root/.github/scripts/build-release-binaries.sh" || fail 'release binaries set version ldflag'
 grep -Fq 'tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner' "$root/.github/scripts/build-release-binaries.sh" || fail 'release archives are deterministic'
 grep -Fq 'gzip -n' "$root/.github/scripts/build-release-binaries.sh" || fail 'release gzip header is deterministic'
-grep -Fq "go-version: '1.27.x'" "$publisher" || fail 'release binaries use Go 1.27'
-grep -Fq 'check-latest: true' "$publisher" || fail 'release binaries check latest Go patch'
-grep -Fq 'cache: false' "$publisher" || fail 'release binaries disable Go cache'
-grep -Fq 'persist-credentials: false' "$publisher" || fail 'release binaries checkout has no persisted credentials'
+[ "$(yq -r '.jobs.release-binaries.steps | map(select(.uses | test("actions/setup-go"))) | .[0].with["go-version"]' "$publisher")" = '1.27.x' ] || fail 'release binaries use Go 1.27'
+[ "$(yq -r '.jobs.release-binaries.steps | map(select(.uses | test("actions/setup-go"))) | .[0].with["check-latest"]' "$publisher")" = true ] || fail 'release binaries check latest Go patch'
+[ "$(yq -r '.jobs.release-binaries.steps | map(select(.uses | test("actions/setup-go"))) | .[0].with.cache' "$publisher")" = false ] || fail 'release binaries disable Go cache'
+[ "$(yq -r '.jobs.release-binaries.steps | map(select(.uses | test("actions/checkout"))) | .[0].with["persist-credentials"]' "$publisher")" = false ] || fail 'release binaries checkout has no persisted credentials'
+[ "$(yq -r '.jobs.release-binaries.steps | map(select(.id == "build")) | .[0].run | contains("go version")' "$publisher")" = true ] || fail 'release binary build reports its Go toolchain'
 download_index="$(yq -r '.jobs.finalize.steps | map(.name) | index("Download release binaries")' "$publisher")"
-create_index="$(yq -r '.jobs.finalize.steps | map(.name) | index("Create GitHub Release")' "$publisher")"
-[ "$download_index" != null ] && [ "$create_index" != null ] && [ "$download_index" -lt "$create_index" ] || fail 'finalize downloads binaries before release creation'
+release_index="$(yq -r '.jobs.finalize.steps | map(.name) | index("Create or update GitHub Release")' "$publisher")"
+[ "$download_index" != null ] && [ "$release_index" != null ] && [ "$download_index" -lt "$release_index" ] || fail 'finalize downloads binaries before release creation'
 grep -Fq 'gh release create "$tag" --verify-tag --generate-notes dist/assets/*' "$publisher" || fail 'new release includes release binaries'
 grep -Fq 'gh release download "$tag" --pattern "$name"' "$publisher" || fail 'existing release asset is downloaded for comparison'
-grep -Fq 'Release asset $name exists with a different sha256' "$publisher" || fail 'existing release assets must match checksums'
-grep -Fq 'gh release upload "$tag" dist/assets/*' "$publisher" || fail 'existing release receives missing release binaries'
-grep -Fq 'if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"' "$publisher" || fail 'existing release upload is guarded by release existence'
+grep -Fq 'Release asset $name exists with a different sha256 (built with $GO_VERSION)' "$publisher" || fail 'existing release assets must match checksums with toolchain context'
+grep -Fq 'gh release upload "$tag" "${new_assets[@]}"' "$publisher" || fail 'existing release uploads only missing release binaries'
+! grep -Fq 'gh release upload "$tag" dist/assets/*' "$publisher" || fail 'existing release does not upload all assets'
+grep -Fq 'if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"' "$publisher" || fail 'existing release upload is guarded by release existence'
 for job in agent-publish server-publish; do
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.push" "$publisher")" = true ] || fail "$job pushes its manifest"
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.outputs" "$publisher" | grep -c 'push-by-digest=true')" = 1 ] || fail "$job pushes by digest"
