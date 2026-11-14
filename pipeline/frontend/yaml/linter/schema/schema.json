@@ -132,6 +132,10 @@
             "group": {
               "type": "string",
               "description": "Identifier shared by workflows that are limited against each other. Defaults to the workflow name. Environment variables are substituted, e.g. `deploy-${CI_COMMIT_BRANCH}`."
+            },
+            "pipeline_order": {
+              "type": "boolean",
+              "description": "Give the earliest live pipeline the concurrency group turn."
             }
           }
         }

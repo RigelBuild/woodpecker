@@ -40,6 +40,8 @@ type Task struct {
 	// ConcurrencyGroup identifies tasks that are limited against each other.
 	// It is empty when no concurrency limit applies.
 	ConcurrencyGroup string `json:"concurrency_group" xorm:"'concurrency_group'"`
+	// ConcurrencyPipelineOrder reserves the group turn for the earliest pipeline.
+	ConcurrencyPipelineOrder bool `json:"concurrency_pipeline_order" xorm:"NOT NULL DEFAULT false 'concurrency_pipeline_order'"`
 	// Created is the unix timestamp the task's pipeline was created at. It
 	// defines the queue ordering across pipelines.
 	Created int64 `json:"created" xorm:"NOT NULL DEFAULT 0 'created'"`

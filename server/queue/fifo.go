@@ -572,24 +572,50 @@ func (q *fifo) pushPendingFront(task *model.Task) {
 	q.pending.PushBack(task)
 }
 
-// canRunConcurrent reports whether the given task may currently start without
-// violating its workflow concurrency limit. Tasks without a limit always pass,
-// keeping the default scheduling behavior unchanged.
-//
-// Slots within a concurrency group are granted in taskOrderLess order, not in
-// the order tasks become ready, so a later pipeline whose dependencies finish
-// faster cannot overtake an earlier one that is still waiting.
-//
-// The ordering reservation only applies across pipelines. Within a single
-// pipeline, execution order is already defined by depends_on, and reserving a
-// slot for an earlier workflow could deadlock when it depends on a later
-// workflow that shares the same group (e.g. deploy.yaml depending on
-// test.yaml). Because dependencies never cross pipelines, restricting the
-// reservation to other pipelines keeps the ordering guarantee while making
-// such deadlocks impossible.
+// canRunConcurrent applies pipeline turns when any live group member opts in.
+// The oldest pipeline owns the turn, including while its tasks wait on
+// dependencies. Running tasks from every pipeline count against the smallest
+// positive live limit. Without an opt-in, legacy slot reservations apply.
+// Same-pipeline pending tasks do not reserve slots against each other, so a
+// dependency can run before the task waiting for it.
 //
 // Expects the queue to be locked by the caller.
 func (q *fifo) canRunConcurrent(task *model.Task) bool {
+	if task.ConcurrencyGroup != "" {
+		ordered := task.ConcurrencyPipelineOrder
+		limit := task.ConcurrencyLimit
+		running := 0
+		oldest := task
+		inspect := func(other *model.Task) {
+			if other.ConcurrencyGroup != task.ConcurrencyGroup {
+				return
+			}
+			ordered = ordered || other.ConcurrencyPipelineOrder
+			if other.ConcurrencyLimit > 0 && (limit <= 0 || other.ConcurrencyLimit < limit) {
+				limit = other.ConcurrencyLimit
+			}
+			if other.Created < oldest.Created || (other.Created == oldest.Created && other.PipelineID < oldest.PipelineID) {
+				oldest = other
+			}
+		}
+		for _, e := range q.running {
+			if e.item.ConcurrencyGroup == task.ConcurrencyGroup {
+				running++
+				inspect(e.item)
+			}
+		}
+		for element := q.pending.Front(); element != nil; element = element.Next() {
+			other, _ := element.Value.(*model.Task)
+			inspect(other)
+		}
+		for element := q.waitingOnDeps.Front(); element != nil; element = element.Next() {
+			other, _ := element.Value.(*model.Task)
+			inspect(other)
+		}
+		if ordered {
+			return oldest.PipelineID == task.PipelineID && (limit <= 0 || running < limit)
+		}
+	}
 	if task.ConcurrencyLimit <= 0 || task.ConcurrencyGroup == "" {
 		return true
 	}

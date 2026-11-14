@@ -998,6 +998,93 @@ func TestFifoConcurrency(t *testing.T) {
 	})
 }
 
+func TestPipelineTurnAdmission(t *testing.T) {
+	newTask := func(id string, pipelineID, created int64, limit int, ordered bool) *model.Task {
+		return &model.Task{ID: id, PipelineID: pipelineID, Created: created, ConcurrencyGroup: "deploy", ConcurrencyLimit: limit, ConcurrencyPipelineOrder: ordered}
+	}
+	newQueue := func() *fifo {
+		return &fifo{pending: list.New(), waitingOnDeps: list.New(), running: make(map[string]*entry)}
+	}
+	t.Run("blocked older pipeline holds the turn", func(t *testing.T) {
+		q := newQueue()
+		blocked := newTask("blocked", 9, 10, 4, true)
+		blocked.Dependencies = []string{"external"}
+		sibling := newTask("sibling", 9, 10, 4, true)
+		later := newTask("later", 1, 20, 4, true)
+		q.waitingOnDeps.PushBack(blocked)
+		q.pending.PushBack(sibling)
+		q.pending.PushBack(later)
+		assert.False(t, q.canRunConcurrent(later))
+		assert.True(t, q.canRunConcurrent(sibling))
+		q.pending.Remove(q.pending.Front())
+		assert.False(t, q.canRunConcurrent(later))
+		q.waitingOnDeps.Init()
+		assert.True(t, q.canRunConcurrent(later))
+	})
+	t.Run("four roots and running capacity", func(t *testing.T) {
+		q := newQueue()
+		for i := range 5 {
+			task := newTask(fmt.Sprint(i), 1, 10, 4, true)
+			q.pending.PushBack(task)
+		}
+		for i := range 4 {
+			e := q.pending.Front()
+			task := e.Value.(*model.Task)
+			assert.True(t, q.canRunConcurrent(task), "root %d", i)
+			q.pending.Remove(e)
+			q.running[task.ID] = &entry{item: task}
+		}
+		assert.False(t, q.canRunConcurrent(q.pending.Front().Value.(*model.Task)))
+	})
+	t.Run("same pipeline dependency does not reserve a slot", func(t *testing.T) {
+		q := newQueue()
+		dependent := newTask("dependent", 1, 10, 1, true)
+		dependent.Dependencies = []string{"root"}
+		root := newTask("root", 1, 10, 1, true)
+		q.waitingOnDeps.PushBack(dependent)
+		q.pending.PushBack(root)
+		assert.True(t, q.canRunConcurrent(root))
+	})
+	t.Run("created precedes pipeline ID and ties use ID", func(t *testing.T) {
+		q := newQueue()
+		older := newTask("older", 10, 1, 4, true)
+		newer := newTask("newer", 1, 2, 4, true)
+		q.pending.PushBack(older)
+		q.pending.PushBack(newer)
+		assert.True(t, q.canRunConcurrent(older))
+		assert.False(t, q.canRunConcurrent(newer))
+		newer.Created = 1
+		assert.True(t, q.canRunConcurrent(newer))
+		assert.False(t, q.canRunConcurrent(older))
+	})
+	t.Run("mixed generations use smallest live cap", func(t *testing.T) {
+		q := newQueue()
+		legacy := newTask("legacy", 1, 1, 1, false)
+		root := newTask("root", 1, 1, 4, true)
+		later := newTask("later", 2, 2, 4, false)
+		q.running[legacy.ID] = &entry{item: legacy}
+		q.pending.PushBack(root)
+		q.pending.PushBack(later)
+		assert.False(t, q.canRunConcurrent(root))
+		assert.False(t, q.canRunConcurrent(later))
+		delete(q.running, legacy.ID)
+		assert.True(t, q.canRunConcurrent(root))
+		assert.False(t, q.canRunConcurrent(later))
+	})
+	t.Run("preexisting assignments are preserved", func(t *testing.T) {
+		q := newQueue()
+		older := newTask("older", 1, 1, 4, true)
+		newer := newTask("newer", 2, 2, 4, false)
+		root := newTask("root", 1, 1, 4, true)
+		q.running[older.ID] = &entry{item: older}
+		q.running[newer.ID] = &entry{item: newer}
+		q.pending.PushBack(root)
+		assert.True(t, q.canRunConcurrent(root))
+		assert.Len(t, q.running, 2)
+		assert.Same(t, newer, q.running[newer.ID].item)
+	})
+}
+
 func TestFifoLeaseManagement(t *testing.T) {
 	ctx, cancel, q := setupTestQueue(t)
 	defer cancel(nil)
