@@ -172,3 +172,16 @@ func TestConcurrencyRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestConcurrencyPipelineOrderRoundTrip(t *testing.T) {
+	var parsed Concurrency
+	err := yaml.Unmarshal([]byte("limit: 4\npipeline_order: true\n"), &parsed)
+	assert.NoError(t, err)
+	assert.Equal(t, Concurrency{Limit: 4, PipelineOrder: true}, parsed)
+	data, err := yaml.Marshal(parsed)
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), "pipeline_order: true")
+	var roundTrip Concurrency
+	assert.NoError(t, yaml.Unmarshal(data, &roundTrip))
+	assert.Equal(t, parsed, roundTrip)
+}

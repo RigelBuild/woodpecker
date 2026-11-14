@@ -35,6 +35,7 @@ func TestQueuePipelineConcurrency(t *testing.T) {
 		item          *builder.Item
 		expectedLimit int
 		expectedGroup string
+		expectedOrder bool
 	}{
 		{
 			name: "no limit leaves concurrency unset",
@@ -47,12 +48,14 @@ func TestQueuePipelineConcurrency(t *testing.T) {
 		{
 			name: "explicit group is scoped to the repo",
 			item: &builder.Item{
-				Workflow:         &builder.Workflow{ID: 2, Name: "build"},
-				ConcurrencyLimit: 2,
-				ConcurrencyGroup: "deploy",
+				Workflow:                 &builder.Workflow{ID: 2, Name: "build"},
+				ConcurrencyLimit:         2,
+				ConcurrencyGroup:         "deploy",
+				ConcurrencyPipelineOrder: true,
 			},
 			expectedLimit: 2,
 			expectedGroup: "7//deploy",
+			expectedOrder: true,
 		},
 		{
 			name: "empty group defaults to the workflow name",
@@ -74,6 +77,7 @@ func TestQueuePipelineConcurrency(t *testing.T) {
 			task := tasks[0]
 			assert.Equal(t, tt.expectedLimit, task.ConcurrencyLimit)
 			assert.Equal(t, tt.expectedGroup, task.ConcurrencyGroup)
+			assert.Equal(t, tt.expectedOrder, task.ConcurrencyPipelineOrder)
 		})
 	}
 }

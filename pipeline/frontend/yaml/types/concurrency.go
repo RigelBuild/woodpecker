@@ -33,6 +33,8 @@ type Concurrency struct {
 	// to the limit. When empty the limit applies per workflow, so different
 	// runs of the same workflow are limited against each other.
 	Group string `yaml:"group,omitempty"`
+	// PipelineOrder gives the earliest live pipeline the group turn.
+	PipelineOrder bool `yaml:"pipeline_order,omitempty"`
 }
 
 // UnmarshalYAML implements the Unmarshaler interface. It inspects the YAML
@@ -56,7 +58,7 @@ func (c *Concurrency) UnmarshalYAML(value *yaml.Node) error {
 		if err := value.Decode(&limit); err != nil {
 			return fmt.Errorf("failed to unmarshal concurrency limit: %w", err)
 		}
-		c.Limit = limit
+		*c = Concurrency{Limit: limit}
 		return nil
 
 	// full form: `concurrency: {limit: <int>, group: <string>}`
@@ -79,7 +81,7 @@ func (c *Concurrency) UnmarshalYAML(value *yaml.Node) error {
 // the config round-trips: when only a limit is set (no explicit group) it emits
 // the shorthand `concurrency: <int>`, otherwise the full `{limit, group}` form.
 func (c Concurrency) MarshalYAML() (any, error) {
-	if c.Group == "" {
+	if c.Group == "" && !c.PipelineOrder {
 		return c.Limit, nil
 	}
 	// alias type avoids recursing into this MarshalYAML.
@@ -89,5 +91,5 @@ func (c Concurrency) MarshalYAML() (any, error) {
 
 // IsZero treats a disabled (limit <= 0) concurrency as empty for omitempty.
 func (c Concurrency) IsZero() bool {
-	return c.Limit <= 0 && c.Group == ""
+	return c.Limit <= 0 && c.Group == "" && !c.PipelineOrder
 }

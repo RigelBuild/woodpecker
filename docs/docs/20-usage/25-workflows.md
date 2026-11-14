@@ -197,6 +197,16 @@ concurrency: 1
 
 Queued workflows of the same group start in the order their pipelines were created, **not** in the order they become ready to run. This matters when a workflow depends on other workflows (via `depends_on`) whose duration varies: even if a later pipeline's checks finish first, its limited workflow will not overtake an earlier pipeline that is still waiting. This guarantees that, for example, deployments happen in commit order.
 
+For a group that permits multiple workflows at once, set `pipeline_order: true` to give the earliest live pipeline the entire group turn:
+
+```yaml
+concurrency:
+  limit: 4
+  group: deploy
+  pipeline_order: true
+```
+
+Pending and dependency-blocked workflows hold their pipeline's turn. Eligible workflows in that pipeline can run together up to the limit; dependencies within the pipeline do not reserve slots against each other. Assigned and running work is never cancelled. If live configurations differ, any opt-in enables ordering for the group and the smallest positive live limit applies until those workflows finish. Equal creation times are ordered by pipeline ID. `pipeline_order` only applies when `limit` is a positive number.
 ### Groups
 
 By default, the limit applies per workflow within a repository. Different runs of the same workflow are limited against each other, while different workflows (and other repositories) are unaffected.

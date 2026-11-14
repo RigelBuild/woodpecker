@@ -7,3 +7,4 @@ steps:
 concurrency:
   limit: 1
   group: deploy-production
+  pipeline_order: true

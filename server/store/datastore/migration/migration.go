@@ -66,6 +66,7 @@ var migrationTasks = []*xormigrate.Migration{
 	&addTaskQueueTimestamps,
 	&addStepOutputs,
 	&addWorkflowSupersededBy,
+	&addTaskPipelineOrder,
 }
 
 var allBeans = []any{

@@ -57,6 +57,32 @@ steps:
 	assert.NoError(t, err)
 }
 
+func TestConcurrencyPipelineOrder(t *testing.T) {
+	m := &testMetadata{pipelineEvent: "push"}
+	b := PipelineBuilder{
+		GetWorkflowMetadata: m.GetWorkflowMetadata,
+		RepoTrusted:         &metadata.TrustedConfiguration{},
+		Yamls: []*YamlFile{{Data: []byte(`
+concurrency:
+  limit: 4
+  group: deploy
+  pipeline_order: true
+when:
+  event: push
+steps:
+  - name: build
+    image: scratch
+`)}},
+	}
+	items, err := b.Build()
+	if !assert.NoError(t, err) || !assert.Len(t, items, 1) {
+		return
+	}
+	assert.Equal(t, 4, items[0].ConcurrencyLimit)
+	assert.Equal(t, "deploy", items[0].ConcurrencyGroup)
+	assert.True(t, items[0].ConcurrencyPipelineOrder)
+}
+
 func TestMissingGlobalEnvsubst(t *testing.T) {
 	t.Parallel()
 

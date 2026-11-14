@@ -59,6 +59,7 @@ func pipelineTasks(repo *model.Repo, activePipeline *model.Pipeline, pipelineIte
 		// Set up the concurrency limit if the workflow opted in.
 		if item.ConcurrencyLimit > 0 {
 			task.ConcurrencyLimit = item.ConcurrencyLimit
+			task.ConcurrencyPipelineOrder = item.ConcurrencyPipelineOrder
 
 			// If no group assigned, each workflow is it's own unique group,
 			// else we use defined group unique per repo.
