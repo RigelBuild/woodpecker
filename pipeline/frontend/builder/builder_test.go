@@ -67,6 +67,8 @@ concurrency:
   limit: 4
   group: deploy
   pipeline_order: true
+when:
+  event: push
 steps:
   - name: build
     image: scratch
