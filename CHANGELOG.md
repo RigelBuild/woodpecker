@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### ✨ Features
+
+- Add `WOODPECKER_MANUAL_SECRET_VARIABLE_ALLOWLIST` to allow listed caller variables on default-branch manual runs to accompany branch-filtered secrets.
+
 ### 🐛 Bug Fixes
 
 - Stop workflows when the server no longer has their lease.

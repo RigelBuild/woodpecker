@@ -94,9 +94,11 @@ var Config = struct {
 		PrivilegedPlugins                   []string
 		// Logins whose browser-session approval releases gated secrets; empty releases none.
 		SecretApprovers []string
-		DefaultTimeout  int64
-		MaxTimeout      int64
-		Proxy           struct {
+		// Variable names trusted for restricted secrets on default-branch manual runs.
+		ManualSecretVariableAllowlist []string
+		DefaultTimeout                int64
+		MaxTimeout                    int64
+		Proxy                         struct {
 			No    string
 			HTTP  string
 			HTTPS string
