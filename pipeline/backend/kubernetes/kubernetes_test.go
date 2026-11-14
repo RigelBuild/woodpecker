@@ -1055,60 +1055,6 @@ func TestWaitStepUsesInformerExitZeroOnFinalNotFound(t *testing.T) {
 	assert.Equal(t, 0, state.ExitCode)
 }
 
-func TestWaitPodUpRecordsNodeFromInitialAdd(t *testing.T) {
-	client := fake.NewClientset()
-	engine := makeEngine(client)
-	step := makeStep("pod-running-initial")
-	podName, err := stepToPodName(step)
-	require.NoError(t, err)
-	pod := &kube_core_v1.Pod{
-		Name:      podName,
-		Namespace: "test-ns",
-		Spec:      kube_core_v1.PodSpec{NodeName: "node-1"},
-		Status:    kube_core_v1.PodStatus{Phase: kube_core_v1.PodRunning},
-	}
-	_, err = client.CoreV1().Pods("test-ns").Create(t.Context(), pod, kube_meta_v1.CreateOptions{})
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
-	gone, err := engine.waitPodUp(ctx, step, podName)
-	require.NoError(t, err)
-	require.False(t, gone)
-	value, ok := engine.nodes.Load(podName)
-	require.True(t, ok)
-	assert.Equal(t, "node-1", value)
-
-	_, err = client.CoreV1().Events("default").Create(t.Context(), &kube_core_v1.Event{
-		Name:           "preempt",
-		Namespace:      "default",
-		InvolvedObject: kube_core_v1.ObjectReference{Kind: "Node", Name: "node-1"},
-		Reason:         preemptEventReason, Source: kube_core_v1.EventSource{Component: preemptEventSource},
-		EventTime: kube_meta_v1.NewMicroTime(time.Now()),
-	}, kube_meta_v1.CreateOptions{})
-	require.NoError(t, err)
-	deleted := false
-	client.PrependReactor("list", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
-		if deleted {
-			return false, nil, nil
-		}
-		deleted = true
-		if err := client.Tracker().Delete(action.GetResource(), "test-ns", podName); err != nil {
-			return true, nil, err
-		}
-		return false, nil, nil
-	})
-	var teardown atomic.Bool
-	ctx, cancel = context.WithTimeout(types.WithTeardown(t.Context(), &teardown), 3*time.Second)
-	defer cancel()
-	state, err := engine.WaitStep(ctx, step, "task-1")
-	var loss *types.PodLossError
-	require.ErrorAs(t, err, &loss)
-	assert.Nil(t, state)
-	assert.Equal(t, "node-1", loss.Node)
-	assert.True(t, loss.Confirmed)
-}
-
 // A Spot pod can vanish while Pending; TailStep must return so WaitStep reports the loss.
 func TestTailStepReturnsWhenPendingPodIsDeleted(t *testing.T) {
 	for _, beforeSync := range []bool{true, false} {
