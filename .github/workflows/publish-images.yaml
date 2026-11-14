@@ -323,7 +323,6 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           AGENT_DIGEST: ${{ needs.agent-publish.outputs.digest }}
           SERVER_DIGEST: ${{ needs.server-publish.outputs.digest }}
-          GO_VERSION: ${{ needs.release-binaries.outputs.go-version }}
         run: .github/scripts/finalize-images.sh
 
       - name: Download release binaries
@@ -336,6 +335,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
+          GO_VERSION: ${{ needs.release-binaries.outputs.go-version }}
         run: |
           tag="v${VERSION}"
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null 2>&1; then
