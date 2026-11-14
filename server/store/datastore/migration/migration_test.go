@@ -229,8 +229,9 @@ func TestAddTaskPipelineOrderPreservesLegacyRows(t *testing.T) {
 	assert.False(t, got.ConcurrencyPipelineOrder)
 	_, err = engine.Insert(&taskPipelineOrderV037{ID: "ordered-task", ConcurrencyPipelineOrder: true})
 	require.NoError(t, err)
-	has, err = engine.ID("ordered-task").Get(&got)
+	var gotOrdered taskPipelineOrderV037
+	has, err = engine.ID("ordered-task").Get(&gotOrdered)
 	require.NoError(t, err)
 	require.True(t, has)
-	assert.True(t, got.ConcurrencyPipelineOrder)
+	assert.True(t, gotOrdered.ConcurrencyPipelineOrder)
 }

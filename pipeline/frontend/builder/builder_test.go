@@ -58,7 +58,7 @@ steps:
 }
 
 func TestConcurrencyPipelineOrder(t *testing.T) {
-	m := &testMetadata{}
+	m := &testMetadata{pipelineEvent: "push"}
 	b := PipelineBuilder{
 		GetWorkflowMetadata: m.GetWorkflowMetadata,
 		RepoTrusted:         &metadata.TrustedConfiguration{},

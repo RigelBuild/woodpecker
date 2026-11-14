@@ -1029,12 +1029,18 @@ func TestPipelineTurnAdmission(t *testing.T) {
 		}
 		for i := range 4 {
 			e := q.pending.Front()
-			task := e.Value.(*model.Task)
+			require.NotNil(t, e)
+			task, ok := e.Value.(*model.Task)
+			require.True(t, ok)
 			assert.True(t, q.canRunConcurrent(task), "root %d", i)
 			q.pending.Remove(e)
 			q.running[task.ID] = &entry{item: task}
 		}
-		assert.False(t, q.canRunConcurrent(q.pending.Front().Value.(*model.Task)))
+		lastPending := q.pending.Front()
+		require.NotNil(t, lastPending)
+		lastTask, ok := lastPending.Value.(*model.Task)
+		require.True(t, ok)
+		assert.False(t, q.canRunConcurrent(lastTask))
 	})
 	t.Run("same pipeline dependency does not reserve a slot", func(t *testing.T) {
 		q := newQueue()
