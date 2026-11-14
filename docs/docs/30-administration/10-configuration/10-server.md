@@ -898,6 +898,13 @@ Only an approval made from the web UI (a browser session) counts; an API token a
 When empty, no approval releases such a secret.
 These logins are also the only users who can create, change or delete such a secret.
 
+### MANUAL_SECRET_VARIABLE_ALLOWLIST
+
+- Name: `WOODPECKER_MANUAL_SECRET_VARIABLE_ALLOWLIST`
+- Default: none
+
+Comma-separated variable names that may accompany branch-filtered or approval-gated secrets on manual runs of the repository's default branch. Every caller-supplied variable must be listed. Other events, non-default branches, and an empty list keep restricted secrets withheld.
+
 ### PLUGINS_TRUSTED_CLONE
 
 - Name: `WOODPECKER_PLUGINS_TRUSTED_CLONE`

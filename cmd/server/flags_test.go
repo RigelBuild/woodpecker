@@ -97,3 +97,25 @@ func TestSecretApproversFlagParsesCommaList(t *testing.T) {
 	}
 	t.Fatal("secret-approvers flag not found")
 }
+
+func TestManualSecretVariableAllowlistFlagParsesCommaList(t *testing.T) {
+	t.Setenv("WOODPECKER_MANUAL_SECRET_VARIABLE_ALLOWLIST", "PETREL_CD_TARGETS, SECRETS_ROTATE_TARGETS")
+	var allowlist []string
+	for _, f := range flags {
+		flag, ok := f.(*cli.StringSliceFlag)
+		if !ok || flag.Name != "manual-secret-variable-allowlist" {
+			continue
+		}
+		cmd := &cli.Command{
+			Flags: []cli.Flag{flag},
+			Action: func(_ context.Context, c *cli.Command) error {
+				allowlist = c.StringSlice("manual-secret-variable-allowlist")
+				return nil
+			},
+		}
+		require.NoError(t, cmd.Run(t.Context(), []string{"test"}))
+		assert.Equal(t, []string{"PETREL_CD_TARGETS", "SECRETS_ROTATE_TARGETS"}, allowlist)
+		return
+	}
+	t.Fatal("manual-secret-variable-allowlist flag not found")
+}

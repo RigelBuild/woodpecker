@@ -288,6 +288,7 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.WebUI.MaxPipelineLogLineCount = c.Uint("max-pipeline-log-line-count")
 	server.Config.Pipeline.PrivilegedPlugins = c.StringSlice("plugins-privileged")
 	server.Config.Pipeline.SecretApprovers = c.StringSlice("secret-approvers")
+	server.Config.Pipeline.ManualSecretVariableAllowlist = c.StringSlice("manual-secret-variable-allowlist")
 
 	// TODO: remove with version 4.x
 	server.Config.Pipeline.ForceIgnoreServiceFailure = c.Bool("force-ignore-service-failure")
