@@ -258,7 +258,7 @@ jobs:
           push: false
           provenance: mode=max
 
-  # Host binaries for the flake packages, built from the tagged tree so hosts never compile.
+  # Host binaries for all flake systems, built from the tagged tree so hosts never compile.
   release-binaries:
     if: github.event_name == 'push'
     needs: resolve
@@ -266,11 +266,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27.x'
+          check-latest: true
+          cache: false
 
       - name: Build agent and CLI release binaries
         env:
@@ -316,6 +319,12 @@ jobs:
           SERVER_DIGEST: ${{ needs.server-publish.outputs.digest }}
         run: .github/scripts/finalize-images.sh
 
+      - name: Download release binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-binaries
+          path: dist/assets
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -325,17 +334,28 @@ jobs:
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null 2>&1; then
             echo "GitHub Release ${tag} already exists"
           else
-            gh release create "$tag" --verify-tag --generate-notes
+            gh release create "$tag" --verify-tag --generate-notes dist/assets/*
           fi
 
-      - name: Download release binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-binaries
-          path: dist/assets
-
-      - name: Attach release binaries
+      - name: Verify and upload existing release binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
-        run: gh release upload "v${VERSION}" dist/assets/* --clobber
+        run: |
+          tag="v${VERSION}"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.assets[].name')"
+          for asset in dist/assets/*; do
+            name="${asset##*/}"
+            if grep -Fxq "$name" <<<"$assets"; then
+              gh release download "$tag" --pattern "$name" --dir "$RUNNER_TEMP/release-assets"
+              existing="$RUNNER_TEMP/release-assets/$name"
+              expected="$(sha256sum "$asset" | cut -d ' ' -f 1)"
+              actual="$(sha256sum "$existing" | cut -d ' ' -f 1)"
+              [ "$expected" = "$actual" ] || { echo "Release asset $name exists with a different sha256" >&2; exit 1; }
+            fi
+          done
+          gh release upload "$tag" dist/assets/*
+

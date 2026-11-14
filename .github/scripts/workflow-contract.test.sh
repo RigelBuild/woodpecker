@@ -47,7 +47,19 @@ done
 [ "$(yq -r '.jobs.finalize.needs | sort | join(",")' "$publisher")" = 'agent-publish,release-binaries,resolve,server-publish' ] || fail 'finalize needs both image digests, binaries, and resolve'
 [ "$(yq -r '.jobs.release-binaries.if' "$publisher")" = "github.event_name == 'push'" ] || fail 'release binaries are tag-push-only'
 [ "$(yq -r '.jobs.release-binaries.steps | map(select((.run // "") | test("build-release-binaries.sh"))) | length' "$publisher")" = 1 ] || fail 'release binaries built by the script'
-grep -Fq 'gh release upload "v${VERSION}" dist/assets/* --clobber' "$publisher" || fail 'finalize attaches release binaries'
+[ "$(yq -r '.jobs.release-binaries.permissions.contents // "read"' "$publisher")" = read ] || fail 'release binaries use contents read permission'
+grep -Fq 'version.Version' "$root/.github/scripts/build-release-binaries.sh" || fail 'release binaries set version ldflag'
+grep -Fq 'tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner' "$root/.github/scripts/build-release-binaries.sh" || fail 'release archives are deterministic'
+grep -Fq 'gzip -n' "$root/.github/scripts/build-release-binaries.sh" || fail 'release gzip header is deterministic'
+grep -Fq "go-version: '1.27.x'" "$publisher" || fail 'release binaries use Go 1.27'
+grep -Fq 'check-latest: true' "$publisher" || fail 'release binaries check latest Go patch'
+grep -Fq 'cache: false' "$publisher" || fail 'release binaries disable Go cache'
+grep -Fq 'persist-credentials: false' "$publisher" || fail 'release binaries checkout has no persisted credentials'
+grep -Fq 'gh release create "$tag" --verify-tag --generate-notes dist/assets/*' "$publisher" || fail 'new release includes release binaries'
+grep -Fq 'gh release download "$tag" --pattern "$name"' "$publisher" || fail 'existing release asset is downloaded for comparison'
+grep -Fq 'Release asset $name exists with a different sha256' "$publisher" || fail 'existing release assets must match checksums'
+grep -Fq 'gh release upload "$tag" dist/assets/*' "$publisher" || fail 'existing release receives missing release binaries'
+grep -Fq 'if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"' "$publisher" || fail 'existing release upload is guarded by release existence'
 for job in agent-publish server-publish; do
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.push" "$publisher")" = true ] || fail "$job pushes its manifest"
   [ "$(yq -r ".jobs.${job}.steps | map(select(.uses | test(\"docker/build-push-action\"))) | .[0].with.outputs" "$publisher" | grep -c 'push-by-digest=true')" = 1 ] || fail "$job pushes by digest"
