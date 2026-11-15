@@ -1291,6 +1291,7 @@ func TestReapPendingTimeoutNextPass(t *testing.T) {
 		schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{Pending: []*model.Task{linuxTask("41")}}).Once()
 		storeMock.On("AgentList", &model.ListOptionsWithAll{All: true}).Return([]*model.Agent{}, nil).Once()
 		storeMock.On("StepUpdateIfState", isStep(411, model.StatusError), model.StatusPending).Return(store_types.ErrUpdateConflict).Once()
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), storeMock, now, grace, pendingTimeout, 0))
 		assert.Equal(t, model.StatusPending, workflow.State)
 		assert.Equal(t, model.StatusPending, workflow.Children[0].State)
 		storeMock.AssertNotCalled(t, "WorkflowUpdateIfState", mock.Anything, mock.Anything)
