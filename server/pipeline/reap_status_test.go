@@ -92,3 +92,50 @@ func TestReapDoesNotOverwriteKilledPipeline(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusKilled, stored.Status, "reaper must not replace a concurrent kill with its aggregate status")
 }
+
+// TestReapConflictAfterWorkflowWritesPublishesStoredPipeline reaps a running
+// workflow, then lets a kill land after the reaper's snapshot. The reaper's
+// workflow write already happened, so the stored pipeline must still publish.
+func TestReapConflictAfterWorkflowWritesPublishesStoredPipeline(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusRunning
+	pipeline.Started = now.Add(-time.Hour).Unix()
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+	require.NoError(t, f.store.WorkflowsCreate([]*model.Workflow{{
+		PipelineID: pipeline.ID,
+		PID:        1,
+		Name:       "build",
+		State:      model.StatusRunning,
+		Started:    now.Add(-time.Hour).Unix(),
+		AgentID:    0,
+	}}))
+
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	schedulerMock.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+	managerMock := manager_mocks.NewMockManager(t)
+	managerMock.On("ForgeFromRepo", mock.Anything).Return(nil, nil).Maybe()
+	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
+	server.Config.Services.Scheduler = schedulerMock
+	server.Config.Services.Manager = managerMock
+	t.Cleanup(func() {
+		server.Config.Services.Scheduler = oldScheduler
+		server.Config.Services.Manager = oldManager
+	})
+
+	reaperStore := &killAfterSnapshotStore{Store: f.store, pipelineID: pipeline.ID}
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), reaperStore, now, time.Minute, 0, 0))
+	require.True(t, reaperStore.killed, "the kill must land between the reaper's read and its finalize")
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusKilled, stored.Status, "reaper must not replace a concurrent kill")
+
+	schedulerMock.AssertNumberOfCalls(t, "PublishPipelineEvent", 1)
+	published := schedulerMock.Calls[len(schedulerMock.Calls)-1].Arguments.Get(2).(*model.Pipeline)
+	assert.Equal(t, model.StatusKilled, published.Status, "publish must carry the stored killed status")
+}
