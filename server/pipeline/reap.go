@@ -250,8 +250,19 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			updated, err := finalizeIfUnchanged(storage, *pipeline, status, now.Unix())
 			switch {
 			case errors.Is(err, store_types.ErrUpdateConflict):
-				// A concurrent kill or decline already finalized and published the pipeline.
-				continue
+				// Another writer moved the pipeline after this pass read it: a kill,
+				// the rpc Init or Done path, or a partial cancel. Skip the final
+				// status. Workflows this pass already wrote still need a publish,
+				// so reload the stored pipeline and publish it.
+				if !changed {
+					continue
+				}
+				stored, err := storage.GetPipeline(pipeline.ID)
+				if err != nil {
+					log.Error().Err(err).Int64("pipeline_id", pipeline.ID).Msg("could not reload pipeline after finalize conflict")
+					continue
+				}
+				pipeline = stored
 			case err != nil:
 				log.Error().Err(err).Int64("pipeline_id", pipeline.ID).Msg("could not finalize pipeline in orphan reaper")
 			default:
@@ -328,6 +339,8 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 
 // finalizeIfUnchanged writes the reaper's final status only while the stored
 // status is still the snapshot's, so a concurrent kill or decline is not overwritten.
+// The guard checks status only. AllCols still writes the rest of the snapshot, so
+// a concurrent write that changes other columns but keeps the status can be lost.
 func finalizeIfUnchanged(storage store.Store, snapshot model.Pipeline, status model.StatusValue, stopped int64) (*model.Pipeline, error) {
 	from := snapshot.Status
 	snapshot.Status = status

@@ -136,6 +136,6 @@ func TestReapConflictAfterWorkflowWritesPublishesStoredPipeline(t *testing.T) {
 	assert.Equal(t, model.StatusKilled, stored.Status, "reaper must not replace a concurrent kill")
 
 	schedulerMock.AssertNumberOfCalls(t, "PublishPipelineEvent", 1)
-	published := schedulerMock.Calls[len(schedulerMock.Calls)-1].Arguments.Get(2).(*model.Pipeline)
+	published := schedulerMock.Calls[0].Arguments.Get(2).(*model.Pipeline)
 	assert.Equal(t, model.StatusKilled, published.Status, "publish must carry the stored killed status")
 }
