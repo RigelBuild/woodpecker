@@ -211,8 +211,8 @@ func TestReapDoesNotOverwriteRedispatchedWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	workflow.Children = steps
 	racing := &workflowRedispatchRaceStore{Store: f.store}
-	assert.False(t, reapWorkflow(tracing, workflow, 123, model.StatusError, "timeout"))
-	require.True(t, tracing.updated)
+	assert.False(t, reapWorkflow(racing, workflow, 123, model.StatusError, "timeout"))
+	require.True(t, racing.updated)
 	stored, err := f.store.WorkflowLoad(workflow.ID)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusRunning, stored.State)

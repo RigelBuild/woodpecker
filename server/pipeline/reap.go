@@ -326,7 +326,7 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 		}
 		steps = append(steps, store.StepStateUpdate{Step: &updated, From: step.State})
 		originals = append(originals, step)
-}
+	}
 	if err := storage.WorkflowUpdateIfState(&updated, workflow.State, steps); err != nil {
 		if !errors.Is(err, store_types.ErrUpdateConflict) {
 			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not finalize orphaned workflow")

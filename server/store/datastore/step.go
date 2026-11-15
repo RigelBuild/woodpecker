@@ -80,13 +80,6 @@ func (s storage) StepUpdate(step *model.Step) error {
 	return err
 }
 
-// StepUpdateIfState updates reaper-owned fields while the step and parent match.
-func (s storage) StepUpdateIfState(step *model.Step, from model.StatusValue, workflow *model.Workflow) error {
-	sess := s.engine.NewSession()
-	defer sess.Close()
-	return s.stepUpdateIfState(sess, step, from, workflow)
-}
-
 func (s storage) stepUpdateIfState(sess *xorm.Session, step *model.Step, from model.StatusValue, workflow *model.Workflow) error {
 	affected, err := sess.ID(step.ID).Where("state = ?", from).
 		Where("EXISTS (SELECT 1 FROM workflows WHERE workflows.id = ? AND workflows.pipeline_id = ? AND workflows.pid = ? AND workflows.state = ? AND workflows.agent_id = ? AND workflows.attempts = ?)",

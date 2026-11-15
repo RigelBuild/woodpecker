@@ -412,7 +412,7 @@ func TestWorkflowUpdateIfStateConflictLeavesChildUnchanged(t *testing.T) {
 	assert.Empty(t, child.Error)
 }
 
-func TestStepUpdateIfStateRejectsStaleSnapshot(t *testing.T) {
+func TestWorkflowUpdateIfStateRejectsStaleStepSnapshot(t *testing.T) {
 	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
 	defer closer()
 
@@ -435,7 +435,9 @@ func TestStepUpdateIfStateRejectsStaleSnapshot(t *testing.T) {
 	require.NoError(t, s.StepUpdate(&concurrent))
 
 	stale.State = model.StatusKilled
-	assert.ErrorIs(t, s.StepUpdateIfState(&stale, model.StatusRunning, workflow), types.ErrUpdateConflict)
+	updated := *workflow
+	updated.State = model.StatusKilled
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&updated, model.StatusRunning, []store.StepStateUpdate{{Step: &stale, From: model.StatusRunning}}), types.ErrUpdateConflict)
 
 	stored, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
 	require.NoError(t, err)
@@ -467,13 +469,12 @@ func TestWorkflowUpdateIfStateRejectsRedispatchedSnapshot(t *testing.T) {
 	sameAgent := stale
 	sameAgent.AgentID = workflow.AgentID
 	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAgent, model.StatusRunning, nil), types.ErrUpdateConflict)
-	stale.State = model.StatusRunning
 	staleStep := *steps[0]
 	staleStep.State = model.StatusKilled
-	assert.ErrorIs(t, s.StepUpdateIfState(&staleStep, model.StatusRunning, &stale), types.ErrUpdateConflict)
-	sameAttempt.State, sameAgent.State = model.StatusRunning, model.StatusRunning
-	assert.ErrorIs(t, s.StepUpdateIfState(&staleStep, model.StatusRunning, &sameAttempt), types.ErrUpdateConflict)
-	assert.ErrorIs(t, s.StepUpdateIfState(&staleStep, model.StatusRunning, &sameAgent), types.ErrUpdateConflict)
+	updates := []store.StepStateUpdate{{Step: &staleStep, From: model.StatusRunning}}
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&stale, model.StatusRunning, updates), types.ErrUpdateConflict)
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAttempt, model.StatusRunning, updates), types.ErrUpdateConflict)
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAgent, model.StatusRunning, updates), types.ErrUpdateConflict)
 	stored, err := s.WorkflowLoad(workflow.ID)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusRunning, stored.State)
@@ -493,9 +494,8 @@ func TestReaperCASUpdatesOnlyOwnedColumns(t *testing.T) {
 	steps, err := s.StepListFromWorkflowFind(workflow)
 	require.NoError(t, err)
 	workflow.Name, workflow.State, workflow.Finished, workflow.Error = "stale", model.StatusKilled, 123, "timeout"
-	require.NoError(t, s.WorkflowUpdateIfState(workflow, model.StatusRunning, nil))
 	steps[0].Name, steps[0].State, steps[0].Finished, steps[0].Error = "stale", model.StatusKilled, 123, "timeout"
-	require.NoError(t, s.StepUpdateIfState(steps[0], model.StatusRunning, workflow))
+	require.NoError(t, s.WorkflowUpdateIfState(workflow, model.StatusRunning, []store.StepStateUpdate{{Step: steps[0], From: model.StatusRunning}}))
 	stored, err := s.WorkflowLoad(workflow.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "original", stored.Name)
