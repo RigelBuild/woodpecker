@@ -153,7 +153,7 @@ type workflowCompletionRaceStore struct {
 	updated     bool
 }
 
-func (s *workflowCompletionRaceStore) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue) error {
+func (s *workflowCompletionRaceStore) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue, steps []store.StepStateUpdate) error {
 	current, err := s.Store.WorkflowLoad(workflow.ID)
 	if err != nil {
 		return err
@@ -164,7 +164,7 @@ func (s *workflowCompletionRaceStore) WorkflowUpdateIfState(workflow *model.Work
 		return err
 	}
 	s.updated = true
-	return s.Store.WorkflowUpdateIfState(workflow, from)
+	return s.Store.WorkflowUpdateIfState(workflow, from, steps)
 }
 
 type workflowRedispatchRaceStore struct {
@@ -172,7 +172,7 @@ type workflowRedispatchRaceStore struct {
 	updated bool
 }
 
-func (s *workflowRedispatchRaceStore) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue) error {
+func (s *workflowRedispatchRaceStore) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue, updates []store.StepStateUpdate) error {
 	current, err := s.Store.WorkflowLoad(workflow.ID)
 	if err != nil {
 		return err
@@ -199,7 +199,7 @@ func (s *workflowRedispatchRaceStore) WorkflowUpdateIfState(workflow *model.Work
 		}
 	}
 	s.updated = true
-	return s.Store.WorkflowUpdateIfState(workflow, from)
+	return s.Store.WorkflowUpdateIfState(workflow, from, updates)
 }
 
 func TestReapDoesNotOverwriteRedispatchedWorkflow(t *testing.T) {
@@ -231,7 +231,11 @@ type stepCompletionRaceStore struct {
 	updated     bool
 }
 
-func (s *stepCompletionRaceStore) StepUpdateIfState(step *model.Step, from model.StatusValue, workflow *model.Workflow) error {
+func (s *stepCompletionRaceStore) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue, steps []store.StepStateUpdate) error {
+	if len(steps) == 0 {
+		return s.Store.WorkflowUpdateIfState(workflow, from, steps)
+	}
+	step := steps[0].Step
 	current, err := s.Store.StepLoad(step.PipelineID, step.ID)
 	if err != nil {
 		return err
@@ -242,7 +246,7 @@ func (s *stepCompletionRaceStore) StepUpdateIfState(step *model.Step, from model
 		return err
 	}
 	s.updated = true
-	return s.Store.StepUpdateIfState(step, from, workflow)
+	return s.Store.WorkflowUpdateIfState(workflow, from, steps)
 }
 
 func TestReapDoesNotOverwriteCompletedWorkflow(t *testing.T) {
@@ -319,6 +323,11 @@ func TestReapDoesNotOverwriteCompletedStep(t *testing.T) {
 	reaperStore := &stepCompletionRaceStore{Store: f.store, completedAt: now.Unix()}
 	require.NoError(t, ReapOrphanedWorkflows(t.Context(), reaperStore, now, time.Minute, 0, 0))
 	require.True(t, reaperStore.updated, "concurrent completion must land after the reaper snapshot")
+	storedWorkflow, err := f.store.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, storedWorkflow.State)
+	assert.Zero(t, storedWorkflow.Finished)
+	assert.Empty(t, storedWorkflow.Error)
 
 	steps, err := f.store.StepListFromWorkflowFind(workflow)
 	require.NoError(t, err)

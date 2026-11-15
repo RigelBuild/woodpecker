@@ -207,8 +207,20 @@ func (s storage) WorkflowUpdate(workflow *model.Workflow) error {
 }
 
 // WorkflowUpdateIfState updates reaper-owned fields if the snapshot still owns the row.
-func (s storage) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue) error {
-	affected, err := s.engine.ID(workflow.ID).
+func (s storage) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue, steps []store.StepStateUpdate) (retErr error) {
+	sess := s.engine.NewSession()
+	defer sess.Close()
+	if err := sess.Begin(); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			retErr = errors.Join(retErr, sess.Rollback())
+		}
+	}()
+
+	affected, err := sess.ID(workflow.ID).
 		Where("state = ? AND agent_id = ? AND attempts = ?", from, workflow.AgentID, workflow.Attempts).
 		Cols("state", "finished", "error").Update(workflow)
 	if err != nil {
@@ -217,6 +229,15 @@ func (s storage) WorkflowUpdateIfState(workflow *model.Workflow, from model.Stat
 	if affected == 0 {
 		return types.ErrUpdateConflict
 	}
+	for _, step := range steps {
+		if err := s.stepUpdateIfState(sess, step.Step, step.From, workflow); err != nil {
+			return err
+		}
+	}
+	if err := sess.Commit(); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 

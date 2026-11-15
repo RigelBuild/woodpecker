@@ -307,13 +307,8 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 		updated.Error = errMsg
 		updated.Finished = finished
 	}
-	if err := storage.WorkflowUpdateIfState(&updated, workflow.State); err != nil {
-		if !errors.Is(err, store_types.ErrUpdateConflict) {
-			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not finalize orphaned workflow")
-		}
-		return false
-	}
-	*workflow = updated
+	var steps []store.StepStateUpdate
+	var originals []*model.Step
 	for _, step := range workflow.Children {
 		if !step.Running() {
 			continue
@@ -329,13 +324,18 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 			updated.Error = errMsg
 			updated.Finished = finished
 		}
-		if err := storage.StepUpdateIfState(&updated, step.State, workflow); err != nil {
-			if !errors.Is(err, store_types.ErrUpdateConflict) {
-				log.Error().Err(err).Int64("step_id", step.ID).Msg("could not finalize orphaned workflow step")
-			}
-			return false
+		steps = append(steps, store.StepStateUpdate{Step: &updated, From: step.State})
+		originals = append(originals, step)
+}
+	if err := storage.WorkflowUpdateIfState(&updated, workflow.State, steps); err != nil {
+		if !errors.Is(err, store_types.ErrUpdateConflict) {
+			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not finalize orphaned workflow")
 		}
-		*step = updated
+		return false
+	}
+	*workflow = updated
+	for i, step := range originals {
+		*step = *steps[i].Step
 	}
 
 	return true

@@ -114,7 +114,7 @@ func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, delet
 		}
 		updated := *workflow
 		updated.Finished = now
-		if err := storage.WorkflowUpdateIfState(&updated, workflow.State); err != nil {
+		if err := storage.WorkflowUpdateIfState(&updated, workflow.State, nil); err != nil {
 			if !errors.Is(err, store_types.ErrUpdateConflict) {
 				log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not stamp finish time of dependency")
 			}
@@ -286,31 +286,26 @@ func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) 
 	updated := *workflow
 	updated.Finished = now
 	updated.State = model.StatusSkipped
-	if err := storage.WorkflowUpdateIfState(&updated, workflow.State); err != nil {
+	var steps []store.StepStateUpdate
+	var originals []*model.Step
+	for _, step := range workflow.Children {
+		if step.State != model.StatusPending {
+			continue
+		}
+		updatedStep := *step
+		setSkippedStepStatus(&updatedStep, 0, model.StatusCanceled)
+		steps = append(steps, store.StepStateUpdate{Step: &updatedStep, From: step.State})
+		originals = append(originals, step)
+	}
+	if err := storage.WorkflowUpdateIfState(&updated, workflow.State, steps); err != nil {
 		if !errors.Is(err, store_types.ErrUpdateConflict) {
 			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not skip workflow whose dependencies failed")
 		}
 		return false
 	}
 	*workflow = updated
-	return skipPendingSteps(storage, workflow)
-}
-
-// skipPendingSteps cancels each pending step and reports whether every write succeeded.
-func skipPendingSteps(storage store.Store, workflow *model.Workflow) bool {
-	for _, step := range workflow.Children {
-		if step.State != model.StatusPending {
-			continue
-		}
-		updated := *step
-		setSkippedStepStatus(&updated, 0, model.StatusCanceled)
-		if err := storage.StepUpdateIfState(&updated, step.State, workflow); err != nil {
-			if !errors.Is(err, store_types.ErrUpdateConflict) {
-				log.Error().Err(err).Int64("step_id", step.ID).Msg("could not skip step whose dependencies failed")
-			}
-			return false
-		}
-		*step = updated
+	for i, step := range originals {
+		*step = *steps[i].Step
 	}
 	return true
 }
