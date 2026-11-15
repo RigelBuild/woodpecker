@@ -114,8 +114,10 @@ func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, delet
 		}
 		updated := *workflow
 		updated.Finished = now
-		if err := storage.WorkflowUpdate(&updated); err != nil {
-			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not stamp finish time of dependency")
+		if err := storage.WorkflowUpdateIfState(&updated, workflow.State, nil); err != nil {
+			if !errors.Is(err, store_types.ErrUpdateConflict) {
+				log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not stamp finish time of dependency")
+			}
 			continue
 		}
 		*workflow = updated
@@ -279,34 +281,31 @@ func deletedDependencyReason(deleted map[int64]bool) string {
 	return fmt.Sprintf("dependency workflow %d no longer exists", slices.Min(slices.Collect(maps.Keys(deleted))))
 }
 
-// skipDeadWorkflow writes the pending steps then the workflow as skipped; a failed write leaves it pending.
+// skipDeadWorkflow claims the workflow before updating its pending steps.
 func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) bool {
-	if !skipPendingSteps(storage, workflow) {
-		return false
-	}
 	updated := *workflow
 	updated.Finished = now
-	skipped, err := UpdateWorkflowToStatusSkipped(storage, updated)
-	if err != nil {
-		log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not skip workflow whose dependencies failed")
-		return false
-	}
-	*workflow = *skipped
-	return true
-}
-
-// skipPendingSteps cancels each pending step and reports whether every write succeeded.
-func skipPendingSteps(storage store.Store, workflow *model.Workflow) bool {
+	updated.State = model.StatusSkipped
+	var steps []store.StepStateUpdate
+	var originals []*model.Step
 	for _, step := range workflow.Children {
 		if step.State != model.StatusPending {
 			continue
 		}
-		skipped, err := UpdateStepToStatusSkipped(storage, *step, 0, model.StatusCanceled)
-		if err != nil {
-			log.Error().Err(err).Int64("step_id", step.ID).Msg("could not skip step whose dependencies failed")
-			return false
+		updatedStep := *step
+		setSkippedStepStatus(&updatedStep, 0, model.StatusCanceled)
+		steps = append(steps, store.StepStateUpdate{Step: &updatedStep, From: step.State})
+		originals = append(originals, step)
+	}
+	if err := storage.WorkflowUpdateIfState(&updated, workflow.State, steps); err != nil {
+		if !errors.Is(err, store_types.ErrUpdateConflict) {
+			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not skip workflow whose dependencies failed")
 		}
-		*step = *skipped
+		return false
+	}
+	*workflow = updated
+	for i, step := range originals {
+		*step = *steps[i].Step
 	}
 	return true
 }

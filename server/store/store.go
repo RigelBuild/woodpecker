@@ -24,6 +24,12 @@ import (
 // ErrPendingConflict means pending workflows changed before conditional cancellation.
 var ErrPendingConflict = errors.New("store: pending workflow conflict")
 
+// StepStateUpdate carries a step update and its expected previous state.
+type StepStateUpdate struct {
+	Step *model.Step
+	From model.StatusValue
+}
+
 // TODO: CreateX func should return new object to not indirect let storage change an existing object (alter ID etc...)
 
 type Store interface {
@@ -224,6 +230,8 @@ type Store interface {
 	WorkflowSupersedePending(pipelineID int64, ids []int64, by int64) error
 	WorkflowByStep(*model.Step) (*model.Workflow, error)
 	WorkflowUpdate(*model.Workflow) error
+	// WorkflowUpdateIfState updates the workflow and listed children in one transaction, guarded by the workflow state and ownership snapshot.
+	WorkflowUpdateIfState(*model.Workflow, model.StatusValue, []StepStateUpdate) error
 	// WorkflowResetForRequeue returns a workflow its agent lost to pending if
 	// the row still belongs to agentID; false means the row changed.
 	WorkflowResetForRequeue(workflow *model.Workflow, steps []*model.Step, agentID int64) (bool, error)

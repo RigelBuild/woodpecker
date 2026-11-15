@@ -19,6 +19,7 @@ import (
 	"xorm.io/xorm"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 func (s storage) StepLoad(pipelineID, stepID int64) (*model.Step, error) {
@@ -77,6 +78,20 @@ func (s storage) stepCreate(sess *xorm.Session, steps []*model.Step) error {
 func (s storage) StepUpdate(step *model.Step) error {
 	_, err := s.engine.ID(step.ID).AllCols().Update(step)
 	return err
+}
+
+func (s storage) stepUpdateIfState(sess *xorm.Session, step *model.Step, from model.StatusValue, workflow *model.Workflow) error {
+	affected, err := sess.ID(step.ID).Where("state = ?", from).
+		Where("EXISTS (SELECT 1 FROM workflows WHERE workflows.id = ? AND workflows.pipeline_id = ? AND workflows.pid = ? AND workflows.state = ? AND workflows.agent_id = ? AND workflows.attempts = ?)",
+			workflow.ID, step.PipelineID, step.PPID, workflow.State, workflow.AgentID, workflow.Attempts).
+		Cols("state", "finished", "error").Update(step)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return types.ErrUpdateConflict
+	}
+	return nil
 }
 
 func deleteStep(sess *xorm.Session, stepID int64) error {

@@ -30,6 +30,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore/migration"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 func TestWorkflowLoad(t *testing.T) {
@@ -319,4 +320,192 @@ func TestWorkflowUpdate(t *testing.T) {
 	workflowGet, err = store.WorkflowLoad(1)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StatusValue("success"), workflowGet.State)
+}
+
+func TestWorkflowUpdateIfStateRejectsStaleSnapshot(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, Name: "build", State: model.StatusRunning}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	stale := *workflow
+
+	concurrent, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	concurrent.State = model.StatusSuccess
+	concurrent.Finished = 123
+	require.NoError(t, s.WorkflowUpdate(concurrent))
+
+	stale.State = model.StatusKilled
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&stale, model.StatusRunning, nil), types.ErrUpdateConflict)
+
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSuccess, stored.State)
+	assert.Equal(t, int64(123), stored.Finished)
+}
+
+func TestWorkflowUpdateIfStateRollsBackChildConflict(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, State: model.StatusRunning, AgentID: 1, Attempts: 1,
+		Children: []*model.Step{
+			{PipelineID: 1, PID: 1, PPID: 1, State: model.StatusRunning},
+			{PipelineID: 1, PID: 2, PPID: 1, State: model.StatusRunning},
+		}}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	require.Len(t, steps, 2)
+	concurrent := *steps[1]
+	concurrent.State, concurrent.Finished = model.StatusSuccess, 99
+	require.NoError(t, s.StepUpdate(&concurrent))
+	updated := *workflow
+	updated.State, updated.Finished, updated.Error = model.StatusKilled, 123, "timeout"
+	first, second := *steps[0], *steps[1]
+	first.State, first.Finished, first.Error = model.StatusKilled, 123, "timeout"
+	second.State, second.Finished, second.Error = model.StatusKilled, 123, "timeout"
+	updates := []store.StepStateUpdate{{Step: &first, From: model.StatusRunning}, {Step: &second, From: model.StatusRunning}}
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&updated, model.StatusRunning, updates), types.ErrUpdateConflict)
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, stored.State)
+	assert.Zero(t, stored.Finished)
+	assert.Empty(t, stored.Error)
+	firstStored, err := s.StepLoad(workflow.PipelineID, first.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, firstStored.State)
+	assert.Zero(t, firstStored.Finished)
+	assert.Empty(t, firstStored.Error)
+	secondStored, err := s.StepLoad(workflow.PipelineID, second.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSuccess, secondStored.State)
+	assert.Equal(t, int64(99), secondStored.Finished)
+	assert.Empty(t, secondStored.Error)
+}
+
+func TestWorkflowUpdateIfStateConflictLeavesChildUnchanged(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, State: model.StatusRunning, AgentID: 1, Attempts: 1,
+		Children: []*model.Step{{PipelineID: 1, PID: 1, PPID: 1, State: model.StatusRunning}}}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	require.Len(t, steps, 1)
+	concurrent := *workflow
+	concurrent.AgentID = 2
+	require.NoError(t, s.WorkflowUpdate(&concurrent))
+	updated := *workflow
+	updated.State = model.StatusKilled
+	step := *steps[0]
+	step.State, step.Finished, step.Error = model.StatusKilled, 123, "timeout"
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&updated, model.StatusRunning, []store.StepStateUpdate{{Step: &step, From: model.StatusRunning}}), types.ErrUpdateConflict)
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), stored.AgentID)
+	assert.Equal(t, model.StatusRunning, stored.State)
+	child, err := s.StepLoad(workflow.PipelineID, step.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, child.State)
+	assert.Zero(t, child.Finished)
+	assert.Empty(t, child.Error)
+}
+
+func TestWorkflowUpdateIfStateRejectsStaleStepSnapshot(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+
+	workflow := &model.Workflow{
+		PipelineID: 1,
+		PID:        1,
+		Name:       "build",
+		State:      model.StatusRunning,
+		Children:   []*model.Step{{PipelineID: 1, PID: 1, PPID: 1, Name: "step", State: model.StatusRunning}},
+	}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	require.Len(t, steps, 1)
+	stale := *steps[0]
+
+	concurrent := *steps[0]
+	concurrent.State = model.StatusSuccess
+	concurrent.Finished = 123
+	require.NoError(t, s.StepUpdate(&concurrent))
+
+	stale.State = model.StatusKilled
+	updated := *workflow
+	updated.State = model.StatusKilled
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&updated, model.StatusRunning, []store.StepStateUpdate{{Step: &stale, From: model.StatusRunning}}), types.ErrUpdateConflict)
+
+	stored, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSuccess, stored.State)
+	assert.Equal(t, int64(123), stored.Finished)
+}
+
+func TestWorkflowUpdateIfStateRejectsRedispatchedSnapshot(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, State: model.StatusRunning, AgentID: 1, Attempts: 1,
+		Children: []*model.Step{{PipelineID: 1, PID: 1, PPID: 1, State: model.StatusRunning}}}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	stale := *workflow
+	reset, err := s.WorkflowResetForRequeue(workflow, steps, 1)
+	require.NoError(t, err)
+	require.True(t, reset)
+	workflow.State, workflow.AgentID = model.StatusRunning, 2
+	require.NoError(t, s.WorkflowUpdate(workflow))
+	steps[0].State = model.StatusRunning
+	require.NoError(t, s.StepUpdate(steps[0]))
+	stale.State = model.StatusKilled
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&stale, model.StatusRunning, nil), types.ErrUpdateConflict)
+	sameAttempt := stale
+	sameAttempt.Attempts = workflow.Attempts
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAttempt, model.StatusRunning, nil), types.ErrUpdateConflict)
+	sameAgent := stale
+	sameAgent.AgentID = workflow.AgentID
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAgent, model.StatusRunning, nil), types.ErrUpdateConflict)
+	staleStep := *steps[0]
+	staleStep.State = model.StatusKilled
+	updates := []store.StepStateUpdate{{Step: &staleStep, From: model.StatusRunning}}
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&stale, model.StatusRunning, updates), types.ErrUpdateConflict)
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAttempt, model.StatusRunning, updates), types.ErrUpdateConflict)
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAgent, model.StatusRunning, updates), types.ErrUpdateConflict)
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, stored.State)
+	assert.Equal(t, int64(2), stored.AgentID)
+	assert.Equal(t, 2, stored.Attempts)
+	step, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, step.State)
+}
+
+func TestReaperCASUpdatesOnlyOwnedColumns(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, Name: "original", State: model.StatusRunning, AgentID: 1, Attempts: 1,
+		Children: []*model.Step{{PipelineID: 1, PID: 1, PPID: 1, Name: "original", State: model.StatusRunning}}}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	workflow.Name, workflow.State, workflow.Finished, workflow.Error = "stale", model.StatusKilled, 123, "timeout"
+	steps[0].Name, steps[0].State, steps[0].Finished, steps[0].Error = "stale", model.StatusKilled, 123, "timeout"
+	require.NoError(t, s.WorkflowUpdateIfState(workflow, model.StatusRunning, []store.StepStateUpdate{{Step: steps[0], From: model.StatusRunning}}))
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "original", stored.Name)
+	assert.Equal(t, model.StatusKilled, stored.State)
+	assert.Equal(t, int64(123), stored.Finished)
+	assert.Equal(t, "timeout", stored.Error)
+	step, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, "original", step.Name)
+	assert.Equal(t, model.StatusKilled, step.State)
+	assert.Equal(t, int64(123), step.Finished)
+	assert.Equal(t, "timeout", step.Error)
 }
