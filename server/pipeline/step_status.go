@@ -202,10 +202,14 @@ func cancelPipelineFromStep(ctx context.Context, store store.Store, step *model.
 }
 
 func UpdateStepToStatusSkipped(store store.Store, step model.Step, finished int64, status model.StatusValue) (*model.Step, error) {
+	setSkippedStepStatus(&step, finished, status)
+	return &step, store.StepUpdate(&step)
+}
+
+func setSkippedStepStatus(step *model.Step, finished int64, status model.StatusValue) {
 	step.State = status
 	if step.Started != 0 {
 		step.State = model.StatusSuccess // for daemons that are killed
 		step.Finished = finished
 	}
-	return &step, store.StepUpdate(&step)
 }

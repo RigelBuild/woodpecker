@@ -6652,16 +6652,16 @@ func (_c *MockStore_StepUpdate_Call) RunAndReturn(run func(step *model.Step) err
 }
 
 // StepUpdateIfState provides a mock function for the type MockStore
-func (_mock *MockStore) StepUpdateIfState(step *model.Step, statusValue model.StatusValue) error {
-	ret := _mock.Called(step, statusValue)
+func (_mock *MockStore) StepUpdateIfState(step *model.Step, statusValue model.StatusValue, workflow *model.Workflow) error {
+	ret := _mock.Called(step, statusValue, workflow)
 
 	if len(ret) == 0 {
 		panic("no return value specified for StepUpdateIfState")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(*model.Step, model.StatusValue) error); ok {
-		r0 = returnFunc(step, statusValue)
+	if returnFunc, ok := ret.Get(0).(func(*model.Step, model.StatusValue, *model.Workflow) error); ok {
+		r0 = returnFunc(step, statusValue, workflow)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -6676,11 +6676,12 @@ type MockStore_StepUpdateIfState_Call struct {
 // StepUpdateIfState is a helper method to define mock.On call
 //   - step *model.Step
 //   - statusValue model.StatusValue
-func (_e *MockStore_Expecter) StepUpdateIfState(step any, statusValue any) *MockStore_StepUpdateIfState_Call {
-	return &MockStore_StepUpdateIfState_Call{Call: _e.mock.On("StepUpdateIfState", step, statusValue)}
+//   - workflow *model.Workflow
+func (_e *MockStore_Expecter) StepUpdateIfState(step any, statusValue any, workflow any) *MockStore_StepUpdateIfState_Call {
+	return &MockStore_StepUpdateIfState_Call{Call: _e.mock.On("StepUpdateIfState", step, statusValue, workflow)}
 }
 
-func (_c *MockStore_StepUpdateIfState_Call) Run(run func(step *model.Step, statusValue model.StatusValue)) *MockStore_StepUpdateIfState_Call {
+func (_c *MockStore_StepUpdateIfState_Call) Run(run func(step *model.Step, statusValue model.StatusValue, workflow *model.Workflow)) *MockStore_StepUpdateIfState_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 *model.Step
 		if args[0] != nil {
@@ -6690,9 +6691,14 @@ func (_c *MockStore_StepUpdateIfState_Call) Run(run func(step *model.Step, statu
 		if args[1] != nil {
 			arg1 = args[1].(model.StatusValue)
 		}
+		var arg2 *model.Workflow
+		if args[2] != nil {
+			arg2 = args[2].(*model.Workflow)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -6703,7 +6709,7 @@ func (_c *MockStore_StepUpdateIfState_Call) Return(err error) *MockStore_StepUpd
 	return _c
 }
 
-func (_c *MockStore_StepUpdateIfState_Call) RunAndReturn(run func(step *model.Step, statusValue model.StatusValue) error) *MockStore_StepUpdateIfState_Call {
+func (_c *MockStore_StepUpdateIfState_Call) RunAndReturn(run func(step *model.Step, statusValue model.StatusValue, workflow *model.Workflow) error) *MockStore_StepUpdateIfState_Call {
 	_c.Call.Return(run)
 	return _c
 }

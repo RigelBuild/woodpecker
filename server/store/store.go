@@ -170,8 +170,8 @@ type Store interface {
 	StepByUUID(uuid string) (*model.Step, error)
 	StepList(pipelineID int64) ([]*model.Step, error)
 	StepUpdate(*model.Step) error
-	// StepUpdateIfState updates a step only while its stored state is still from.
-	StepUpdateIfState(*model.Step, model.StatusValue) error
+	// StepUpdateIfState updates a step only while it and its workflow still match.
+	StepUpdateIfState(*model.Step, model.StatusValue, *model.Workflow) error
 	StepListFromWorkflowFind(*model.Workflow) ([]*model.Step, error)
 
 	// Logs

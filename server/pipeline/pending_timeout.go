@@ -281,11 +281,8 @@ func deletedDependencyReason(deleted map[int64]bool) string {
 	return fmt.Sprintf("dependency workflow %d no longer exists", slices.Min(slices.Collect(maps.Keys(deleted))))
 }
 
-// skipDeadWorkflow writes the pending steps then the workflow as skipped; a failed write leaves it pending.
+// skipDeadWorkflow claims the workflow before updating its pending steps.
 func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) bool {
-	if !skipPendingSteps(storage, workflow) {
-		return false
-	}
 	updated := *workflow
 	updated.Finished = now
 	updated.State = model.StatusSkipped
@@ -296,7 +293,7 @@ func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) 
 		return false
 	}
 	*workflow = updated
-	return true
+	return skipPendingSteps(storage, workflow)
 }
 
 // skipPendingSteps cancels each pending step and reports whether every write succeeded.
@@ -306,12 +303,8 @@ func skipPendingSteps(storage store.Store, workflow *model.Workflow) bool {
 			continue
 		}
 		updated := *step
-		updated.State = model.StatusCanceled
-		if updated.Started != 0 {
-			updated.State = model.StatusSuccess // for daemons that are killed
-			updated.Finished = 0
-		}
-		if err := storage.StepUpdateIfState(&updated, step.State); err != nil {
+		setSkippedStepStatus(&updated, 0, model.StatusCanceled)
+		if err := storage.StepUpdateIfState(&updated, step.State, workflow); err != nil {
 			if !errors.Is(err, store_types.ErrUpdateConflict) {
 				log.Error().Err(err).Int64("step_id", step.ID).Msg("could not skip step whose dependencies failed")
 			}

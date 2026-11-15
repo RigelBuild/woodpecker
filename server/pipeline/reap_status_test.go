@@ -30,6 +30,7 @@ import (
 	scheduler_mocks "go.woodpecker-ci.org/woodpecker/v3/server/scheduler/mocks"
 	manager_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	store_types "go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 // killAfterSnapshotStore kills the pipeline through the real store on the
@@ -166,13 +167,71 @@ func (s *workflowCompletionRaceStore) WorkflowUpdateIfState(workflow *model.Work
 	return s.Store.WorkflowUpdateIfState(workflow, from)
 }
 
+type workflowRedispatchRaceStore struct {
+	store.Store
+	updated bool
+}
+
+func (s *workflowRedispatchRaceStore) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue) error {
+	current, err := s.Store.WorkflowLoad(workflow.ID)
+	if err != nil {
+		return err
+	}
+	steps, err := s.Store.StepListFromWorkflowFind(current)
+	if err != nil {
+		return err
+	}
+	reset, err := s.Store.WorkflowResetForRequeue(current, steps, current.AgentID)
+	if err != nil {
+		return err
+	}
+	if !reset {
+		return store_types.ErrUpdateConflict
+	}
+	current.State, current.AgentID = model.StatusRunning, 2
+	if err := s.Store.WorkflowUpdate(current); err != nil {
+		return err
+	}
+	for _, step := range steps {
+		step.State = model.StatusRunning
+		if err := s.Store.StepUpdate(step); err != nil {
+			return err
+		}
+	}
+	s.updated = true
+	return s.Store.WorkflowUpdateIfState(workflow, from)
+}
+
+func TestReapDoesNotOverwriteRedispatchedWorkflow(t *testing.T) {
+	f := newLivenessFixture(t)
+	workflow := &model.Workflow{PipelineID: f.pipeline.ID, PID: 1, Name: "build", State: model.StatusRunning, AgentID: 1, Attempts: 1,
+		Children: []*model.Step{{PipelineID: f.pipeline.ID, PID: 1, PPID: 1, Name: "step", State: model.StatusRunning}}}
+	require.NoError(t, f.store.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := f.store.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	workflow.Children = steps
+	racing := &workflowRedispatchRaceStore{Store: f.store}
+	assert.False(t, reapWorkflow(tracing, workflow, 123, model.StatusError, "timeout"))
+	require.True(t, tracing.updated)
+	stored, err := f.store.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, stored.State)
+	assert.Equal(t, int64(2), stored.AgentID)
+	assert.Equal(t, 2, stored.Attempts)
+	step, err := f.store.StepLoad(workflow.PipelineID, steps[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, step.State)
+	assert.Empty(t, step.Error)
+	assert.Zero(t, step.Finished)
+}
+
 type stepCompletionRaceStore struct {
 	store.Store
 	completedAt int64
 	updated     bool
 }
 
-func (s *stepCompletionRaceStore) StepUpdateIfState(step *model.Step, from model.StatusValue) error {
+func (s *stepCompletionRaceStore) StepUpdateIfState(step *model.Step, from model.StatusValue, workflow *model.Workflow) error {
 	current, err := s.Store.StepLoad(step.PipelineID, step.ID)
 	if err != nil {
 		return err
@@ -183,7 +242,7 @@ func (s *stepCompletionRaceStore) StepUpdateIfState(step *model.Step, from model
 		return err
 	}
 	s.updated = true
-	return s.Store.StepUpdateIfState(step, from)
+	return s.Store.StepUpdateIfState(step, from, workflow)
 }
 
 func TestReapDoesNotOverwriteCompletedWorkflow(t *testing.T) {

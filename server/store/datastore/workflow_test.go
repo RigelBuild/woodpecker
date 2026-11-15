@@ -368,10 +368,77 @@ func TestStepUpdateIfStateRejectsStaleSnapshot(t *testing.T) {
 	require.NoError(t, s.StepUpdate(&concurrent))
 
 	stale.State = model.StatusKilled
-	assert.ErrorIs(t, s.StepUpdateIfState(&stale, model.StatusRunning), types.ErrUpdateConflict)
+	assert.ErrorIs(t, s.StepUpdateIfState(&stale, model.StatusRunning, workflow), types.ErrUpdateConflict)
 
 	stored, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusSuccess, stored.State)
 	assert.Equal(t, int64(123), stored.Finished)
+}
+
+func TestWorkflowUpdateIfStateRejectsRedispatchedSnapshot(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, State: model.StatusRunning, AgentID: 1, Attempts: 1,
+		Children: []*model.Step{{PipelineID: 1, PID: 1, PPID: 1, State: model.StatusRunning}}}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	stale := *workflow
+	reset, err := s.WorkflowResetForRequeue(workflow, steps, 1)
+	require.NoError(t, err)
+	require.True(t, reset)
+	workflow.State, workflow.AgentID = model.StatusRunning, 2
+	require.NoError(t, s.WorkflowUpdate(workflow))
+	steps[0].State = model.StatusRunning
+	require.NoError(t, s.StepUpdate(steps[0]))
+	stale.State = model.StatusKilled
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&stale, model.StatusRunning), types.ErrUpdateConflict)
+	sameAttempt := stale
+	sameAttempt.Attempts = workflow.Attempts
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAttempt, model.StatusRunning), types.ErrUpdateConflict)
+	sameAgent := stale
+	sameAgent.AgentID = workflow.AgentID
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&sameAgent, model.StatusRunning), types.ErrUpdateConflict)
+	stale.State = model.StatusRunning
+	staleStep := *steps[0]
+	staleStep.State = model.StatusKilled
+	assert.ErrorIs(t, s.StepUpdateIfState(&staleStep, model.StatusRunning, &stale), types.ErrUpdateConflict)
+	sameAttempt.State, sameAgent.State = model.StatusRunning, model.StatusRunning
+	assert.ErrorIs(t, s.StepUpdateIfState(&staleStep, model.StatusRunning, &sameAttempt), types.ErrUpdateConflict)
+	assert.ErrorIs(t, s.StepUpdateIfState(&staleStep, model.StatusRunning, &sameAgent), types.ErrUpdateConflict)
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, stored.State)
+	assert.Equal(t, int64(2), stored.AgentID)
+	assert.Equal(t, 2, stored.Attempts)
+	step, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusRunning, step.State)
+}
+
+func TestReaperCASUpdatesOnlyOwnedColumns(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, Name: "original", State: model.StatusRunning, AgentID: 1, Attempts: 1,
+		Children: []*model.Step{{PipelineID: 1, PID: 1, PPID: 1, Name: "original", State: model.StatusRunning}}}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	workflow.Name, workflow.State, workflow.Finished, workflow.Error = "stale", model.StatusKilled, 123, "timeout"
+	require.NoError(t, s.WorkflowUpdateIfState(workflow, model.StatusRunning))
+	steps[0].Name, steps[0].State, steps[0].Finished, steps[0].Error = "stale", model.StatusKilled, 123, "timeout"
+	require.NoError(t, s.StepUpdateIfState(steps[0], model.StatusRunning, workflow))
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "original", stored.Name)
+	assert.Equal(t, model.StatusKilled, stored.State)
+	assert.Equal(t, int64(123), stored.Finished)
+	assert.Equal(t, "timeout", stored.Error)
+	step, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, "original", step.Name)
+	assert.Equal(t, model.StatusKilled, step.State)
+	assert.Equal(t, int64(123), step.Finished)
+	assert.Equal(t, "timeout", step.Error)
 }

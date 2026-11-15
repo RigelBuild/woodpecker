@@ -206,9 +206,11 @@ func (s storage) WorkflowUpdate(workflow *model.Workflow) error {
 	return err
 }
 
-// WorkflowUpdateIfState updates a workflow only if its stored state still matches from.
+// WorkflowUpdateIfState updates reaper-owned fields if the snapshot still owns the row.
 func (s storage) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue) error {
-	affected, err := s.engine.ID(workflow.ID).Where("state = ?", from).AllCols().Update(workflow)
+	affected, err := s.engine.ID(workflow.ID).
+		Where("state = ? AND agent_id = ? AND attempts = ?", from, workflow.AgentID, workflow.Attempts).
+		Cols("state", "finished", "error").Update(workflow)
 	if err != nil {
 		return err
 	}

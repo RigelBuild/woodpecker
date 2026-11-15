@@ -80,9 +80,12 @@ func (s storage) StepUpdate(step *model.Step) error {
 	return err
 }
 
-// StepUpdateIfState updates a step only if its stored state still matches from.
-func (s storage) StepUpdateIfState(step *model.Step, from model.StatusValue) error {
-	affected, err := s.engine.ID(step.ID).Where("state = ?", from).AllCols().Update(step)
+// StepUpdateIfState updates reaper-owned fields while the step and parent match.
+func (s storage) StepUpdateIfState(step *model.Step, from model.StatusValue, workflow *model.Workflow) error {
+	affected, err := s.engine.ID(step.ID).Where("state = ?", from).
+		Where("EXISTS (SELECT 1 FROM workflows WHERE workflows.id = ? AND workflows.pipeline_id = ? AND workflows.pid = ? AND workflows.state = ? AND workflows.agent_id = ? AND workflows.attempts = ?)",
+			workflow.ID, step.PipelineID, step.PPID, workflow.State, workflow.AgentID, workflow.Attempts).
+		Cols("state", "finished", "error").Update(step)
 	if err != nil {
 		return err
 	}
