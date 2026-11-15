@@ -57,8 +57,8 @@ grep -Fq 'gzip -n' "$root/.github/scripts/build-release-binaries.sh" || fail 're
 [ "$(yq -r '.jobs.release-binaries.steps | map(select(.uses | test("actions/setup-go"))) | .[0].with.cache' "$publisher")" = false ] || fail 'release binaries disable Go cache'
 [ "$(yq -r '.jobs.release-binaries.steps | map(select(.uses | test("actions/checkout"))) | .[0].with["persist-credentials"]' "$publisher")" = false ] || fail 'release binaries checkout has no persisted credentials'
 [ "$(yq -r '.jobs.release-binaries.steps | map(select(.id == "build")) | .[0].run | contains("go version")' "$publisher")" = true ] || fail 'release binary build reports its Go toolchain'
-download_index="$(yq -r '.jobs.finalize.steps | map(.name) | index("Download release binaries")' "$publisher")"
-release_index="$(yq -r '.jobs.finalize.steps | map(.name) | index("Create or update GitHub Release")' "$publisher")"
+download_index="$(yq -r '.jobs.finalize.steps | map(.name) | to_entries | map(select(.value == "Download release binaries")) | .[0].key' "$publisher")"
+release_index="$(yq -r '.jobs.finalize.steps | map(.name) | to_entries | map(select(.value == "Create or update GitHub Release")) | .[0].key' "$publisher")"
 [ "$download_index" != null ] && [ "$release_index" != null ] && [ "$download_index" -lt "$release_index" ] || fail 'finalize downloads binaries before release creation'
 grep -Fq 'gh release create "$tag" --verify-tag --generate-notes dist/assets/*' "$publisher" || fail 'new release includes release binaries'
 grep -Fq 'gh release download "$tag" --pattern "$name"' "$publisher" || fail 'existing release asset is downloaded for comparison'
