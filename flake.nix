@@ -35,7 +35,7 @@
 
         # Locked against this fork's go.sum / web pnpm-lock. To refresh: set to
         # pkgs.lib.fakeHash, build, and paste the hash nix reports.
-        vendorHash = "sha256-8HTCc2bs/8z5cwQ1VTYI2iz9KFXdYUzBPaQR3IRt8b0=";
+        vendorHash = "sha256-6IDM+hYSXpD8hJlRgq3EhC/z6BaO7f+RUq8rFr1ud+I=";
         webuiHash = "sha256-bzvBMLnwuPKetCxRE7MY+pm1LB83N+mNY4ngSXhE4S0=";
 
         # Re-rooted to a content-addressed copy of this fork's own subtree

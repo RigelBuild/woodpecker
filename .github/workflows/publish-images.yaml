@@ -359,4 +359,3 @@ jobs:
           else
             gh release create "$tag" --verify-tag --generate-notes dist/assets/*
           fi
-
