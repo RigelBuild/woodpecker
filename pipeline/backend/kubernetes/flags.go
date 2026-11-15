@@ -18,7 +18,8 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-var Flags = []cli.Flag{
+func Flags() []cli.Flag {
+	return []cli.Flag{
 	&cli.StringFlag{
 		Sources: cli.EnvVars("WOODPECKER_BACKEND_K8S_NAMESPACE"),
 		Name:    "backend-k8s-namespace",
@@ -174,4 +175,5 @@ var Flags = []cli.Flag{
 		Usage:   "image used by the workspace permission init container",
 		Value:   "busybox:stable-musl",
 	},
+	}
 }
