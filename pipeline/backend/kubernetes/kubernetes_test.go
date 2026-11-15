@@ -148,6 +148,19 @@ func TestSetupWorkflow(t *testing.T) {
 	assert.NoError(t, err, "headless service should be created during workflow setup")
 }
 
+func TestFlagsAreFresh(t *testing.T) {
+	firstFlags := New().Flags()
+	secondFlags := New().Flags()
+	first, ok := firstFlags[0].(*cli.StringFlag)
+	require.True(t, ok)
+	second, ok := secondFlags[0].(*cli.StringFlag)
+	require.True(t, ok)
+
+	assert.Equal(t, "backend-k8s-namespace", first.Name)
+	assert.Equal(t, first.Name, second.Name)
+	assert.NotSame(t, first, second)
+}
+
 func TestAffinityFromCliContext(t *testing.T) {
 	t.Setenv("WOODPECKER_BACKEND_K8S_NAMESPACE", "")
 	t.Setenv("WOODPECKER_BACKEND_K8S_POD_AFFINITY", `{
