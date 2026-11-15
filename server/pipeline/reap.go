@@ -247,10 +247,14 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			if changed && !pipelineEverStarted && !hasError {
 				status = model.StatusCanceled
 			}
-			updated, err := UpdateStatusToDone(storage, *pipeline, status, now.Unix())
-			if err != nil {
+			updated, err := finalizeIfUnchanged(storage, *pipeline, status, now.Unix())
+			switch {
+			case errors.Is(err, store_types.ErrUpdateConflict):
+				// A concurrent kill or decline already finalized and published the pipeline.
+				continue
+			case err != nil:
 				log.Error().Err(err).Int64("pipeline_id", pipeline.ID).Msg("could not finalize pipeline in orphan reaper")
-			} else {
+			default:
 				pipeline = updated
 				changed = true
 			}
@@ -320,6 +324,15 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 	}
 	*workflow = updated
 	return true
+}
+
+// finalizeIfUnchanged writes the reaper's final status only while the stored
+// status is still the snapshot's, so a concurrent kill or decline is not overwritten.
+func finalizeIfUnchanged(storage store.Store, snapshot model.Pipeline, status model.StatusValue, stopped int64) (*model.Pipeline, error) {
+	from := snapshot.Status
+	snapshot.Status = status
+	snapshot.Finished = stopped
+	return &snapshot, storage.UpdatePipelineIfStatus(&snapshot, from)
 }
 
 // pendingTimedOut reports whether a runnable task reached either pending timeout.
