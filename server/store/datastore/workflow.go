@@ -23,6 +23,7 @@ import (
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 func (s storage) WorkflowGetTree(pipeline *model.Pipeline) ([]*model.Workflow, error) {
@@ -203,6 +204,18 @@ func (s storage) WorkflowByStep(step *model.Step) (*model.Workflow, error) {
 func (s storage) WorkflowUpdate(workflow *model.Workflow) error {
 	_, err := s.engine.ID(workflow.ID).AllCols().Update(workflow)
 	return err
+}
+
+// WorkflowUpdateIfState updates a workflow only if its stored state still matches from.
+func (s storage) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue) error {
+	affected, err := s.engine.ID(workflow.ID).Where("state = ?", from).AllCols().Update(workflow)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return types.ErrUpdateConflict
+	}
+	return nil
 }
 
 // WorkflowSupersedePending validates and updates the selected dependent closure in one transaction.

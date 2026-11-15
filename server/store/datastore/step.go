@@ -19,6 +19,7 @@ import (
 	"xorm.io/xorm"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 func (s storage) StepLoad(pipelineID, stepID int64) (*model.Step, error) {
@@ -77,6 +78,18 @@ func (s storage) stepCreate(sess *xorm.Session, steps []*model.Step) error {
 func (s storage) StepUpdate(step *model.Step) error {
 	_, err := s.engine.ID(step.ID).AllCols().Update(step)
 	return err
+}
+
+// StepUpdateIfState updates a step only if its stored state still matches from.
+func (s storage) StepUpdateIfState(step *model.Step, from model.StatusValue) error {
+	affected, err := s.engine.ID(step.ID).Where("state = ?", from).AllCols().Update(step)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return types.ErrUpdateConflict
+	}
+	return nil
 }
 
 func deleteStep(sess *xorm.Session, stepID int64) error {

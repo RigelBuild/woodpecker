@@ -286,12 +286,14 @@ func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) 
 	}
 	updated := *workflow
 	updated.Finished = now
-	skipped, err := UpdateWorkflowToStatusSkipped(storage, updated)
-	if err != nil {
-		log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not skip workflow whose dependencies failed")
+	updated.State = model.StatusSkipped
+	if err := storage.WorkflowUpdateIfState(&updated, workflow.State); err != nil {
+		if !errors.Is(err, store_types.ErrUpdateConflict) {
+			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not skip workflow whose dependencies failed")
+		}
 		return false
 	}
-	*workflow = *skipped
+	*workflow = updated
 	return true
 }
 
@@ -301,15 +303,23 @@ func skipPendingSteps(storage store.Store, workflow *model.Workflow) bool {
 		if step.State != model.StatusPending {
 			continue
 		}
-		skipped, err := UpdateStepToStatusSkipped(storage, *step, 0, model.StatusCanceled)
-		if err != nil {
-			log.Error().Err(err).Int64("step_id", step.ID).Msg("could not skip step whose dependencies failed")
+		updated := *step
+		updated.State = model.StatusCanceled
+		if updated.Started != 0 {
+			updated.State = model.StatusSuccess // for daemons that are killed
+			updated.Finished = 0
+		}
+		if err := storage.StepUpdateIfState(&updated, step.State); err != nil {
+			if !errors.Is(err, store_types.ErrUpdateConflict) {
+				log.Error().Err(err).Int64("step_id", step.ID).Msg("could not skip step whose dependencies failed")
+			}
 			return false
 		}
-		*step = *skipped
+		*step = updated
 	}
 	return true
 }
+
 
 // removeStaleTaskRows drops persisted tasks whose workflow is terminal or gone.
 func removeStaleTaskRows(ctx context.Context, storage store.Store, rows []*model.Task, loaded map[string]model.StatusValue, waiting map[string]*model.Task, running map[string]struct{}, cache map[int64]*model.Workflow) {

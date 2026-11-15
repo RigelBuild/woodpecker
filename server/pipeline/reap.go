@@ -310,8 +310,10 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 			updated.Error = errMsg
 			updated.Finished = finished
 		}
-		if err := storage.StepUpdate(&updated); err != nil {
-			log.Error().Err(err).Int64("step_id", step.ID).Msg("could not finalize orphaned workflow step")
+		if err := storage.StepUpdateIfState(&updated, step.State); err != nil {
+			if !errors.Is(err, store_types.ErrUpdateConflict) {
+				log.Error().Err(err).Int64("step_id", step.ID).Msg("could not finalize orphaned workflow step")
+			}
 			return false
 		}
 		*step = updated
@@ -329,8 +331,10 @@ func reapWorkflow(storage store.Store, workflow *model.Workflow, finished int64,
 		updated.Error = errMsg
 		updated.Finished = finished
 	}
-	if err := storage.WorkflowUpdate(&updated); err != nil {
-		log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not finalize orphaned workflow")
+	if err := storage.WorkflowUpdateIfState(&updated, workflow.State); err != nil {
+		if !errors.Is(err, store_types.ErrUpdateConflict) {
+			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not finalize orphaned workflow")
+		}
 		return false
 	}
 	*workflow = updated

@@ -145,3 +145,118 @@ func TestReapConflictAfterWorkflowWritesPublishesStoredPipeline(t *testing.T) {
 	require.NotNil(t, published)
 	assert.Equal(t, model.StatusKilled, published.Status, "publish must carry the stored killed status")
 }
+
+type workflowCompletionRaceStore struct {
+	store.Store
+	completedAt int64
+	updated     bool
+}
+
+func (s *workflowCompletionRaceStore) WorkflowUpdateIfState(workflow *model.Workflow, from model.StatusValue) error {
+	current, err := s.Store.WorkflowLoad(workflow.ID)
+	if err != nil {
+		return err
+	}
+	current.State = model.StatusSuccess
+	current.Finished = s.completedAt
+	if err := s.Store.WorkflowUpdate(current); err != nil {
+		return err
+	}
+	s.updated = true
+	return s.Store.WorkflowUpdateIfState(workflow, from)
+}
+
+type stepCompletionRaceStore struct {
+	store.Store
+	completedAt int64
+	updated     bool
+}
+
+func (s *stepCompletionRaceStore) StepUpdateIfState(step *model.Step, from model.StatusValue) error {
+	current, err := s.Store.StepLoad(step.PipelineID, step.ID)
+	if err != nil {
+		return err
+	}
+	current.State = model.StatusSuccess
+	current.Finished = s.completedAt
+	if err := s.Store.StepUpdate(current); err != nil {
+		return err
+	}
+	s.updated = true
+	return s.Store.StepUpdateIfState(step, from)
+}
+
+func TestReapDoesNotOverwriteCompletedWorkflow(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusRunning
+	pipeline.Started = now.Add(-time.Hour).Unix()
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+	require.NoError(t, f.store.WorkflowsCreate([]*model.Workflow{{
+		PipelineID: pipeline.ID,
+		PID:        1,
+		Name:       "build",
+		State:      model.StatusRunning,
+		Started:    now.Add(-time.Hour).Unix(),
+	}}))
+
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	oldScheduler := server.Config.Services.Scheduler
+	server.Config.Services.Scheduler = schedulerMock
+	t.Cleanup(func() { server.Config.Services.Scheduler = oldScheduler })
+
+	reaperStore := &workflowCompletionRaceStore{Store: f.store, completedAt: now.Unix()}
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), reaperStore, now, time.Minute, 0, 0))
+	require.True(t, reaperStore.updated, "concurrent completion must land after the reaper snapshot")
+
+	stored, err := f.store.WorkflowLoad(1)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSuccess, stored.State)
+	assert.Equal(t, now.Unix(), stored.Finished)
+}
+
+func TestReapDoesNotOverwriteCompletedStep(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusRunning
+	pipeline.Started = now.Add(-time.Hour).Unix()
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+	require.NoError(t, f.store.WorkflowsCreate([]*model.Workflow{{
+		PipelineID: pipeline.ID,
+		PID:        1,
+		Name:       "build",
+		State:      model.StatusRunning,
+		Started:    now.Add(-time.Hour).Unix(),
+		Children: []*model.Step{{
+			PID:     1,
+			PPID:    1,
+			Name:    "step",
+			State:   model.StatusRunning,
+			Started: now.Add(-time.Hour).Unix(),
+		}},
+	}}))
+
+	workflow, err := f.store.WorkflowLoad(1)
+	require.NoError(t, err)
+
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	oldScheduler := server.Config.Services.Scheduler
+	server.Config.Services.Scheduler = schedulerMock
+	t.Cleanup(func() { server.Config.Services.Scheduler = oldScheduler })
+
+	reaperStore := &stepCompletionRaceStore{Store: f.store, completedAt: now.Unix()}
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), reaperStore, now, time.Minute, 0, 0))
+	require.True(t, reaperStore.updated, "concurrent completion must land after the reaper snapshot")
+
+	steps, err := f.store.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	require.Len(t, steps, 1)
+	assert.Equal(t, model.StatusSuccess, steps[0].State)
+	assert.Equal(t, now.Unix(), steps[0].Finished)
+}

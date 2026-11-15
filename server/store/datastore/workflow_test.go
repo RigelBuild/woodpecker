@@ -30,6 +30,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore/migration"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 func TestWorkflowLoad(t *testing.T) {
@@ -319,4 +320,58 @@ func TestWorkflowUpdate(t *testing.T) {
 	workflowGet, err = store.WorkflowLoad(1)
 	assert.NoError(t, err)
 	assert.Equal(t, model.StatusValue("success"), workflowGet.State)
+}
+
+func TestWorkflowUpdateIfStateRejectsStaleSnapshot(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+
+	workflow := &model.Workflow{PipelineID: 1, PID: 1, Name: "build", State: model.StatusRunning}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	stale := *workflow
+
+	concurrent, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	concurrent.State = model.StatusSuccess
+	concurrent.Finished = 123
+	require.NoError(t, s.WorkflowUpdate(concurrent))
+
+	stale.State = model.StatusKilled
+	assert.ErrorIs(t, s.WorkflowUpdateIfState(&stale, model.StatusRunning), types.ErrUpdateConflict)
+
+	stored, err := s.WorkflowLoad(workflow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSuccess, stored.State)
+	assert.Equal(t, int64(123), stored.Finished)
+}
+
+func TestStepUpdateIfStateRejectsStaleSnapshot(t *testing.T) {
+	s, closer := newTestStore(t, new(model.Step), new(model.Workflow))
+	defer closer()
+
+	workflow := &model.Workflow{
+		PipelineID: 1,
+		PID:        1,
+		Name:       "build",
+		State:      model.StatusRunning,
+		Children:   []*model.Step{{PID: 1, PPID: 1, Name: "step", State: model.StatusRunning}},
+	}
+	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
+	steps, err := s.StepListFromWorkflowFind(workflow)
+	require.NoError(t, err)
+	require.Len(t, steps, 1)
+	stale := *steps[0]
+
+	concurrent := *steps[0]
+	concurrent.State = model.StatusSuccess
+	concurrent.Finished = 123
+	require.NoError(t, s.StepUpdate(&concurrent))
+
+	stale.State = model.StatusKilled
+	assert.ErrorIs(t, s.StepUpdateIfState(&stale, model.StatusRunning), types.ErrUpdateConflict)
+
+	stored, err := s.StepLoad(workflow.PipelineID, steps[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusSuccess, stored.State)
+	assert.Equal(t, int64(123), stored.Finished)
 }

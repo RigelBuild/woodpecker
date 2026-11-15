@@ -170,6 +170,8 @@ type Store interface {
 	StepByUUID(uuid string) (*model.Step, error)
 	StepList(pipelineID int64) ([]*model.Step, error)
 	StepUpdate(*model.Step) error
+	// StepUpdateIfState updates a step only while its stored state is still from.
+	StepUpdateIfState(*model.Step, model.StatusValue) error
 	StepListFromWorkflowFind(*model.Workflow) ([]*model.Step, error)
 
 	// Logs
@@ -224,6 +226,8 @@ type Store interface {
 	WorkflowSupersedePending(pipelineID int64, ids []int64, by int64) error
 	WorkflowByStep(*model.Step) (*model.Workflow, error)
 	WorkflowUpdate(*model.Workflow) error
+	// WorkflowUpdateIfState updates a workflow only while its stored state is still from.
+	WorkflowUpdateIfState(*model.Workflow, model.StatusValue) error
 	// WorkflowResetForRequeue returns a workflow its agent lost to pending if
 	// the row still belongs to agentID; false means the row changed.
 	WorkflowResetForRequeue(workflow *model.Workflow, steps []*model.Step, agentID int64) (bool, error)
