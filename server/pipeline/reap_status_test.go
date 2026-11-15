@@ -233,11 +233,12 @@ func TestReapDoesNotOverwriteCompletedStep(t *testing.T) {
 		State:      model.StatusRunning,
 		Started:    now.Add(-time.Hour).Unix(),
 		Children: []*model.Step{{
-			PID:     1,
-			PPID:    1,
-			Name:    "step",
-			State:   model.StatusRunning,
-			Started: now.Add(-time.Hour).Unix(),
+			PipelineID: pipeline.ID,
+			PID:        1,
+			PPID:       1,
+			Name:       "step",
+			State:      model.StatusRunning,
+			Started:    now.Add(-time.Hour).Unix(),
 		}},
 	}}))
 
@@ -245,10 +246,16 @@ func TestReapDoesNotOverwriteCompletedStep(t *testing.T) {
 	require.NoError(t, err)
 
 	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	managerMock := manager_mocks.NewMockManager(t)
+	managerMock.On("ForgeFromRepo", mock.Anything).Return(nil, nil).Maybe()
 	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
-	oldScheduler := server.Config.Services.Scheduler
+	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
 	server.Config.Services.Scheduler = schedulerMock
-	t.Cleanup(func() { server.Config.Services.Scheduler = oldScheduler })
+	server.Config.Services.Manager = managerMock
+	t.Cleanup(func() {
+		server.Config.Services.Scheduler = oldScheduler
+		server.Config.Services.Manager = oldManager
+	})
 
 	reaperStore := &stepCompletionRaceStore{Store: f.store, completedAt: now.Unix()}
 	require.NoError(t, ReapOrphanedWorkflows(t.Context(), reaperStore, now, time.Minute, 0, 0))

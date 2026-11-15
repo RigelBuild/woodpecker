@@ -114,8 +114,10 @@ func stampUnfinishedDeps(storage store.Store, workflows []*model.Workflow, delet
 		}
 		updated := *workflow
 		updated.Finished = now
-		if err := storage.WorkflowUpdate(&updated); err != nil {
-			log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not stamp finish time of dependency")
+		if err := storage.WorkflowUpdateIfState(&updated, workflow.State); err != nil {
+			if !errors.Is(err, store_types.ErrUpdateConflict) {
+				log.Error().Err(err).Int64("workflow_id", workflow.ID).Msg("could not stamp finish time of dependency")
+			}
 			continue
 		}
 		*workflow = updated
@@ -319,7 +321,6 @@ func skipPendingSteps(storage store.Store, workflow *model.Workflow) bool {
 	}
 	return true
 }
-
 
 // removeStaleTaskRows drops persisted tasks whose workflow is terminal or gone.
 func removeStaleTaskRows(ctx context.Context, storage store.Store, rows []*model.Task, loaded map[string]model.StatusValue, waiting map[string]*model.Task, running map[string]struct{}, cache map[int64]*model.Workflow) {

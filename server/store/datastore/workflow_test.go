@@ -354,7 +354,7 @@ func TestStepUpdateIfStateRejectsStaleSnapshot(t *testing.T) {
 		PID:        1,
 		Name:       "build",
 		State:      model.StatusRunning,
-		Children:   []*model.Step{{PID: 1, PPID: 1, Name: "step", State: model.StatusRunning}},
+		Children:   []*model.Step{{PipelineID: 1, PID: 1, PPID: 1, Name: "step", State: model.StatusRunning}},
 	}
 	require.NoError(t, s.WorkflowsCreate([]*model.Workflow{workflow}))
 	steps, err := s.StepListFromWorkflowFind(workflow)
