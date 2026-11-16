@@ -80,10 +80,10 @@ else
   echo 'FAIL mint creates expected version ref'
   fails=$((fails + 1))
 fi
-if grep -q "sha=${new}" "$GH_LOG"; then
-  echo 'ok   mint targets merge that set version'
+if grep -q "sha=${noop}" "$GH_LOG"; then
+  echo 'ok   mint targets the built commit'
 else
-  echo 'FAIL mint targets merge that set version'
+  echo 'FAIL mint targets the built commit'
   fails=$((fails + 1))
 fi
 before="$(wc -l <"$GH_LOG")"
@@ -92,6 +92,25 @@ if [ "$?" -eq 0 ] && [ "$(wc -l <"$GH_LOG")" -eq "$before" ]; then
   echo 'ok   existing remote release tag is a no-op'
 else
   echo 'FAIL existing remote release tag is a no-op'
+  fails=$((fails + 1))
+fi
+
+# Broken commit X sets the same version with a stale vendorHash and is never built, so it gets no tag.
+# Fixed commit Y keeps the version. mint on Y must tag Y, not walk back to X.
+git checkout -q -b vendor-fix "$new"
+printf 'vendorHash = "stale";\n' >vendor.nix
+git add vendor.nix
+git commit -q -m vendor-stale
+broken="$(git rev-parse HEAD)"
+printf 'vendorHash = "fixed";\n' >vendor.nix
+git add vendor.nix
+git commit -q -m vendor-fixed
+fixed="$(git rev-parse HEAD)"
+before="$(wc -l <"$GH_LOG")"
+if GH_MODE=create "$script" mint "$fixed" RigelBuild/woodpecker >/dev/null 2>&1 && [ "$(wc -l <"$GH_LOG")" -eq $((before + 1)) ] && grep -q "sha=${fixed}" "$GH_LOG" && ! grep -q "sha=${broken}" "$GH_LOG"; then
+  echo 'ok   mint tags the built commit, not an earlier same-version commit'
+else
+  echo 'FAIL mint tags the built commit, not an earlier same-version commit'
   fails=$((fails + 1))
 fi
 

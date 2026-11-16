@@ -90,7 +90,7 @@ check_pr() {
 }
 
 mint() {
-  local sha="$1" repo="$2" version tag target parent parent_version response rc actual
+  local sha="$1" repo="$2" version tag response rc actual
   version="$(version_at "$sha")"
   tag="v${version}"
   if git show-ref --verify --quiet "refs/tags/${tag}" || gh api "repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>&1; then
@@ -98,29 +98,24 @@ mint() {
     return 0
   fi
 
-  target="$sha"
-  while parent="$(git rev-parse --verify "${target}^1" 2>/dev/null)"; do
-    parent_version="$(version_at "$parent" no)"
-    [ "$parent_version" = "$version" ] || break
-    target="$parent"
-  done
   validate_next_version "$version"
 
   set +e
-  response="$(gh api --method POST "repos/${repo}/git/refs" -f "ref=refs/tags/${tag}" -f "sha=${target}" 2>&1)"
+  response="$(gh api --method POST "repos/${repo}/git/refs" -f "ref=refs/tags/${tag}" -f "sha=${sha}" 2>&1)"
   rc=$?
   set -e
   if [ "$rc" -eq 0 ]; then
-    echo "Created ${tag} at ${target}"
+    echo "Created ${tag} at ${sha}"
     return 0
   fi
+
   if [[ "$response" == *"HTTP 422"* && "$response" == *"Reference already exists"* ]]; then
     actual="$(gh api "repos/${repo}/git/ref/tags/${tag}" --jq '.object.sha')"
-    if [ "$actual" = "$target" ]; then
-      echo "${tag} already points at ${target}"
+    if [ "$actual" = "$sha" ]; then
+      echo "${tag} already points at ${sha}"
       return 0
     fi
-    echo "::error::${tag} already exists at ${actual}, expected ${target}" >&2
+    echo "::error::${tag} already exists at ${actual}, expected ${sha}" >&2
     return 1
   fi
   printf '%s\n' "$response" >&2
