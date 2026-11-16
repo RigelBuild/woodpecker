@@ -31,7 +31,6 @@ jobs:
 
   # A stale vendorHash fails only nix consumers, so build the Go module set before a release lands.
   nix-go-modules:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -49,6 +48,7 @@ jobs:
 
   mint:
     if: github.event_name != 'pull_request'
+    needs: nix-go-modules
     runs-on: ubuntu-24.04
     environment: rigel-release
     steps:
