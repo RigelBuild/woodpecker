@@ -18,7 +18,7 @@ package github
 import (
 	"testing"
 
-	"github.com/google/go-github/v92/github"
+	"github.com/google/go-github/v93/github"
 	"github.com/stretchr/testify/assert"
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
@@ -44,12 +44,22 @@ func Test_convertStatus(t *testing.T) {
 		{name: "pending", status: model.StatusPending, want: statusPending},
 		{name: "running", status: model.StatusRunning, want: statusPending},
 		{name: "blocked", status: model.StatusBlocked, want: statusPending},
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 		{name: "skipped", status: model.StatusSkipped, want: statusPending},
 		// A never-started supersede (StatusCanceled) is terminal → success, so it
 		// can't wedge the required aggregate check / block the merge queue.
 		{name: "canceled", status: model.StatusCanceled, want: statusSuccess},
 		// Regression: StatusCreated ("internal use only") briefly surfaces
 		// during a merge-queue re-run. It used to fall through to statusError.
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-		{name: "skipped", status: model.StatusSkipped, want: statusPending},
+-		{name: "canceled", status: model.StatusCanceled, want: statusPending},
++		{name: "skipped", status: model.StatusSkipped, want: statusError},
++		{name: "canceled", status: model.StatusCanceled, want: statusError},
+ 		// StatusCreated is internal-only and never terminal.
+>>>>>>> conflict 1 of 1 ends
 		{name: "created", status: model.StatusCreated, want: statusPending},
 	}
 

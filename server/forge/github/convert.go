@@ -18,7 +18,15 @@ package github
 import (
 	"fmt"
 
-	"github.com/google/go-github/v92/github"
+<<<<<<< conflict 1 of 3
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+ 	"github.com/google/go-github/v92/github"
+-	"github.com/rs/zerolog/log"
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+	"github.com/google/go-github/v93/github"
+	"github.com/rs/zerolog/log"
+>>>>>>> conflict 1 of 3 ends
 
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
@@ -49,6 +57,8 @@ const (
 // GitHub commit status.
 func convertStatus(status model.StatusValue) string {
 	switch status {
+<<<<<<< conflict 2 of 3
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	case model.StatusFailure, model.StatusDeclined, model.StatusKilled, model.StatusError:
 		return statusFailure
 	case model.StatusSuccess:
@@ -70,7 +80,28 @@ func convertStatus(status model.StatusValue) string {
 		// unrecognized state — StatusCreated ("internal use only") briefly
 		// surfaces during a merge-queue re-run and previously fell through to
 		// "error", which failed the batch (a spurious required-check failure).
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-	case model.StatusPending, model.StatusRunning, model.StatusBlocked, model.StatusSkipped, model.StatusCanceled, model.StatusCreated:
++	case model.StatusPending, model.StatusRunning, model.StatusBlocked, model.StatusCreated:
+>>>>>>> conflict 2 of 3 ends
 		return statusPending
+<<<<<<< conflict 3 of 3
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+ 	case model.StatusFailure, model.StatusDeclined:
+ 		return statusFailure
+-	case model.StatusKilled, model.StatusError:
++	case model.StatusKilled, model.StatusError, model.StatusSkipped, model.StatusCanceled:
++		// GitHub has no skipped or canceled state; they are neither success nor failure
+ 		return statusError
+ 	case model.StatusSuccess:
+ 		return statusSuccess
+ 	default:
+ 		log.Warn().Str("status", string(status)).Msg("unknown pipeline status")
+ 		return statusError
+>>>>>>> conflict 3 of 3 ends
 	}
 }
 

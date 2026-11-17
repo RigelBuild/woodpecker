@@ -23,6 +23,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/services/secret"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/server/store/types"
 )
 
 var (
@@ -87,6 +88,8 @@ func TestSecretListPipeline(t *testing.T) {
 	assert.Len(t, s, 1)
 	assert.Equal(t, "value-global", s[0].Value)
 }
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 
 // A same-name secret at a nearer scope supplies the value, but never loosens the
 // policy a farther scope set on that name.
@@ -141,3 +144,61 @@ func TestSecretListPipelineMergesCaseVariantsAcrossScopes(t *testing.T) {
 		assert.Equal(t, []string{"plugins/deploy"}, s[0].Images)
 	}
 }
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
++
++// Deleting looks the secret up in its scope first, so only a secret of that
++// repo, org or the global scope can be deleted.
++func TestSecretDelete(t *testing.T) {
++	repo := &model.Repo{ID: 1}
++
++	t.Run("repo", func(t *testing.T) {
++		s := store_mocks.NewMockStore(t)
++		s.On("SecretFind", repo, "secret").Return(repoSecret, nil)
++		s.On("SecretDelete", repoSecret).Return(nil)
++		s.On("SecretFind", repo, "missing").Return(nil, types.ErrRecordNotExist)
++
++		db := secret.NewDB(s)
++		assert.NoError(t, db.SecretDelete(repo, "secret"))
++		assert.ErrorIs(t, db.SecretDelete(repo, "missing"), types.ErrRecordNotExist)
++	})
++
++	t.Run("org", func(t *testing.T) {
++		s := store_mocks.NewMockStore(t)
++		s.On("OrgSecretFind", int64(1), "secret").Return(orgSecret, nil)
++		s.On("SecretDelete", orgSecret).Return(nil)
++		s.On("OrgSecretFind", int64(1), "missing").Return(nil, types.ErrRecordNotExist)
++
++		db := secret.NewDB(s)
++		assert.NoError(t, db.OrgSecretDelete(1, "secret"))
++		assert.ErrorIs(t, db.OrgSecretDelete(1, "missing"), types.ErrRecordNotExist)
++	})
++
++	t.Run("global", func(t *testing.T) {
++		s := store_mocks.NewMockStore(t)
++		s.On("GlobalSecretFind", "secret").Return(globalSecret, nil)
++		s.On("SecretDelete", globalSecret).Return(nil)
++		s.On("GlobalSecretFind", "missing").Return(nil, types.ErrRecordNotExist)
++
++		db := secret.NewDB(s)
++		assert.NoError(t, db.GlobalSecretDelete("secret"))
++		assert.ErrorIs(t, db.GlobalSecretDelete("missing"), types.ErrRecordNotExist)
++	})
++
++	t.Run("store error on delete", func(t *testing.T) {
++		s := store_mocks.NewMockStore(t)
++		s.On("GlobalSecretFind", "secret").Return(globalSecret, nil)
++		s.On("SecretDelete", mock.Anything).Return(assert.AnError)
++
++		assert.ErrorIs(t, secret.NewDB(s).GlobalSecretDelete("secret"), assert.AnError)
++	})
++}
++
++func TestSecretListPipelineStoreError(t *testing.T) {
++	s := store_mocks.NewMockStore(t)
++	s.On("SecretList", mock.Anything, mock.Anything, mock.Anything).Return(nil, assert.AnError)
++
++	_, err := secret.NewDB(s).SecretListPipeline(t.Context(), &model.Repo{}, &model.Pipeline{}, nil)
++	assert.ErrorIs(t, err, assert.AnError)
++}
+>>>>>>> conflict 1 of 1 ends

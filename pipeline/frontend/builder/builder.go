@@ -51,19 +51,44 @@ type PipelineBuilder struct {
 	PrivilegedPlugins   []string
 	CompilerOptions     []compiler.Option
 	GetWorkflowMetadata func(workflow *Workflow) metadata.Metadata
-	// ReportSkipped keeps workflows filtered out by their `when` conditions as
-	// skipped items instead of dropping them.
-	ReportSkipped bool
+<<<<<<< conflict 1 of 2
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
++	// ReportSkipped keeps workflows filtered out by their `when` conditions as
++	// skipped items instead of dropping them.
++	ReportSkipped bool
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+	// SelectedWorkflow, if set, limits to this workflow and its hard dependencies.
+	SelectedWorkflow string
+	// ListOnly reports the workflows that could run instead of building them.
+	ListOnly bool
+>>>>>>> conflict 1 of 2 ends
 }
 
 func (b *PipelineBuilder) Build() (items []*Item, errorsAndWarnings error) {
 	b.Yamls = SortYamlFilesByName(b.Yamls)
 
+	yamls := b.Yamls
+	selected := SanitizePath(b.SelectedWorkflow)
+	if b.SelectedWorkflow != "" {
+		var err error
+		yamls, err = b.selectYamls(selected)
+		if err != nil {
+			return nil, err
+		}
+		if len(yamls) == 0 {
+			return nil, &pipeline_errors.PipelineError{
+				Type:    pipeline_errors.PipelineErrorTypeGeneric,
+				Message: fmt.Sprintf("selected workflow '%s' does not exist", b.SelectedWorkflow),
+			}
+		}
+	}
+
 	pidSequence := 1
 
-	for _, y := range b.Yamls {
+	for _, y := range yamls {
 		// matrix axes
-		axes, err := matrix.ParseString(string(y.Data))
+		axes, err := matrix.Parse(y.Data)
 		if err != nil {
 			return nil, err
 		}
@@ -100,8 +125,28 @@ func (b *PipelineBuilder) Build() (items []*Item, errorsAndWarnings error) {
 
 	items = filterMissingDependencies(items)
 
-	errorsAndWarnings = multierr.Append(errorsAndWarnings, warnDuplicateWorkflowNames(items))
+<<<<<<< conflict 2 of 2
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
++	errorsAndWarnings = multierr.Append(errorsAndWarnings, warnDuplicateWorkflowNames(items))
++
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+	// workflows in a cycle would wait for each other in the queue forever
+	if cycle := findDependencyCycle(items); cycle != nil {
+		return nil, multierr.Append(errorsAndWarnings, &pipeline_errors.PipelineError{
+			Type:    pipeline_errors.PipelineErrorTypeCompiler,
+			Message: fmt.Sprintf("workflow dependency cycle: %s", strings.Join(cycle, " -> ")),
+		})
+	}
 
+	if b.SelectedWorkflow != "" && !ContainsItemWithName(selected, items) {
+		return nil, multierr.Append(errorsAndWarnings, &pipeline_errors.PipelineError{
+			Type:    pipeline_errors.PipelineErrorTypeGeneric,
+			Message: fmt.Sprintf("selected workflow '%s' does not match its conditions or misses a dependency", b.SelectedWorkflow),
+		})
+	}
+
+>>>>>>> conflict 2 of 2 ends
 	return items, errorsAndWarnings
 }
 
@@ -143,28 +188,10 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 	workflowMetadata := b.GetWorkflowMetadata(workflow)
 	environ := b.environmentVariables(workflowMetadata, axis)
 
-	// add additional environment variables for substituting
-	for k, v := range b.AdditionalEnvs {
-		if _, exists := environ[k]; exists {
-			// don't override existing values
-			continue
-		}
-		environ[k] = v
-	}
-
-	// add global environment variables for substituting
-	for k, v := range b.Envs {
-		if _, exists := environ[k]; exists {
-			// don't override existing values
-			continue
-		}
-		environ[k] = v
-	}
-
 	// substitute vars
 	substituted, err := metadata.EnvVarSubst(data, environ)
 	if err != nil {
-		return nil, multierr.Append(errorsAndWarnings, err)
+		return nil, &pipeline_errors.PipelineError{Message: err.Error(), Type: pipeline_errors.PipelineErrorTypeCompiler}
 	}
 
 	// parse yaml pipeline
@@ -174,21 +201,23 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 	}
 
 	// lint pipeline
-	errorsAndWarnings = multierr.Append(errorsAndWarnings, linter.New(
-		linter.WithTrusted(linter.TrustedConfiguration{
-			Network:  b.RepoTrusted.Network,
-			Volumes:  b.RepoTrusted.Volumes,
-			Security: b.RepoTrusted.Security,
-		}),
-		linter.PrivilegedPlugins(b.PrivilegedPlugins),
-		linter.WithTrustedClonePlugins(b.TrustedClonePlugins),
-	).Lint([]*linter.WorkflowConfig{{
-		Workflow:  parsed,
-		File:      workflow.Name,
-		RawConfig: data,
-	}}))
-	if pipeline_errors.HasBlockingErrors(errorsAndWarnings) {
-		return nil, errorsAndWarnings
+	if !b.ListOnly {
+		errorsAndWarnings = multierr.Append(errorsAndWarnings, linter.New(
+			linter.WithTrusted(linter.TrustedConfiguration{
+				Network:  b.RepoTrusted.Network,
+				Volumes:  b.RepoTrusted.Volumes,
+				Security: b.RepoTrusted.Security,
+			}),
+			linter.PrivilegedPlugins(b.PrivilegedPlugins),
+			linter.WithTrustedClonePlugins(b.TrustedClonePlugins),
+		).Lint([]*linter.WorkflowConfig{{
+			Workflow:  parsed,
+			File:      workflow.Name,
+			RawConfig: data,
+		}}))
+		if pipeline_errors.HasBlockingErrors(errorsAndWarnings) {
+			return nil, errorsAndWarnings
+		}
 	}
 
 	// The server reports pipeline-level dispatch failures under this name. A
@@ -216,7 +245,11 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 	onMetadataEdit := parsed.When.IncludesEvent(string(metadata.EventPullMetadata))
 
 	// checking if filtered.
-	if match, err := parsed.When.Match(workflowMetadata, true, environ); !match && err == nil {
+	whenMatch := parsed.When.Match
+	if b.ListOnly {
+		whenMatch = parsed.When.MatchIgnoringEvaluate
+	}
+	if match, err := whenMatch(workflowMetadata, true, environ); !match && err == nil {
 		log.Debug().Str("pipeline", workflow.Name).Msg(
 			"marked as skipped, does not match metadata",
 		)
@@ -231,13 +264,16 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 		return nil, multierr.Append(errorsAndWarnings, err)
 	}
 
-	ir, err := b.toInternalRepresentation(parsed, axis, workflowMetadata, workflow.ID)
-	if err != nil {
-		return nil, multierr.Append(errorsAndWarnings, err)
-	}
+	var ir *backend_types.Config
+	if !b.ListOnly {
+		ir, err = b.toInternalRepresentation(parsed, axis, workflowMetadata, workflow.ID)
+		if err != nil {
+			return nil, multierr.Append(errorsAndWarnings, err)
+		}
 
-	if len(ir.Stages) == 0 {
-		return nil, nil
+		if len(ir.Stages) == 0 {
+			return nil, nil
+		}
 	}
 
 	item = &Item{
@@ -293,6 +329,25 @@ func (b *PipelineBuilder) genItemForWorkflow(workflow *Workflow, axis matrix.Axi
 func (b *PipelineBuilder) environmentVariables(metadata metadata.Metadata, axis matrix.Axis) map[string]string {
 	environ := metadata.Environ()
 	maps.Copy(environ, axis)
+
+	// add additional environment variables for substituting
+	for k, v := range b.AdditionalEnvs {
+		if _, exists := environ[k]; exists {
+			// don't override existing values
+			continue
+		}
+		environ[k] = v
+	}
+
+	// add global environment variables for substituting
+	for k, v := range b.Envs {
+		if _, exists := environ[k]; exists {
+			// don't override existing values
+			continue
+		}
+		environ[k] = v
+	}
+
 	return environ
 }
 

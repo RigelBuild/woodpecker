@@ -55,6 +55,7 @@ type requestStructure struct {
 	Repo          *model.Repo     `json:"repo"`
 	Pipeline      *model.Pipeline `json:"pipeline"`
 	Netrc         *model.Netrc    `json:"netrc"`
+	Restart       bool            `json:"restart"`
 	Configuration []*configData   `json:"configuration,omitempty"`
 }
 
@@ -66,7 +67,14 @@ func NewHTTP(endpoint string, client *utils.Client, includeNetrc bool) Service {
 	return &httpService{endpoint, client, includeNetrc}
 }
 
-func (h *httpService) Fetch(ctx context.Context, forgeClient forge.Forge, user *model.User, repo *model.Repo, pipeline *model.Pipeline, oldConfigData []*types.FileMeta, _ bool) ([]*types.FileMeta, error) {
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+-func (h *httpService) Fetch(ctx context.Context, forge forge.Forge, user *model.User, repo *model.Repo, pipeline *model.Pipeline, oldConfigData []*types.FileMeta, _ bool) ([]*types.FileMeta, error) {
++func (h *httpService) Fetch(ctx context.Context, forgeClient forge.Forge, user *model.User, repo *model.Repo, pipeline *model.Pipeline, oldConfigData []*types.FileMeta, _ bool) ([]*types.FileMeta, error) {
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+func (h *httpService) Fetch(ctx context.Context, forge forge.Forge, user *model.User, repo *model.Repo, pipeline *model.Pipeline, oldConfigData []*types.FileMeta, restart bool) ([]*types.FileMeta, error) {
+>>>>>>> conflict 1 of 1 ends
 	configuration := make([]*configData, len(oldConfigData))
 	for i, oldConfig := range oldConfigData {
 		configuration[i] = &configData{Name: oldConfig.Name, Data: string(oldConfig.Data)}
@@ -76,6 +84,7 @@ func (h *httpService) Fetch(ctx context.Context, forgeClient forge.Forge, user *
 	body := requestStructure{
 		Repo:          repo,
 		Pipeline:      pipeline,
+		Restart:       restart,
 		Configuration: configuration,
 	}
 

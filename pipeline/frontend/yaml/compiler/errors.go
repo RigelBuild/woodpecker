@@ -14,11 +14,21 @@
 
 package compiler
 
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 import (
 	"fmt"
 
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 )
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-import "fmt"
++import (
++	"fmt"
++	"strings"
++)
+>>>>>>> conflict 1 of 1 ends
 
 type ErrExtraHostFormat struct {
 	host string
@@ -79,7 +89,7 @@ type ErrStepDependencyCycle struct {
 }
 
 func (err *ErrStepDependencyCycle) Error() string {
-	return fmt.Sprintf("cycle detected: %v", err.path)
+	return fmt.Sprintf("step dependency cycle: %s -> %s", strings.Join(err.path, " -> "), err.path[0])
 }
 
 func (*ErrStepDependencyCycle) Is(target error) bool {

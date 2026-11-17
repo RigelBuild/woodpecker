@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/rs/zerolog/log"
 
@@ -34,6 +35,8 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
 )
 
+<<<<<<< conflict 1 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 var readOnlyNetrcMintTimeout = forge.ReadOnlyNetrcMintTimeout
 
 func parsePipeline(
@@ -48,6 +51,12 @@ func parsePipeline(
 	approval *Approval,
 ) ([]*builder.Item, error) {
 	netrc, err := forgeClient.Netrc(user, repo)
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, forgeYamls []*forge_types.FileMeta, envs map[string]string) ([]*builder.Item, error) {
++func parsePipeline(ctx context.Context, forge forge.Forge, store store.Store, currentPipeline *model.Pipeline, user *model.User, repo *model.Repo, forgeYamls []*forge_types.FileMeta, envs map[string]string) (items []*builder.Item, err error) {
+ 	netrc, err := forge.Netrc(user, repo)
+>>>>>>> conflict 1 of 2 ends
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate netrc file")
 		netrc = &model.Netrc{}
@@ -138,7 +147,7 @@ func parsePipeline(
 	}
 
 	if envs == nil {
-		envs = map[string]string{}
+		envs = make(map[string]string)
 	}
 
 	environmentService := server.Config.Services.Manager.EnvironmentService()
@@ -174,8 +183,15 @@ func parsePipeline(
 			Volumes:  repo.Trusted.Volumes,
 			Security: repo.Trusted.Security,
 		},
-		DefaultLabels: server.Config.Pipeline.DefaultWorkflowLabels,
-		ReportSkipped: server.Config.Server.ReportSkippedWorkflows,
+<<<<<<< conflict 2 of 2
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+ 		DefaultLabels: server.Config.Pipeline.DefaultWorkflowLabels,
++		ReportSkipped: server.Config.Server.ReportSkippedWorkflows,
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+		DefaultLabels:    server.Config.Pipeline.DefaultWorkflowLabels,
+		SelectedWorkflow: currentPipeline.SelectedWorkflow,
+>>>>>>> conflict 2 of 2 ends
 		CompilerOptions: []compiler.Option{
 			compiler.WithLocal(false),
 			compiler.WithRegistry(registries...),
@@ -201,6 +217,19 @@ func parsePipeline(
 	if server.Config.Pipeline.ForceIgnoreServiceFailure {
 		b.CompilerOptions = append(b.CompilerOptions, compiler.WithForceIgnoreServiceFailure())
 	}
+
+	// config is user controlled, so a panic in parser would crash the whole server
+	defer func() {
+		if r := recover(); r != nil {
+			const report = "This is a bug in Woodpecker, please report it at https://github.com/woodpecker-ci/woodpecker/issues"
+			log.Error().Str("repo", repo.FullName).Interface("recovered", r).Str("stack", string(debug.Stack())).
+				Msg("recovered panic while parsing pipeline config. " + report)
+			items, err = nil, &pipeline_errors.PipelineError{
+				Type:    pipeline_errors.PipelineErrorTypeGeneric,
+				Message: fmt.Sprintf("unexpected internal error while parsing config: %v. %s", r, report),
+			}
+		}
+	}()
 
 	return b.Build()
 }
@@ -263,12 +292,13 @@ func createPipelineItems(ctx context.Context, forgeClient forge.Forge, store sto
 	}
 
 	enrichPipelineItemSteps(pipelineItems, repo)
-	currentPipeline, err = saveWorkflowsFromPipelineBuilder(store, currentPipeline, pipelineItems, replaceExisting)
+	savedPipeline, err := saveWorkflowsFromPipelineBuilder(store, currentPipeline, pipelineItems, replaceExisting)
 	if err != nil {
+		// callers use the returned pipeline before they check err, so never return nil
 		return currentPipeline, nil, parseErr, err
 	}
 
-	return currentPipeline, pipelineItems, parseErr, nil
+	return savedPipeline, pipelineItems, parseErr, nil
 }
 
 // enrichPipelineItemSteps stamps server-side fields onto the backend step

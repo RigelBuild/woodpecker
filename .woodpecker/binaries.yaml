@@ -1,0 +1,124 @@
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+ when:
+   - event: tag
+   - event: pull_request
+     branch: ${CI_REPO_DEFAULT_BRANCH}
+     path:
+       - Makefile
+       - .woodpecker/binaries.yaml
+ 
+ variables:
+   - &golang_image 'docker.io/golang:1.27'
+-  - &node_image 'docker.io/node:24-alpine'
++  - &node_image 'docker.io/node:26-alpine'
+   - &xgo_image 'docker.io/techknowlogick/xgo:go-1.27.x'
+ 
+ # cspell:words bindata netgo
+ 
+ steps:
+   build-web:
+     image: *node_image
+     directory: web/
+     commands:
+-      - corepack enable
++      - npx get-pnpm
++      - export PNPM_HOME='/root/.local/share/pnpm'
++      - export PATH="$PNPM_HOME/bin:$PATH"
+       - pnpm install --frozen-lockfile
+       - pnpm build
+ 
+   vendor:
+     image: *golang_image
+     commands:
+       - go mod vendor
+ 
+   cross-compile-server:
+     depends_on:
+       - vendor
+       - build-web
+     image: *xgo_image
+     pull: true
+     commands:
+       - apt update
+       - apt install -y tree
+       - make cross-compile-server
+     environment:
+       PLATFORMS: linux|arm64/v8;linux|amd64;linux|riscv64;windows|amd64;freebsd|amd64
+       TAGS: bindata sqlite sqlite_unlock_notify netgo
+       ARCHIVE_IT: '1'
+ 
+   build-tarball:
+     depends_on:
+       - vendor
+       - build-web
+     image: *golang_image
+     commands:
+       - make build-tarball
+ 
+   build-agent:
+     depends_on:
+       - vendor
+     image: *golang_image
+     commands:
+       - apt update
+       - apt install -y zip
+       - make release-agent
+ 
+   build-cli:
+     depends_on:
+       - vendor
+     image: *golang_image
+     commands:
+       - apt update
+       - apt install -y zip
+       - make release-cli
+ 
+   build-deb-rpm:
+     depends_on:
+       - cross-compile-server
+       - build-agent
+       - build-cli
+     image: *golang_image
+     commands:
+       - make bundle
+ 
+   checksums:
+     depends_on:
+       - cross-compile-server
+       - build-agent
+       - build-cli
+       - build-deb-rpm
+       - build-tarball
+     image: *golang_image
+     commands:
+       - make release-checksums
+ 
+   release-dryrun:
+     depends_on:
+       - checksums
+     image: *golang_image
+     commands:
+       - ls -la dist/*.*
+       - cat dist/checksums.txt
+ 
+   release:
+     depends_on:
+       - checksums
+-    image: woodpeckerci/plugin-release:0.3.2
++    image: woodpeckerci/plugin-release:1.0.0
+     settings:
+       api_key:
+         from_secret: github_token
+       files:
+         - dist/*.tar.gz
+         - dist/*.zip
+         - dist/*.deb
+         - dist/*.rpm
+         - dist/checksums.txt
+       title: ${CI_COMMIT_TAG##v}
+     when:
+       event: tag
+>>>>>>> conflict 1 of 1 ends

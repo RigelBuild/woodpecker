@@ -29,20 +29,6 @@ var (
 	ErrSecretEventInvalid = errors.New("invalid secret event")
 )
 
-// SecretStore persists secret information to storage.
-type SecretStore interface {
-	SecretFind(*Repo, string) (*Secret, error)
-	SecretList(*Repo, bool, *ListOptions) ([]*Secret, error)
-	SecretCreate(*Secret) error
-	SecretUpdate(*Secret) error
-	SecretDelete(*Secret) error
-	OrgSecretFind(int64, string) (*Secret, error)
-	OrgSecretList(int64, *ListOptions) ([]*Secret, error)
-	GlobalSecretFind(string) (*Secret, error)
-	GlobalSecretList(*ListOptions) ([]*Secret, error)
-	SecretListAll() ([]*Secret, error)
-}
-
 // Secret represents a secret variable, such as a password or token.
 type Secret struct {
 	ID     int64          `json:"id"              xorm:"pk autoincr 'id'"`
@@ -52,6 +38,8 @@ type Secret struct {
 	Value  string         `json:"value,omitempty" xorm:"TEXT 'value'"`
 	Images []string       `json:"images"          xorm:"json 'images'"`
 	Events []WebhookEvent `json:"events"          xorm:"json 'events'"`
+<<<<<<< conflict 1 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	// A gated secret reaches a pipeline only after an approver's browser-session approval.
 	RequireApproval bool `json:"require_approval" xorm:"require_approval"`
 	// When set, non-pull_request runs get the secret only on these branches.
@@ -60,6 +48,11 @@ type Secret struct {
 	// Version makes an update based on a stale read fail instead of reverting a
 	// concurrent change, such as an approver adding a gate.
 	Version int64 `json:"-" xorm:"version 'version'"`
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-	Note   string         `json:"note" xorm:"note"`
++	Note   string         `json:"note"            xorm:"note"`
+>>>>>>> conflict 1 of 2 ends
 } //	@name	Secret
 
 // TableName return database table name for xorm.
@@ -150,6 +143,8 @@ func sortEvents(wel WebhookEventList) WebhookEventList {
 }
 
 type SecretPatch struct {
+<<<<<<< conflict 2 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	Name            *string        `json:"name"            `
 	Value           *string        `json:"value,omitempty" `
 	Images          []string       `json:"images"          `
@@ -157,4 +152,17 @@ type SecretPatch struct {
 	RequireApproval *bool          `json:"require_approval"`
 	Branches        []string       `json:"branches"        `
 	Note            *string        `json:"note" `
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-	Name   *string        `json:"name"            `
+-	Value  *string        `json:"value,omitempty" `
+-	Images []string       `json:"images"          `
+-	Events []WebhookEvent `json:"events"          `
+-	Note   *string        `json:"note" `
++	Name   *string        `json:"name"`
++	Value  *string        `json:"value,omitempty"`
++	Images []string       `json:"images"`
++	Events []WebhookEvent `json:"events"`
++	Note   *string        `json:"note"`
+>>>>>>> conflict 2 of 2 ends
 } //	@name	SecretPatch

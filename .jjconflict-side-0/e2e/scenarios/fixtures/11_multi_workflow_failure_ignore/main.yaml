@@ -1,7 +1,0 @@
-skip_clone: true
-
-steps:
-  - name: build
-    image: dummy
-    commands:
-      - echo building

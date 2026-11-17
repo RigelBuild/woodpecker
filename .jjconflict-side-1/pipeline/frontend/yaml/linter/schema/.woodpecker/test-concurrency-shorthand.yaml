@@ -1,7 +1,0 @@
-steps:
-  deploy:
-    image: alpine
-    commands:
-      - echo deploying
-
-concurrency: 1

@@ -52,13 +52,14 @@ var migrationTasks = []*xormigrate.Migration{
 	&renameTokenFields,
 	&setNewDefaultsForRequireApproval,
 	&removeRepoScm,
-	&unsanitizeOrgAndUserNames,
 	&replaceZeroForgeIDsInOrgs,
 	&fixForgeColumns,
 	&addCronField,
 	&updatePipelineStructureTagsReleases,
 	&replaceZeroForgeIDsInUsers,
 	&deduplicateLogEntries,
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	&addWorkflowOnMetadataEdit,
 	&addSecretApprovalAndBranches,
 	&addSecretVersion,
@@ -66,6 +67,10 @@ var migrationTasks = []*xormigrate.Migration{
 	&addTaskQueueTimestamps,
 	&addStepOutputs,
 	&addWorkflowSupersededBy,
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
++	&drop024MigrationArtifacts,
+>>>>>>> conflict 1 of 1 ends
 }
 
 var allBeans = []any{

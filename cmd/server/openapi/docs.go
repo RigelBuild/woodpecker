@@ -1059,6 +1059,49 @@ const docTemplate = `{
                         "description": "No Content"
                     }
                 }
+            },
+            "patch": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Organization"
+                ],
+                "summary": "Update an organization",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "Bearer \u003cpersonal access token\u003e",
+                        "description": "Insert your personal access token",
+                        "name": "Authorization",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "the organization's id",
+                        "name": "org_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "the org's updated data",
+                        "name": "org",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/OrgPatch"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/Org"
+                        }
+                    }
+                }
             }
         },
         "/orgs/{org_id}/agents": {
@@ -3085,7 +3128,7 @@ const docTemplate = `{
                     },
                     {
                         "description": "the options for the pipeline to run",
-                        "name": "options",
+                        "name": "pipelineOptions",
                         "in": "body",
                         "required": true,
                         "schema": {
@@ -4051,6 +4094,52 @@ const docTemplate = `{
                 }
             }
         },
+        "/repos/{repo_id}/workflows": {
+            "get": {
+                "description": "Fetches the pipeline config of the branch head and lists the workflows that run on the manual event.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Pipelines"
+                ],
+                "summary": "List workflows a manual pipeline would run",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "Bearer \u003cpersonal access token\u003e",
+                        "description": "Insert your personal access token",
+                        "name": "Authorization",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "the repository id",
+                        "name": "repo_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "the branch to load the config from, defaults to the default branch",
+                        "name": "branch",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/WorkflowInfo"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/secrets": {
             "get": {
                 "produces": [
@@ -4986,6 +5075,9 @@ const docTemplate = `{
                 "id": {
                     "type": "integer"
                 },
+                "name": {
+                    "type": "string"
+                },
                 "oauth_host": {
                     "description": "public url for oauth if different from url",
                     "type": "string"
@@ -5020,6 +5112,9 @@ const docTemplate = `{
                 },
                 "id": {
                     "type": "integer"
+                },
+                "name": {
+                    "type": "string"
                 },
                 "oauth_client_secret": {
                     "type": "string"
@@ -5103,6 +5198,18 @@ const docTemplate = `{
                 },
                 "name": {
                     "type": "string"
+                },
+                "require_org_agents": {
+                    "description": "RequireOrgAgents restricts workflows of the organization's repos to agents of this organization",
+                    "type": "boolean"
+                }
+            }
+        },
+        "OrgPatch": {
+            "type": "object",
+            "properties": {
+                "require_org_agents": {
+                    "type": "boolean"
                 }
             }
         },
@@ -5268,6 +5375,10 @@ const docTemplate = `{
                 "reviewed_by": {
                     "type": "string"
                 },
+                "selected_workflow": {
+                    "description": "only run this workflow and its hard dependencies",
+                    "type": "string"
+                },
                 "sender": {
                     "description": "uses reported user for webhooks and name of cron for cron pipelines",
                     "type": "string"
@@ -5322,6 +5433,10 @@ const docTemplate = `{
                     "additionalProperties": {
                         "type": "string"
                     }
+                },
+                "workflow": {
+                    "description": "only run this workflow and its hard dependencies",
+                    "type": "string"
                 }
             }
         },
@@ -6028,6 +6143,10 @@ const docTemplate = `{
                 "admin_env": {
                     "type": "boolean"
                 },
+                "admin_revoked": {
+                    "description": "AdminRevoked is set when the user is listed in WOODPECKER_ADMIN, but admin\nwas revoked and is not granted again before the next server restart.",
+                    "type": "boolean"
+                },
                 "avatar_url": {
                     "description": "the avatar url for this user.",
                     "type": "string"
@@ -6081,6 +6200,8 @@ const docTemplate = `{
                 "EventManual"
             ]
         },
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
         "api.CancelPendingWorkflowsRequest": {
             "type": "object",
             "properties": {
@@ -6095,6 +6216,23 @@ const docTemplate = `{
                 }
             }
         },
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
++        "WorkflowInfo": {
++            "type": "object",
++            "properties": {
++                "depends_on": {
++                    "type": "array",
++                    "items": {
++                        "type": "string"
++                    }
++                },
++                "name": {
++                    "type": "string"
++                }
++            }
++        },
+>>>>>>> conflict 1 of 1 ends
         "errors.PipelineError": {
             "type": "object",
             "properties": {
@@ -6231,6 +6369,9 @@ const docTemplate = `{
         "metadata.Forge": {
             "type": "object",
             "properties": {
+                "host": {
+                    "type": "string"
+                },
                 "type": {
                     "type": "string"
                 },

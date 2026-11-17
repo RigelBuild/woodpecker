@@ -152,8 +152,15 @@ func createNewOutOfOld(old *model.Pipeline) *model.Pipeline {
 	newPipeline.Started = 0
 	newPipeline.Finished = 0
 	newPipeline.Errors = nil
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	// The old approval must not carry over: a restart has to be approved again.
 	newPipeline.Reviewer = ""
 	newPipeline.Reviewed = 0
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
++	newPipeline.Reviewer = ""
++	newPipeline.Reviewed = 0
+>>>>>>> conflict 1 of 1 ends
 	return &newPipeline
 }

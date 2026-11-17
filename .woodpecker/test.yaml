@@ -59,6 +59,43 @@ steps:
     when:
       - path: *when_path
 
+<<<<<<< conflict 1 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+   lint:
+     depends_on:
+       - vendor
+-    image: golangci/golangci-lint:v2.14.0
++    image: golangci/golangci-lint:v2.15.0
+     commands:
+       - make lint
+     when: *when
+ 
+   check-openapi:
+     depends_on:
+       - vendor
+     image: *golang_image
+     commands:
+       - 'make generate-openapi'
+       - 'DIFF=$(git diff | head)'
+       - '[ -n "$DIFF" ] && { echo "openapi not up to date, exec make generate-openapi and commit"; exit 1; } || true'
+     when: *when
+ 
+   lint-license-header:
+     image: *golang_image
+     commands:
+       - make install-addlicense # cspell:words addlicense
+       - bash -c 'shopt -s globstar; addlicense -check -ignore "vendor/**" -ignore cmd/server/openapi/docs.go **/*.go'
+     when: *when
+ 
++  check-test-file-map-source-file:
++    image: docker.io/alpine:3.24
++    commands:
++      - apk add --no-cache -q bash && bash .woodpecker/check-test-file-map-source-file.sh
++    when: *when
++
+>>>>>>> conflict 1 of 2 ends
   test:
     depends_on:
       - dummy-web
@@ -101,3 +138,68 @@ steps:
       - make test-server-datastore-coverage
     when:
       - path: *when_path
+<<<<<<< conflict 2 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+ 
+   postgres:
+     depends_on:
+       - vendor
+     image: *golang_image
+     environment:
+       WOODPECKER_DATABASE_DRIVER: postgres
+       WOODPECKER_DATABASE_DATASOURCE: 'host=postgres user=postgres dbname=postgres sslmode=disable' # cspell:disable-line
+     commands:
+       - make test-server-datastore
+     when: *when
+ 
+   mysql:
+     depends_on:
+       - vendor
+     image: *golang_image
+     environment:
+       WOODPECKER_DATABASE_DRIVER: mysql
+       WOODPECKER_DATABASE_DATASOURCE: root@tcp(mysql:3306)/test?parseTime=true
+     commands:
+       - make test-server-datastore
+     when: *when
+ 
+   codecov:
+     depends_on:
+       - test
+       - sqlite
+     pull: true
+     image: docker.io/woodpeckerci/plugin-codecov:2.3.3
+     settings:
+       files:
+         - agent-coverage.out
+         - cli-coverage.out
+         - coverage.out
+         - server-coverage.out
+         - datastore-coverage.out
+         - e2e-coverage.out
+       token:
+         from_secret: codecov_token
+     when:
+       - path: *when_path
+     failure: ignore
+ 
+ services:
+   postgres:
+     image: docker.io/postgres:18
+     ports: ['5432']
+     environment:
+       POSTGRES_USER: postgres
+       POSTGRES_HOST_AUTH_METHOD: trust
+     when: *when
+ 
+   mysql:
+-    image: docker.io/mysql:26.7.0
++    image: docker.io/mysql:26.10.0
+     ports: ['3306']
+     environment:
+       MYSQL_DATABASE: test
+       MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+     when: *when
+>>>>>>> conflict 2 of 2 ends

@@ -466,7 +466,7 @@ func (e *kube) SetupWorkflow(ctx context.Context, conf *types.Config, taskUUID s
 func (e *kube) StartStep(ctx context.Context, step *types.Step, taskUUID string) error {
 	options, err := parseBackendOptions(step)
 	if err != nil {
-		log.Error().Err(err).Msg("could not parse backend options")
+		return fmt.Errorf("could not parse backend options: %w", err)
 	}
 	if step.Type == types.StepTypeClone && len(options.Resources.Requests) == 0 && len(options.Resources.Limits) == 0 {
 		options.Resources = e.getWorkflowResources(taskUUID)
@@ -501,12 +501,28 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	var last atomic.Pointer[kube_core_v1.Pod]
 	finished := make(chan struct{})
 	var finishedOnce sync.Once
+<<<<<<< conflict 1 of 9
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+-
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+	// Keep a termination observed by the informer if the API pod later disappears.
+	var observedPod atomic.Pointer[kube_core_v1.Pod]
+	rememberTermination := func(pod *kube_core_v1.Pod) {
+		if len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].State.Terminated != nil {
+			observedPod.CompareAndSwap(nil, pod.DeepCopy())
+		}
+	}
+
+>>>>>>> conflict 1 of 9 ends
 	podChanged := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
 		if !ok {
 			log.Error().Msgf("could not parse pod: %v", obj)
 			return
 		}
+<<<<<<< conflict 2 of 9
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 		if pod.Name != podName {
 			return
 		}
@@ -521,6 +537,20 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 		}
 		if _, lost := podLost(pod, false); lost {
 			finishedOnce.Do(func() { close(finished) })
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+ 
+ 		if pod.Name == podName {
++			rememberTermination(pod)
+ 			if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
+ 				finishedOnce.Do(func() { close(finished) })
+ 			}
+ 
+ 			switch pod.Status.Phase {
+ 			case kube_core_v1.PodSucceeded, kube_core_v1.PodFailed, kube_core_v1.PodUnknown:
+ 				finishedOnce.Do(func() { close(finished) })
+ 			}
+>>>>>>> conflict 2 of 9 ends
 		}
 	}
 	podDeleted := func(obj any) {
@@ -536,7 +566,13 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			}
 		}
 		if pod.Name == podName {
-			podChanged(pod)
+<<<<<<< conflict 3 of 9
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
++			podChanged(pod)
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+			rememberTermination(pod)
+>>>>>>> conflict 3 of 9 ends
 			finishedOnce.Do(func() { close(finished) })
 		}
 	}
@@ -544,20 +580,50 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	namespace := e.config.GetNamespace(step.OrgID)
 	si := informers.NewSharedInformerFactoryWithOptions(e.client, defaultResyncDuration, informers.WithNamespace(namespace))
 	podInformer := si.Core().V1().Pods().Informer()
+<<<<<<< conflict 4 of 9
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    podChanged,
 		UpdateFunc: func(_, newPod any) { podChanged(newPod) },
 		DeleteFunc: podDeleted,
 	}); err != nil {
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-	if _, err := podInformer.AddEventHandler(
++	handler, err := podInformer.AddEventHandler(
+ 		cache.ResourceEventHandlerFuncs{
+ 			// A pod already terminal at the initial List only produces an Add event.
+ 			AddFunc:    podChanged,
+ 			UpdateFunc: func(_, newPod any) { podChanged(newPod) },
+ 			DeleteFunc: podDeleted,
+ 		},
+-	); err != nil {
++	)
++	if err != nil {
+>>>>>>> conflict 4 of 9 ends
 		return nil, err
 	}
 	stop := make(chan struct{})
 	si.Start(stop)
 	defer close(stop)
-	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
+<<<<<<< conflict 5 of 9
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+-
+-	// Wait for the informer's initial list before the check below. A pod deleted
+-	// before that list never enters the cache, so its deletion is never delivered.
+ 	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+
+	// Wait for initial Add handlers too, so an observed termination is retained
+	// before the guard Get can report that the pod has disappeared.
+	if !cache.WaitForCacheSync(ctx.Done(), handler.HasSynced) {
+>>>>>>> conflict 5 of 9 ends
 		return nil, ctx.Err()
 	}
 
+<<<<<<< conflict 6 of 9
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	if pod, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{}); err != nil {
 		if kube_errors.IsNotFound(err) {
 			if types.InTeardown(ctx) {
@@ -574,6 +640,18 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	} else {
 		last.Store(pod.DeepCopy())
 		e.recordNode(pod)
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+ 	// If the pod was deleted before the informer synced, no events will
+ 	// ever arrive. Check explicitly so we don't hang forever.
+-	if _, err := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(ctx, podName, kube_meta_v1.GetOptions{}); kube_errors.IsNotFound(err) {
+-		return &types.State{ExitCode: 0, Exited: true}, nil
++	pod, err := e.client.CoreV1().Pods(e.config.GetNamespace(step.OrgID)).Get(ctx, podName, kube_meta_v1.GetOptions{})
++	if err == nil {
++		rememberTermination(pod)
++	} else if kube_errors.IsNotFound(err) && observedPod.Load() == nil {
++		return nil, err
+>>>>>>> conflict 6 of 9 ends
 	}
 
 	select {
@@ -581,12 +659,26 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+<<<<<<< conflict 7 of 9
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	pod, err := backoff.Retry(
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+ 
+ 	// After the informer signals completion, kubelet may not have finalized
+ 	// containerStatuses yet (phase=Succeeded before state.terminated is set).
+ 	// Retry with backoff to allow kubelet to catch up.
+-	pod, err := backoff.Retry(
++	pod, err = backoff.Retry(
+>>>>>>> conflict 7 of 9 ends
 		ctx,
 		func() (*kube_core_v1.Pod, error) {
 			p, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{})
 			if err != nil {
 				if kube_errors.IsNotFound(err) {
+					if observed := observedPod.Load(); observed != nil {
+						return observed, nil
+					}
 					return nil, backoff.Permanent(err)
 				}
 				return nil, err
@@ -608,6 +700,8 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 		}),
 	)
 	if err != nil {
+<<<<<<< conflict 8 of 9
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 		lastErr := backoff.AsRetryError(err).LastErr
 		if kube_errors.IsNotFound(lastErr) {
 			if types.InTeardown(ctx) {
@@ -626,6 +720,12 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 				return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
 			}
 		}
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-		if kube_errors.IsNotFound(backoff.AsRetryError(err).LastErr) {
+-			return &types.State{ExitCode: 0, Exited: true}, nil
+-		}
+>>>>>>> conflict 8 of 9 ends
 		return nil, err
 	}
 
@@ -655,7 +755,21 @@ func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) 
 			state.OutputsState = "invalid"
 		}
 	}
-	return state, nil
+<<<<<<< conflict 9 of 9
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
+-
+-	return bs, nil
++	return state, nil
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+
+	// https://kubernetes.io/docs/tasks/configure-pod-container/assign-memory-resource/#exceed-a-container-s-memory-limit
+	if cs.State.Terminated.Reason == "OOMKilled" {
+		bs.OOMKilled = true
+	}
+
+	return bs, nil
+>>>>>>> conflict 9 of 9 ends
 }
 
 // TailStep tails the pipeline step logs.

@@ -1,12 +1,18 @@
 import { shallowMount } from '@vue/test-utils';
 import { describe, expect, it } from 'vitest';
+<<<<<<< conflict 1 of 4
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 import { ref } from 'vue';
 import type { Ref } from 'vue';
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-import { ref } from 'vue';
+>>>>>>> conflict 1 of 4 ends
 import { createI18n } from 'vue-i18n';
 
 import en from '~/assets/locales/en.json';
 import PipelineStepList from '~/components/repo/pipeline/PipelineStepList.vue';
-import type { Pipeline, PipelineConfig, PipelineStep, PipelineWorkflow } from '~/lib/api/types';
+import type { Pipeline, PipelineStep, PipelineWorkflow } from '~/lib/api/types';
 
 // usePipeline() calls useI18n(), which must resolve during setup.
 const i18n = createI18n({
@@ -18,14 +24,28 @@ const i18n = createI18n({
   messages: { en },
 });
 
+<<<<<<< conflict 2 of 4
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 const pipelineConfigs = ref<PipelineConfig[]>([{ hash: 'h', name: 'default', data: '' }]);
 
 function mountStepList(pipeline: Pipeline, configs: Ref<PipelineConfig[]> = pipelineConfigs) {
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-const pipelineConfigs = ref<PipelineConfig[]>([{ hash: 'h', name: 'default', data: '' }]);
+-
+ function mountStepList(pipeline: Pipeline) {
+>>>>>>> conflict 2 of 4 ends
   return shallowMount(PipelineStepList, {
     props: { pipeline },
     global: {
       plugins: [i18n],
+<<<<<<< conflict 3 of 4
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
       provide: { 'pipeline-configs': configs },
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-      provide: { 'pipeline-configs': pipelineConfigs },
+>>>>>>> conflict 3 of 4 ends
       // router-link resolves globally, so shallowMount does not stub it.
       stubs: { 'router-link': true, RouterLink: true },
     },
@@ -149,24 +169,55 @@ describe('pipelineStepList', () => {
 
     expect(() => mountStepList(pipeline)).not.toThrow();
   });
+<<<<<<< conflict 4 of 4
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
++
++  it('omits the attempt label on the first attempt', () => {
++    const workflow = makeWorkflow(1, [], 'success', 0);
++    const wrapper = mountStepList(makePipeline([workflow]), ref<PipelineConfig[]>([]));
++
++    expect(wrapper.get('button[title="workflow-1"]').text()).not.toContain('attempt');
++  });
++
++  it('shows the one-based attempt number for a requeued workflow', () => {
++    const workflow = makeWorkflow(1, [], 'success', 1);
++    const wrapper = mountStepList(makePipeline([workflow]), ref<PipelineConfig[]>([]));
++
++    expect(wrapper.get('button[title="workflow-1"]').text()).toContain('attempt 2');
++  });
++  it('shows the localized one-based attempt in the single-config view', () => {
++    const workflow = makeWorkflow(1, [], 'success', 1);
++    const wrapper = mountStepList(makePipeline([workflow]));
++
++    expect(wrapper.text()).toContain('attempt 2');
++  });
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
 
-  it('omits the attempt label on the first attempt', () => {
-    const workflow = makeWorkflow(1, [], 'success', 0);
-    const wrapper = mountStepList(makePipeline([workflow]), ref<PipelineConfig[]>([]));
+  it('renders without crashing and shows no workflow buttons when there are no workflows', () => {
+    const pipeline = makePipeline([]);
 
-    expect(wrapper.get('button[title="workflow-1"]').text()).not.toContain('attempt');
+    expect(() => mountStepList(pipeline)).not.toThrow();
+    const wrapper = mountStepList(pipeline);
+    expect(
+      wrapper.findAll('button[title]').filter((b) => (b.attributes('title') ?? '').startsWith('workflow-')),
+    ).toHaveLength(0);
   });
 
-  it('shows the one-based attempt number for a requeued workflow', () => {
-    const workflow = makeWorkflow(1, [], 'success', 1);
-    const wrapper = mountStepList(makePipeline([workflow]), ref<PipelineConfig[]>([]));
-
-    expect(wrapper.get('button[title="workflow-1"]').text()).toContain('attempt 2');
+  it('hides the collapse button for a single workflow', () => {
+    const wrapper = mountStepList(makePipeline([makeWorkflow(1, [makeStep(1)], 'success')]));
+    expect(wrapper.find('button[title="workflow-1"]').exists()).toBe(false);
   });
-  it('shows the localized one-based attempt in the single-config view', () => {
-    const workflow = makeWorkflow(1, [], 'success', 1);
-    const wrapper = mountStepList(makePipeline([workflow]));
 
-    expect(wrapper.text()).toContain('attempt 2');
+  it('shows the collapse button for multiple workflows', () => {
+    const pipeline = makePipeline([
+      makeWorkflow(1, [makeStep(1)], 'success'),
+      makeWorkflow(2, [makeStep(2)], 'success'),
+    ]);
+
+    const wrapper = mountStepList(pipeline);
+    expect(wrapper.find('button[title="workflow-1"]').exists()).toBe(true);
+    expect(wrapper.find('button[title="workflow-2"]').exists()).toBe(true);
   });
+>>>>>>> conflict 4 of 4 ends
 });

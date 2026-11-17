@@ -18,8 +18,13 @@ import (
 	"container/list"
 	"context"
 	"errors"
-	"maps"
-	"slices"
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
++	"maps"
+ 	"slices"
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+>>>>>>> conflict 1 of 1 ends
 	"sync"
 	"time"
 
@@ -77,8 +82,8 @@ const processTimeInterval = 100 * time.Millisecond
 func NewMemoryQueue(ctx context.Context) Queue {
 	q := &fifo{
 		ctx:           ctx,
-		workers:       map[*worker]struct{}{},
-		running:       map[string]*entry{},
+		workers:       make(map[*worker]struct{}),
+		running:       make(map[string]*entry),
 		pending:       list.New(),
 		waitingOnDeps: list.New(),
 		expired:       make(chan ExpiredTask, 64),
@@ -459,9 +464,23 @@ func (q *fifo) filterWaiting() {
 	// rebuild waitingDeps
 	q.waitingOnDeps = list.New()
 	var filtered []*list.Element
+	var pendingIDs map[string]struct{}
 	for element := q.pending.Front(); element != nil; element = element.Next() {
 		task, _ := element.Value.(*model.Task)
-		if q.depsInQueue(task) {
+		if len(task.Dependencies) == 0 {
+			continue
+		}
+		if pendingIDs == nil {
+			// Snapshot all queued IDs before removing any blocked tasks. Waiting
+			// tasks have been requeued above and can themselves be dependencies.
+			// Build the index only when dependencies need checking.
+			pendingIDs = make(map[string]struct{}, q.pending.Len())
+			for pending := q.pending.Front(); pending != nil; pending = pending.Next() {
+				queued, _ := pending.Value.(*model.Task)
+				pendingIDs[queued.ID] = struct{}{}
+			}
+		}
+		if q.depsInQueue(task, pendingIDs) {
 			q.waitingOnDeps.PushBack(task)
 			filtered = append(filtered, element)
 		}
@@ -681,17 +700,12 @@ func (q *fifo) resubmitExpiredPipelines() {
 	}
 }
 
-func (q *fifo) depsInQueue(task *model.Task) bool {
-	for element := q.pending.Front(); element != nil; element = element.Next() {
-		possibleDep, ok := element.Value.(*model.Task)
-		for _, dep := range task.Dependencies {
-			if ok && possibleDep.ID == dep {
-				return true
-			}
+func (q *fifo) depsInQueue(task *model.Task, pendingIDs map[string]struct{}) bool {
+	for _, dep := range task.Dependencies {
+		if _, ok := pendingIDs[dep]; ok {
+			return true
 		}
-	}
-	for possibleDepID := range q.running {
-		if slices.Contains(task.Dependencies, possibleDepID) {
+		if _, ok := q.running[dep]; ok {
 			return true
 		}
 	}

@@ -85,6 +85,8 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 		volumes = append(volumes, volume.String())
 	}
 
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	environment := make(map[string]string, len(c.env)+len(c.nonPluginEnv)+1)
 	// Pipeline-provided netrc values are not trusted compile-time metadata.
 	for name := range c.env {
@@ -92,6 +94,14 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 			environment[name] = c.env[name]
 		}
 	}
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+ 	// append default environment variables
+-	environment := map[string]string{}
++	environment := make(map[string]string)
+ 	maps.Copy(environment, c.env)
+ 
+>>>>>>> conflict 1 of 1 ends
 	if !container.IsPlugin() {
 		for name, value := range c.nonPluginEnv {
 			if !strings.HasPrefix(name, "CI_NETRC_") {
@@ -128,7 +138,7 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 		return secret.Value, nil
 	}
 
-	secretMapping := map[string]string{}
+	secretMapping := make(map[string]string)
 
 	if err := settings.ParamsToEnv(container.Settings, environment, "PLUGIN_", true, getSecretValue, secretMapping); err != nil {
 		return nil, err
@@ -166,7 +176,7 @@ func (c *Compiler) createProcess(container *yaml_types.Container, workflow *yaml
 		ports = append(ports, port)
 	}
 
-	whenEnv := map[string]string{}
+	whenEnv := make(map[string]string)
 	maps.Copy(whenEnv, c.env)
 	maps.Copy(whenEnv, c.nonPluginEnv)
 

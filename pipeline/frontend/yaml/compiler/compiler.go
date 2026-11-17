@@ -102,12 +102,27 @@ type Compiler struct {
 // New creates a new Compiler with options.
 func New(opts ...Option) *Compiler {
 	compiler := &Compiler{
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 		env:                map[string]string{},
 		nonPluginEnv:       map[string]string{},
 		cloneEnv:           map[string]string{},
 		secrets:            map[string]Secret{},
 		withheldSecrets:    map[string]string{},
 		defaultClonePlugin: constant.DefaultClonePlugin,
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-		env:                 map[string]string{},
+-		nonPluginEnv:        map[string]string{},
+-		cloneEnv:            map[string]string{},
+-		secrets:             map[string]Secret{},
++		env:                 make(map[string]string),
++		nonPluginEnv:        make(map[string]string),
++		cloneEnv:            make(map[string]string),
++		secrets:             make(map[string]Secret),
+ 		defaultClonePlugin:  constant.DefaultClonePlugin,
+ 		trustedClonePlugins: constant.TrustedClonePlugins,
+>>>>>>> conflict 1 of 1 ends
 	}
 	for _, opt := range opts {
 		opt(compiler)
@@ -120,7 +135,7 @@ func New(opts ...Option) *Compiler {
 func (c *Compiler) Compile(conf *yaml_types.Workflow) (*backend_types.Config, error) {
 	config := new(backend_types.Config)
 
-	whenEnv := map[string]string{}
+	whenEnv := make(map[string]string)
 	maps.Copy(whenEnv, c.env)
 	maps.Copy(whenEnv, c.nonPluginEnv)
 

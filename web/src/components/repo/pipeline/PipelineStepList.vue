@@ -81,7 +81,7 @@
               </div>
             </div>
             <button
-              v-if="!singleConfig"
+              v-if="!singleWorkflow"
               type="button"
               :title="workflow.name"
               class="hover:bg-wp-control-neutral-200 flex cursor-pointer items-center gap-2 rounded-md px-1 py-2"
@@ -117,7 +117,7 @@
           </div>
           <div
             class="transition-height overflow-hidden duration-150"
-            :class="{ 'max-h-0': workflowsCollapsed[workflow.id], 'ml-[1.6rem]': !singleConfig }"
+            :class="{ 'max-h-0': workflowsCollapsed[workflow.id], 'ml-[1.6rem]': !singleWorkflow }"
           >
             <button
               v-for="step in workflow.children"
@@ -129,7 +129,7 @@
               class="hover:bg-wp-control-neutral-200 flex w-full cursor-pointer items-center gap-2 rounded-md border-2 border-transparent p-2"
               :class="{
                 'bg-wp-control-neutral-200': selectedStepId && selectedStepId === step.pid,
-                'mt-1': !singleConfig || step.pid !== workflow.children?.[0]?.pid,
+                'mt-1': !singleWorkflow || step.pid !== workflow.children?.[0]?.pid,
               }"
               @click="$emit('update:selectedStepId', step.pid)"
             >
@@ -153,8 +153,14 @@ import Checkbox from '~/components/form/Checkbox.vue';
 import Panel from '~/components/layout/Panel.vue';
 import PipelineStatusIcon from '~/components/repo/pipeline/PipelineStatusIcon.vue';
 import PipelineStepDuration from '~/components/repo/pipeline/PipelineStepDuration.vue';
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 import { orderWorkflows } from '~/components/repo/pipeline/orderWorkflows';
 import { requiredInject } from '~/compositions/useInjectProvide';
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-import { requiredInject } from '~/compositions/useInjectProvide';
+>>>>>>> conflict 1 of 1 ends
 import usePipeline from '~/compositions/usePipeline';
 import useUserConfig from '~/compositions/useUserConfig';
 import { StepType } from '~/lib/api/types';
@@ -172,7 +178,6 @@ defineEmits<{
 const pipeline = toRef(props, 'pipeline');
 const selectedStepId = toRef(props, 'selectedStepId');
 const { prettyRef } = usePipeline(pipeline);
-const pipelineConfigs = requiredInject('pipeline-configs');
 
 const workflowsCollapsed = ref<Record<PipelineStep['id'], boolean>>(
   pipeline.value.workflows && pipeline.value.workflows.length > 1
@@ -188,9 +193,7 @@ const workflowsCollapsed = ref<Record<PipelineStep['id'], boolean>>(
     : {},
 );
 
-const singleConfig = computed(
-  () => pipelineConfigs?.value?.length === 1 && pipeline.value.workflows && pipeline.value.workflows.length === 1,
-);
+const singleWorkflow = computed(() => pipeline.value.workflows && pipeline.value.workflows.length === 1);
 
 const { userConfig, setUserConfig } = useUserConfig();
 const showSkippedWorkflows = computed({

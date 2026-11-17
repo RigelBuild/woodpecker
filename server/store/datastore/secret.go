@@ -34,8 +34,8 @@ func (s storage) SecretList(repo *model.Repo, includeGlobalAndOrgSecrets bool, p
 	var secrets []*model.Secret
 	var cond builder.Cond = builder.Eq{"repo_id": repo.ID}
 	if includeGlobalAndOrgSecrets {
-		cond = cond.Or(builder.Eq{"org_id": repo.OrgID}).
-			Or(builder.And(builder.Eq{"org_id": 0}, builder.Eq{"repo_id": 0}))
+		cond = cond.Or(builder.Eq{"org_id": repo.OrgID, "repo_id": 0}).
+			Or(builder.Eq{"org_id": 0, "repo_id": 0})
 	}
 	return secrets, s.paginate(p).Where(cond).OrderBy(orderSecretsBy).Find(&secrets)
 }
@@ -53,6 +53,8 @@ func (s storage) SecretCreate(secret *model.Secret) error {
 // SecretUpdate writes the row only if its version still matches the one read, so
 // a guard checked against a stale read cannot overwrite a newer row.
 func (s storage) SecretUpdate(secret *model.Secret) error {
+<<<<<<< conflict 1 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	affected, err := s.engine.ID(secret.ID).AllCols().Update(secret)
 	if err != nil {
 		return err
@@ -61,11 +63,21 @@ func (s storage) SecretUpdate(secret *model.Secret) error {
 		return types.ErrUpdateConflict
 	}
 	return nil
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-	_, err := s.engine.ID(secret.ID).AllCols().Update(secret)
+-	return err
++	return retryWrite(func() error {
++		return wrapUpdate(s.engine.ID(secret.ID).AllCols().Update(secret))
++	})
+>>>>>>> conflict 1 of 2 ends
 }
 
 // SecretDelete removes the row only if its version still matches the one read, so
 // a guard checked against a stale read cannot delete a newer, gated row.
 func (s storage) SecretDelete(secret *model.Secret) error {
+<<<<<<< conflict 2 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	affected, err := s.engine.ID(secret.ID).Where("version = ?", secret.Version).Delete(new(model.Secret))
 	if err != nil {
 		return err
@@ -81,6 +93,13 @@ func (s storage) SecretDelete(secret *model.Secret) error {
 		return types.ErrUpdateConflict
 	}
 	return types.ErrRecordNotExist
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-	return wrapDelete(s.engine.ID(secret.ID).Delete(new(model.Secret)))
++	return retryWrite(func() error {
++		return wrapDelete(s.engine.ID(secret.ID).Delete(new(model.Secret)))
++	})
+>>>>>>> conflict 2 of 2 ends
 }
 
 func (s storage) OrgSecretFind(orgID int64, name string) (*model.Secret, error) {

@@ -1,3 +1,0 @@
-ignored:
-  - DL3018 # pin versions in Dockerfile
-  - DL3027 # upstream build stages install tzdata-legacy with apt

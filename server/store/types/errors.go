@@ -25,7 +25,15 @@ var (
 
 	// ErrInsertDuplicateDetected is returned when an insert fails because of unique constrains.
 	ErrInsertDuplicateDetected = errors.New("on insert duplicate based on constraints was detected")
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
++
++	// ErrUpdateConflict a conditional update found the row changed since it was read.
++	ErrUpdateConflict = errors.New("record changed since it was read")
++++++++ yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
 
-	// ErrUpdateConflict a conditional update found the row changed since it was read.
-	ErrUpdateConflict = errors.New("record changed since it was read")
+	// ErrDatabaseLocked is returned when an operation failed because the database is locked (usually a transitory state).
+	ErrDatabaseLocked = errors.New("database is locked")
+>>>>>>> conflict 1 of 1 ends
 )

@@ -550,6 +550,15 @@ Time an active database connection is allowed to stay open.
 
 ---
 
+### DATABASE_MAX_RETRIES
+
+- Name: `WOODPECKER_DATABASE_MAX_RETRIES`
+- Default: `10`
+
+Maximum number of retries for the initial connection to the database.
+
+---
+
 ### DEBUG_PRETTY
 
 - Name: `WOODPECKER_DEBUG_PRETTY`
@@ -589,6 +598,15 @@ Examples:
 - Default: `:8000`
 
 Configures the HTTP listener, supports unix socket via unix:// prefix".
+
+---
+
+### UNIX_SOCKET_PERMISSION
+
+- Name: `WOODPECKER_UNIX_SOCKET_PERMISSION`
+- Default: none
+
+File mode for the HTTP unix socket when `WOODPECKER_SERVER_ADDR` uses the `unix://` prefix, for example `660` or `666`.
 
 ---
 
@@ -712,9 +730,24 @@ Enable step-level metrics, including failed step counters and step duration hist
 - Name: `WOODPECKER_ADMIN`
 - Default: none
 
-Comma-separated list of admin accounts.
+Comma-separated list of users who become server admins when they sign in.
+The list is read at server start.
+With [multiple forges](./12-forges/11-overview.md#granting-admin), a user with a listed login on any connected forge becomes admin, unless you explicitly set `WOODPECKER_ADMIN_PRIMARY_FORGE_ONLY=false`.
 
 Example: `WOODPECKER_ADMIN=user1,user2`
+
+:::warning
+The list only grants admin access, it never revokes it.
+To revoke a listed user, revoke admin access in the admin settings or with the users API and also remove them from the list.
+Otherwise they are admin again at their first sign in after the next server restart.
+:::
+
+### ADMIN_PRIMARY_FORGE_ONLY
+
+- Name: `WOODPECKER_ADMIN_PRIMARY_FORGE_ONLY`
+- Default: false
+
+Only ever grant admin access to users of the primary forge (the one configured via environment variables).
 
 ---
 
@@ -792,6 +825,8 @@ The default setting for allowing pull requests on a repo.
 
 The default setting for the approval mode on a repo. Possible values: `none`, `forks`, `pull_requests` or `all_events`.
 
+Also see [security boundaries](../../20-usage/17-security-boundaries.md#approval-of-pipelines).
+
 ---
 
 ### DEFAULT_CANCEL_PREVIOUS_PIPELINE_EVENTS
@@ -837,6 +872,8 @@ The maximum time in minutes you can set in the repo settings before a pipeline g
 
 ---
 
+<<<<<<< conflict 1 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 ### ORPHAN_REAP_INTERVAL
 
 - Name: `WOODPECKER_ORPHAN_REAP_INTERVAL`
@@ -869,6 +906,27 @@ Maximum time a runnable pending workflow waits when no live agent's labels match
 
 An autoscaled pool that scales to zero has no live agent until its first agent registers. Set this timeout above the pool's worst-case scale-up time, or set it to `0`. Setting it to `0` disables only this timeout; `PENDING_TIMEOUT` still applies and must also exceed that scale-up time.
 
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
++### MAX_PIPELINE_LOG_LINE_COUNT
++
++- Name: `WOODPECKER_MAX_PIPELINE_LOG_LINE_COUNT`
++- Default: `5000`
++
++Maximum number of lines to show in a pipeline log.
++
++---
++
++### WEBHOOK_SYNC_TIMEOUT
++
++- Name: `WOODPECKER_WEBHOOK_SYNC_TIMEOUT`
++- Default: `5s`
++
++Maximum time to wait for the pipeline creation triggered by an incoming webhook. After that, the server responds with `202 Accepted` and finishes it in the background. `0` disables the fallback and always responds synchronously.
++
++---
++
+>>>>>>> conflict 1 of 2 ends
 ### SESSION_EXPIRES
 
 - Name: `WOODPECKER_SESSION_EXPIRES`
@@ -888,6 +946,8 @@ Docker images to run in privileged mode. Only change if you are sure what you do
 
 You should specify the tag of your images too, as this enforces exact matches.
 
+<<<<<<< conflict 2 of 2
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 ### SECRET_APPROVERS
 
 - Name: `WOODPECKER_SECRET_APPROVERS`
@@ -898,6 +958,11 @@ Only an approval made from the web UI (a browser session) counts; an API token a
 When empty, no approval releases such a secret.
 These logins are also the only users who can create, change or delete such a secret.
 
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
++Also see [security boundaries](../../20-usage/17-security-boundaries.md#plugins).
++
+>>>>>>> conflict 2 of 2 ends
 ### PLUGINS_TRUSTED_CLONE
 
 - Name: `WOODPECKER_PLUGINS_TRUSTED_CLONE`
@@ -906,6 +971,8 @@ These logins are also the only users who can create, change or delete such a sec
 This list is a lint allowlist. The linter warns when a custom clone image is not listed; the list does not restrict dispatch credential injection.
 
 You should specify the tag of your images too, as this enforces exact matches.
+
+Also see [security boundaries](../../20-usage/17-security-boundaries.md#git-credentials).
 
 <!-- ---
 
@@ -983,6 +1050,8 @@ If an instance admin doesn't want this feature enabled, they can disable the API
 You should set this option if you have, for example,
 global secrets and don't trust your users to create a rogue agent and pipeline for secret extraction.
 :::
+
+Also see [security boundaries](../../20-usage/17-security-boundaries.md#agents-and-backends).
 
 ---
 
@@ -1178,7 +1247,7 @@ Specify the default pipeline config extensions when scanning a pipeline config d
 
 ### CONFIG_EXTENSION_EXCLUSIVE
 
-- Name: `CONFIG_EXTENSION_EXCLUSIVE`
+- Name: `WOODPECKER_CONFIG_EXTENSION_EXCLUSIVE`
 - Default: false
 
 Whether the forge request should be skipped for the global configuration endpoint.
@@ -1241,12 +1310,14 @@ When enabled globally or for a repository, the registry extension receives a sho
 
 Comma-separated list of hosts that are allowed to be contacted by extensions. Possible values are `loopback`, `private`, `external`, `*` or CIDR list.
 
+Also see [security boundaries](../../20-usage/17-security-boundaries.md#extensions).
+
 ---
 
 ### FORGE_TIMEOUT
 
 - Name: `WOODPECKER_FORGE_TIMEOUT`
-- Default: 5s
+- Default: 30s
 
 Specify timeout when fetching the Woodpecker configuration from forge. See <https://pkg.go.dev/time#ParseDuration> for syntax reference.
 

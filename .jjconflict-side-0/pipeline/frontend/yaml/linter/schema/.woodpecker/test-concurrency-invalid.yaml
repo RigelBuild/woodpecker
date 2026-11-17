@@ -1,8 +1,0 @@
-steps:
-  deploy:
-    image: alpine
-    commands:
-      - echo deploying
-
-concurrency:
-  group: deploy-production

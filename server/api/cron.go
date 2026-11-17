@@ -120,11 +120,19 @@ func PostCron(c *gin.Context) {
 		return
 	}
 
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 	// Enabled is a pointer so an omitted field means true, matching the column default.
 	in := new(struct {
 		model.Cron
 		Enabled *bool `json:"enabled"`
 	})
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-	in := new(model.Cron)
++	// Enabled is preset so a body without it creates an enabled cron.
++	in := &model.Cron{Enabled: true}
+>>>>>>> conflict 1 of 1 ends
 	if err := c.Bind(in); err != nil {
 		c.String(http.StatusBadRequest, "Error parsing request. %s", err)
 		return

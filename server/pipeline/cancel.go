@@ -47,7 +47,21 @@ func Cancel(ctx context.Context, _forge forge.Forge, store store.Store, repo *mo
 		return &ErrNotFound{Msg: err.Error()}
 	}
 
-	// First cancel/evict the running and pending workflows from the queue
+	// Mark pending steps canceled before evicting their workflows: eviction
+	// signals the agents, and an agent reporting its workflow done kills every
+	// step still pending. Writing them afterwards from this stale tree races
+	// with that and can leave them killed.
+	for _, workflow := range workflows {
+		for _, step := range workflow.Children {
+			if step.State == model.StatusPending {
+				if _, err = UpdateStepToStatusSkipped(store, *step, 0, model.StatusCanceled); err != nil {
+					log.Error().Err(err).Msgf("cannot update workflow with id %d state", workflow.ID)
+				}
+			}
+		}
+	}
+
+	// Then cancel/evict the running and pending workflows from the queue
 	var workflowsToCancel []string
 	for _, w := range workflows {
 		if w.State == model.StatusRunning || w.State == model.StatusPending {
@@ -72,13 +86,6 @@ func Cancel(ctx context.Context, _forge forge.Forge, store store.Store, repo *mo
 			}
 		} else {
 			hasPendingOnly = false
-		}
-		for _, step := range workflow.Children {
-			if step.State == model.StatusPending {
-				if _, err = UpdateStepToStatusSkipped(store, *step, 0, model.StatusCanceled); err != nil {
-					log.Error().Err(err).Msgf("cannot update workflow with id %d state", workflow.ID)
-				}
-			}
 		}
 	}
 
@@ -126,9 +133,27 @@ func cancelPreviousPipelines(
 	}
 
 	for _, active := range activeBuilds {
+<<<<<<< conflict 1 of 1
++++++++ vsrqopkp 79d82d67 "Merge pull request #149 from RigelBuild/ci-pipelines/rig-8574-release-3-17-0-rigel-23"
 		if !supersedes(pipeline, active) {
 			continue
 		}
+%%%%%%% diff from: ouulyvmm f4d3d580 "Update pre-commit hook rbubley/mirrors-prettier to v3.9.10 (#7277)"
+\\\\\\\        to: yyprtmsp 1a845577 "Update module gitlab.com/gitlab-org/api/client-go/v3 to v3.47.0 (#7541)"
+-		if active.ID == pipeline.ID {
+-			// same pipeline. e.g. self
++		if active.Number >= pipeline.Number {
++			// Concurrent starts can see each other as active. Only cancel older pipelines.
+ 			continue
+ 		}
+ 
+ 		cancel := pipelineNeedsCancel(active)
+ 
+ 		if !cancel {
+ 			continue
+ 		}
+ 
+>>>>>>> conflict 1 of 1 ends
 		if err = Cancel(ctx, _forge, _store, repo, user, active, &model.CancelInfo{
 			SupersededBy: pipeline.Number,
 		}); err != nil {
