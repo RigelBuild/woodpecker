@@ -18,6 +18,7 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -74,6 +75,12 @@ var agentIDKey = &ctxKey{}
 // updateAgentLastWorkDelay the delay before the LastWork info should be updated.
 const updateAgentLastWorkDelay = time.Minute
 
+// workflowPayloadBudget bounds the serialized workflow config that Next sends
+// to an agent in one message. 256 KiB is about 4.5x the largest config seen in
+// 1000 merged orion PRs (58 KB), and far below the 4 MiB default gRPC message
+// limit. An oversized workflow fails with a named error, not an opaque gRPC one.
+const workflowPayloadBudget = 256 * 1024
+
 type RPC struct {
 	scheduler     scheduler.Scheduler
 	logger        logging.Log
@@ -125,6 +132,22 @@ func (s *RPC) Next(c context.Context, agentFilter rpc.Filter) (*rpc.Workflow, er
 	})
 	if err != nil || rpcWorkflow == nil {
 		return nil, err
+	}
+
+	// Measure the config before netrc injection, so a doomed workflow never
+	// mints a token. The budget leaves room for the per-step netrc env added
+	// later, which is small next to the 4 MiB gRPC limit.
+	payload, err := json.Marshal(rpcWorkflow.Config)
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > workflowPayloadBudget {
+		// Finalize the workflow as failed. Return cleanly so the agent poll
+		// continues; the agent never sees a gRPC error for this workflow.
+		if err := s.failOversizedWorkflow(c, agent, rpcWorkflow.ID, len(payload)); err != nil {
+			log.Error().Err(err).Str("workflowID", rpcWorkflow.ID).Msg("cannot fail oversized workflow")
+		}
+		return nil, nil
 	}
 
 	if err := s.lockAgentToWorkflow(c, agent, rpcWorkflow.ID); err != nil {
@@ -297,6 +320,32 @@ func stripNetrc(w *rpc.Workflow) {
 			}
 		}
 	}
+}
+
+// failOversizedWorkflow fails a workflow whose config is over the payload budget.
+// It finalizes the workflow through Done, so the agent never receives it and
+// its poll continues without a gRPC error.
+func (s *RPC) failOversizedWorkflow(c context.Context, agent *model.Agent, strWorkflowID string, payloadSize int) error {
+	workflowID, err := strconv.ParseInt(strWorkflowID, 10, 64)
+	if err != nil {
+		return err
+	}
+
+	workflow, err := s.store.WorkflowLoad(workflowID)
+	if err != nil {
+		return err
+	}
+
+	// Done requires the agent to own the workflow, and no agent has run it yet.
+	// Lock it to this agent first, as the skipped-workflow path does.
+	if err := s.lockAgentToWorkflow(c, agent, strWorkflowID); err != nil {
+		return err
+	}
+
+	msg := fmt.Sprintf("workflow %q (id %d) config is %d bytes, over the %d byte payload budget", workflow.Name, workflowID, payloadSize, workflowPayloadBudget)
+	log.Error().Int64("workflowID", workflowID).Msg(msg)
+
+	return s.Done(c, strWorkflowID, rpc.WorkflowState{Finished: time.Now().Unix(), Error: msg})
 }
 
 // Wait blocks until the workflow with the given ID is completed or got canceled.
