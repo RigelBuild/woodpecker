@@ -134,8 +134,9 @@ func (s *RPC) Next(c context.Context, agentFilter rpc.Filter) (*rpc.Workflow, er
 		return nil, err
 	}
 
-	// The agent receives the config as this JSON payload. Fail an oversized
-	// workflow here, so the gRPC message limit never produces an opaque error.
+	// Measure the config before netrc injection, so a doomed workflow never
+	// mints a token. The budget leaves room for the per-step netrc env added
+	// later, which is small next to the 4 MiB gRPC limit.
 	payload, err := json.Marshal(rpcWorkflow.Config)
 	if err != nil {
 		return nil, err

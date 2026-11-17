@@ -797,6 +797,10 @@ func TestRegisterAgent(t *testing.T) {
 	})
 
 	t.Run("When the workflow config is under the payload budget it should return the workflow unchanged", func(t *testing.T) {
+		previous := server.Config.Pipeline.AuthenticatePublicRepos
+		server.Config.Pipeline.AuthenticatePublicRepos = false
+		t.Cleanup(func() { server.Config.Pipeline.AuthenticatePublicRepos = previous })
+
 		agent := defaultAgent()
 		store := store_mocks.NewMockStore(t)
 		workflow := defaultWorkflow(model.StatusPending)
