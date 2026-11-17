@@ -27,15 +27,16 @@ var statusPriorityOrder = []model.StatusValue{
 	// errors have highest priority.
 	model.StatusError,
 
+	// skipped and killed cannot appear together with running/pending.
+	model.StatusKilled,
+	model.StatusCanceled,
+
 	// running states
 	model.StatusRunning,
 	model.StatusPending,
 
-	// finished states. A failure outranks killed so a real failure is not
-	// reported as a cancellation. Killed cannot appear with running/pending.
+	// finished states
 	model.StatusFailure,
-	model.StatusKilled,
-	model.StatusCanceled,
 	model.StatusSuccess,
 
 	// skipped due to status condition

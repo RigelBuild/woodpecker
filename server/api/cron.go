@@ -120,11 +120,7 @@ func PostCron(c *gin.Context) {
 		return
 	}
 
-	// Enabled is a pointer so an omitted field means true, matching the column default.
-	in := new(struct {
-		model.Cron
-		Enabled *bool `json:"enabled"`
-	})
+	in := new(model.Cron)
 	if err := c.Bind(in); err != nil {
 		c.String(http.StatusBadRequest, "Error parsing request. %s", err)
 		return
@@ -137,7 +133,7 @@ func PostCron(c *gin.Context) {
 		Timezone:  strings.TrimSpace(in.Timezone),
 		Branch:    strings.TrimSpace(in.Branch),
 		Variables: in.Variables,
-		Enabled:   in.Enabled == nil || *in.Enabled,
+		Enabled:   in.Enabled,
 	}
 	if cron.Timezone == "" {
 		cron.Timezone = "UTC"

@@ -186,8 +186,6 @@ func setupEvilGlobals(ctx context.Context, c *cli.Command, s store.Store) (err e
 	server.Config.Pipeline.AuthenticatePublicRepos = c.Bool("authenticate-public-repos")
 	server.Config.Server.AsyncRepositoryUpdate = c.Bool("async-repository-update")
 	server.Config.Server.WebhookSyncTimeout = c.Duration("webhook-sync-timeout")
-	server.Config.Server.OrphanReapInterval = c.Duration("orphan-reap-interval")
-	server.Config.Server.OrphanReapGrace = c.Duration("orphan-reap-grace")
 	server.Config.Server.CreationTimeout = pipelineCreationTimeout(c.Duration("extensions-timeout"), c.Duration("forge-timeout"), c.Uint("forge-retry"))
 
 	// Pull requests
