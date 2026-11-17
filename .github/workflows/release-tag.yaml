@@ -29,6 +29,19 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: .github/scripts/release-tag.sh check-pr "$BASE_SHA" "$HEAD_SHA"
 
+      - name: Check flake release hashes against checksums.txt
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- flake.nix; then
+            echo "flake.nix is unchanged; no release hash check is needed"
+            exit 0
+          fi
+          .github/scripts/check-release-hashes.sh flake.nix "$RUNNER_TEMP/release-check"
+
   # Builds the Go module set for every event. On push it gates mint: a stale vendorHash fails only nix consumers, so mint needs this build to pass.
   nix-go-modules:
     runs-on: ubuntu-24.04
