@@ -18,8 +18,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
+	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
+	"go.woodpecker-ci.org/woodpecker/v3/server/pubsub/memory"
+	queue_mocks "go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
+	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
 
 func TestSupersedes(t *testing.T) {
@@ -65,6 +72,74 @@ func TestSupersedes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, supersedes(tt.pipeline, tt.prev))
+		})
+	}
+}
+
+func TestCancelStatusWhenNoStepStarted(t *testing.T) {
+	setStatusAggregate(t, false)
+	setStatusMeta(t, false)
+	setStatusPerWorkflow(t, false)
+
+	tests := []struct {
+		name      string
+		workflows []*model.Workflow
+		want      model.StatusValue
+	}{
+		{
+			name: "workflow pending, its only step pending: canceled",
+			workflows: []*model.Workflow{
+				{ID: 1, State: model.StatusPending, Children: []*model.Step{{ID: 11, State: model.StatusPending}}},
+			},
+			want: model.StatusCanceled,
+		},
+		{
+			name: "workflow running but no step started: canceled",
+			workflows: []*model.Workflow{
+				{ID: 1, State: model.StatusRunning, Children: []*model.Step{{ID: 11, State: model.StatusPending}, {ID: 12, State: model.StatusPending}}},
+			},
+			want: model.StatusCanceled,
+		},
+		{
+			name: "one step running: killed",
+			workflows: []*model.Workflow{
+				{ID: 1, State: model.StatusRunning, Children: []*model.Step{{ID: 11, State: model.StatusRunning, Started: 1}, {ID: 12, State: model.StatusPending}}},
+			},
+			want: model.StatusKilled,
+		},
+		{
+			name: "one step finished: killed",
+			workflows: []*model.Workflow{
+				{ID: 1, State: model.StatusRunning, Children: []*model.Step{{ID: 11, State: model.StatusSuccess, Started: 1, Finished: 2}, {ID: 12, State: model.StatusPending}}},
+			},
+			want: model.StatusKilled,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pipeline := &model.Pipeline{ID: 7, Number: 7, Event: model.EventPush, Status: model.StatusRunning}
+			repo := &model.Repo{Owner: "o", Name: "r", FullName: "o/r"}
+			user := &model.User{AccessToken: "x"}
+
+			var stored model.StatusValue
+			s := store_mocks.NewMockStore(t)
+			s.On("GetPipeline", pipeline.ID).Return(pipeline, nil)
+			s.On("WorkflowGetTree", mock.Anything).Return(tt.workflows, nil)
+			s.On("WorkflowUpdate", mock.Anything).Return(nil).Maybe()
+			s.On("StepUpdate", mock.Anything).Return(nil).Maybe()
+			s.On("UpdatePipeline", mock.Anything).Run(func(args mock.Arguments) {
+				stored = args.Get(0).(*model.Pipeline).Status
+			}).Return(nil)
+
+			q := queue_mocks.NewMockQueue(t)
+			q.On("ErrorAtOnce", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+			origScheduler := server.Config.Services.Scheduler
+			server.Config.Services.Scheduler = scheduler.NewScheduler(t.Context(), s, q, memory.New())
+			t.Cleanup(func() { server.Config.Services.Scheduler = origScheduler })
+
+			err := Cancel(t.Context(), &aggregateResilienceForge{statusErrForWorkflowID: -1}, s, repo, user, pipeline, &model.CancelInfo{})
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, stored)
 		})
 	}
 }

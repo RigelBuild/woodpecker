@@ -59,7 +59,7 @@ func Cancel(ctx context.Context, _forge forge.Forge, store store.Store, repo *mo
 		log.Error().Err(err).Msgf("cancel workflows: %v", workflowsToCancel)
 	}
 
-	hasPendingOnly := true
+	anyStepStarted := false
 
 	// Then update the DB status for pending workflows; running ones are set when
 	// their agents stop on the cancel signal. Cancel stamps no time on any step:
@@ -70,10 +70,11 @@ func Cancel(ctx context.Context, _forge forge.Forge, store store.Store, repo *mo
 			if _, err = UpdateWorkflowToStatusSkipped(store, *workflow); err != nil {
 				log.Error().Err(err).Msgf("cannot update workflow with id %d state", workflow.ID)
 			}
-		} else {
-			hasPendingOnly = false
 		}
 		for _, step := range workflow.Children {
+			if step.Started != 0 {
+				anyStepStarted = true
+			}
 			if step.State == model.StatusPending {
 				if _, err = UpdateStepToStatusSkipped(store, *step, 0, model.StatusCanceled); err != nil {
 					log.Error().Err(err).Msgf("cannot update workflow with id %d state", workflow.ID)
@@ -82,8 +83,9 @@ func Cancel(ctx context.Context, _forge forge.Forge, store store.Store, repo *mo
 		}
 	}
 
+	// A run where no step ever started did no work, so it is canceled, not killed.
 	plState := model.StatusKilled
-	if hasPendingOnly {
+	if !anyStepStarted {
 		plState = model.StatusCanceled
 	}
 	killedPipeline, err := UpdateToStatusKilled(store, *pipeline, cancelInfo, plState)
