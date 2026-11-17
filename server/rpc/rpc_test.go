@@ -38,6 +38,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/pipeline"
 	queue_mocks "go.woodpecker-ci.org/woodpecker/v3/server/queue/mocks"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
+	scheduler_mocks "go.woodpecker-ci.org/woodpecker/v3/server/scheduler/mocks"
 	manager_mocks "go.woodpecker-ci.org/woodpecker/v3/server/services/mocks"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
@@ -745,6 +746,90 @@ func TestRegisterAgent(t *testing.T) {
 
 		_, err := grpc.RegisterAgent(ctx, rpc.AgentInfo{Hostname: "mattlinuxpro"})
 		require.NoError(t, err)
+	})
+
+	t.Run("When the workflow config is over the payload budget it should fail the workflow and not send it", func(t *testing.T) {
+		agent := defaultAgent()
+		store := store_mocks.NewMockStore(t)
+		workflow := defaultWorkflow(model.StatusPending)
+		workflow.Children = []*model.Step{}
+		pipeline := defaultPipeline(model.StatusRunning)
+		repo := defaultRepo()
+
+		oversized := &backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{{
+			Name:        "build",
+			Environment: map[string]string{"HUGE": strings.Repeat("x", workflowPayloadBudget)},
+		}}}}}
+		payload, err := json.Marshal(oversized)
+		require.NoError(t, err)
+		rpcWorkflow := &rpc.Workflow{ID: "30", Config: oversized}
+
+		store.On("AgentFind", agent.ID).Return(agent, nil)
+		store.On("WorkflowLoad", int64(30)).Return(workflow, nil)
+		store.On("WorkflowUpdate", mock.Anything).Return(nil)
+		store.On("StepListFromWorkflowFind", mock.Anything).Return([]*model.Step{}, nil)
+		store.On("GetPipeline", int64(20)).Return(pipeline, nil)
+		store.On("GetRepo", int64(10)).Return(repo, nil)
+		store.On("WorkflowGetTree", mock.Anything).Return([]*model.Workflow{}, nil)
+		store.On("UpdatePipeline", mock.Anything).Return(nil)
+		store.On("GetUser", mock.Anything).Return(nil, errors.New("user not found"))
+		store.On("AgentUpdate", mock.Anything).Return(nil)
+
+		sched := scheduler_mocks.NewMockScheduler(t)
+		sched.On("Poll", mock.Anything, agent.ID, mock.Anything, mock.Anything).Once().Return(rpcWorkflow, nil)
+		sched.On("Error", mock.Anything, "30", mock.Anything).Once().Return(nil)
+		sched.On("PublishPipelineEvent", mock.Anything, repo, mock.Anything).Once().Return(nil)
+
+		rpcInst := newTestRPC(t, store, nil)
+		rpcInst.scheduler = sched
+
+		ctx := context.WithValue(t.Context(), agentIDKey, agent.ID)
+		got, err := rpcInst.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+		require.NoError(t, err)
+		assert.Nil(t, got, "the agent must not receive an oversized workflow")
+
+		store.AssertCalled(t, "WorkflowUpdate", mock.MatchedBy(func(w *model.Workflow) bool {
+			return w.State == model.StatusFailure &&
+				strings.Contains(w.Error, `"test-workflow"`) &&
+				strings.Contains(w.Error, fmt.Sprintf("config is %d bytes", len(payload))) &&
+				strings.Contains(w.Error, fmt.Sprintf("%d byte payload budget", workflowPayloadBudget))
+		}))
+	})
+
+	t.Run("When the workflow config is under the payload budget it should return the workflow unchanged", func(t *testing.T) {
+		agent := defaultAgent()
+		store := store_mocks.NewMockStore(t)
+		workflow := defaultWorkflow(model.StatusPending)
+		pipeline := defaultPipeline(model.StatusRunning)
+		repo := defaultRepo()
+		workflow.AgentID = 0 // not yet locked, so the assertion below sees the lock
+
+		store.On("AgentFind", agent.ID).Return(agent, nil)
+		store.On("WorkflowLoad", int64(30)).Return(workflow, nil)
+		store.On("WorkflowUpdate", mock.Anything).Return(nil)
+		store.On("GetPipeline", int64(20)).Return(pipeline, nil)
+		store.On("GetRepo", repo.ID).Return(repo, nil)
+
+		rpcWorkflow := &rpc.Workflow{ID: "30", Timeout: 60, Config: &backend_types.Config{Stages: []*backend_types.Stage{{Steps: []*backend_types.Step{{
+			Name:        "build",
+			Environment: map[string]string{"FOO": "bar"},
+		}}}}}}
+
+		sched := scheduler_mocks.NewMockScheduler(t)
+		sched.On("Poll", mock.Anything, agent.ID, mock.Anything, mock.Anything).Once().Return(rpcWorkflow, nil)
+
+		rpcInst := newTestRPC(t, store, nil)
+		rpcInst.scheduler = sched
+
+		ctx := context.WithValue(t.Context(), agentIDKey, agent.ID)
+		got, err := rpcInst.Next(ctx, rpc.Filter{Labels: map[string]string{}})
+		require.NoError(t, err)
+		assert.Same(t, rpcWorkflow, got)
+		// the workflow is locked to the polling agent, as before the budget check
+		assert.Equal(t, agent.ID, workflow.AgentID)
+		store.AssertCalled(t, "WorkflowUpdate", mock.MatchedBy(func(w *model.Workflow) bool {
+			return w.ID == 30 && w.AgentID == agent.ID
+		}))
 	})
 }
 
