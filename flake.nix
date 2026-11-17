@@ -15,6 +15,8 @@
         # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
         # fork release.
         version = "3.17.0-rigel.25";
+        # Bump releaseVersion and the hashes only after that release is published.
+        releaseVersion = "3.17.0-rigel.25";
 
         # The repo requires Go 1.27 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
@@ -117,12 +119,69 @@
 
           meta.mainProgram = "woodpecker-agent";
         };
+
+        # Release binaries for releaseVersion, fetched instead of built. Each
+        # hash is the SRI form of the matching line in that release's checksums.txt:
+        #   gh release download v<releaseVersion> -R RigelBuild/woodpecker -p checksums.txt
+        releaseAssets = {
+          aarch64-darwin = {
+            platform = "darwin_arm64";
+            agentHash = "sha256-UhOMbz7IQ3qFdJZPb6J9tgqq7mGfidePnRAtEGcMT6k=";
+            cliHash = "sha256-mejcnxiOBEfNXw1dLV5gnML9w37fkhQ7NLbTY7kFCO0=";
+          };
+          x86_64-linux = {
+            platform = "linux_amd64";
+            agentHash = "sha256-e0UikW24W3u1xKTJLhKKhJiiP8gT8bluzY49iT2c22M=";
+            cliHash = "sha256-NqQCkg9WivKUC0qQ38PBX5Ohb1uRXHxw31k1lijSq6A=";
+          };
+          aarch64-linux = {
+            platform = "linux_arm64";
+            agentHash = "sha256-eyNtTELKBWQDH23CaSaylktpp0bRaat9DP3XqHcsT7I=";
+            cliHash = "sha256-lqbrNh6ufLlRXZFccLOeqvzUrtaAKnN5wSmUxOTmRPc=";
+          };
+        };
+
+        # Installs one fetched release binary as bin/woodpecker-<cmd>, the same
+        # name the source builds get from postInstall. Nothing is compiled.
+        fetchReleaseBin =
+          cmd: platform: hash:
+          pkgs.stdenv.mkDerivation {
+            pname = "woodpecker-${cmd}-bin";
+            version = releaseVersion;
+
+            src = pkgs.fetchurl {
+              url = "https://github.com/RigelBuild/woodpecker/releases/download/v${releaseVersion}/woodpecker-${cmd}_${platform}.tar.gz";
+              inherit hash;
+            };
+
+            dontUnpack = true;
+            dontBuild = true;
+
+            installPhase = ''
+              runHook preInstall
+              tar -xzf "$src"
+              install -Dm755 "woodpecker-${cmd}" "$out/bin/woodpecker-${cmd}"
+              runHook postInstall
+            '';
+
+            meta.mainProgram = "woodpecker-${cmd}";
+          };
+
+        releaseBins = pkgs.lib.optionalAttrs (builtins.hasAttr system releaseAssets) (
+          let
+            asset = releaseAssets.${system};
+          in
+          {
+            woodpecker-agent-bin = fetchReleaseBin "agent" asset.platform asset.agentHash;
+            woodpecker-cli-bin = fetchReleaseBin "cli" asset.platform asset.cliHash;
+          }
+        );
       in
       {
         packages = {
           inherit woodpecker-server woodpecker-agent woodpecker-webui;
           default = woodpecker-server;
-        };
+        } // releaseBins;
 
         # Linux only: the check binds loopback ports, which the darwin sandbox restricts.
         checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

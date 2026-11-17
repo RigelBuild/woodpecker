@@ -359,3 +359,8 @@ jobs:
           else
             gh release create "$tag" --verify-tag --generate-notes dist/assets/*
           fi
+
+      - name: Check flake release hashes against checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/check-release-hashes.sh flake.nix "$RUNNER_TEMP/release-check"
