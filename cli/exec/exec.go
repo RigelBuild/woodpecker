@@ -54,7 +54,7 @@ var Command = &cli.Command{
 	Usage:     "execute a local pipeline",
 	ArgsUsage: "[path/to/.woodpecker.yaml]",
 	Action:    run,
-	Flags:     slices.Concat(flags, docker.Flags, kubernetes.Flags(), local.Flags),
+	Flags:     slices.Concat(flags, docker.Flags, kubernetes.Flags, local.Flags),
 }
 
 var backends = []backend_types.Backend{

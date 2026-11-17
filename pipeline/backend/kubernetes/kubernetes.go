@@ -372,7 +372,7 @@ func (e *kube) IsAvailable(context.Context) bool {
 }
 
 func (e *kube) Flags() []cli.Flag {
-	return Flags()
+	return Flags
 }
 
 func (e *kube) Load(ctx context.Context) (*types.BackendInfo, error) {
