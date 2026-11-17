@@ -359,3 +359,36 @@ jobs:
           else
             gh release create "$tag" --verify-tag --generate-notes dist/assets/*
           fi
+
+      - name: Check flake release hashes against checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^ *releaseVersion = "\([^"]*\)";$/\1/p' flake.nix)"
+          gh release download "v${version}" --repo "$GITHUB_REPOSITORY" --pattern checksums.txt --dir "$RUNNER_TEMP/release-check"
+          checks="$RUNNER_TEMP/release-check/checksums.txt"
+          mapfile -t platforms < <(sed -n 's/^ *platform = "\([^"]*\)";$/\1/p' flake.nix)
+          mapfile -t agents < <(sed -n 's/^ *agentHash = "sha256-\([^"]*\)";$/\1/p' flake.nix)
+          mapfile -t clis < <(sed -n 's/^ *cliHash = "sha256-\([^"]*\)";$/\1/p' flake.nix)
+          if [ "${#platforms[@]}" -eq 0 ] || [ "${#agents[@]}" -ne "${#platforms[@]}" ] || [ "${#clis[@]}" -ne "${#platforms[@]}" ]; then
+            echo "::error::releaseAssets has ${#platforms[@]} platforms, ${#agents[@]} agent hashes and ${#clis[@]} cli hashes" >&2
+            exit 1
+          fi
+          status=0
+          for i in "${!platforms[@]}"; do
+            for cmd in agent cli; do
+              case "$cmd" in
+                agent) sri="${agents[i]}" ;;
+                cli) sri="${clis[i]}" ;;
+              esac
+              name="woodpecker-${cmd}_${platforms[i]}.tar.gz"
+              expected="$(printf '%s' "$sri" | base64 -d | od -An -v -tx1 | tr -d ' \n')"
+              actual="$(grep -F "  ./${name}" "$checks" | cut -d ' ' -f 1 || true)"
+              if [ "$expected" != "$actual" ] || [ -z "$actual" ]; then
+                echo "::error::flake hash for ${name} is ${expected}, checksums.txt for v${version} has ${actual:-no entry}" >&2
+                status=1
+              fi
+            done
+          done
+          exit "$status"

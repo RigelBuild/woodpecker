@@ -15,6 +15,8 @@
         # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
         # fork release.
         version = "3.17.0-rigel.25";
+        # Bump releaseVersion and the hashes only after that release is published.
+        releaseVersion = "3.17.0-rigel.25";
 
         # The repo requires Go 1.27 (go.mod toolchain); pin it so the sandboxed
         # build never tries to download a toolchain.
@@ -118,39 +120,38 @@
           meta.mainProgram = "woodpecker-agent";
         };
 
-        # Release binaries for this fork's tag, fetched instead of built. Each
-        # sha256 is the matching line in the release checksums.txt:
-        #   gh release download v3.17.0-rigel.25 -R RigelBuild/woodpecker -p checksums.txt
-        # Bump these together with version.
+        # Release binaries for releaseVersion, fetched instead of built. Each
+        # hash is the SRI form of the matching line in that release's checksums.txt:
+        #   gh release download v<releaseVersion> -R RigelBuild/woodpecker -p checksums.txt
         releaseAssets = {
           aarch64-darwin = {
             platform = "darwin_arm64";
-            agentSha256 = "52138c6f3ec8437a8574964f6fa27db60aaaee619f89d78f9d102d10670c4fa9";
-            cliSha256 = "99e8dc9f188e0447cd5f0d5d2d5e609cc2fdc37edf92143b34b6d363b90508ed";
+            agentHash = "sha256-UhOMbz7IQ3qFdJZPb6J9tgqq7mGfidePnRAtEGcMT6k=";
+            cliHash = "sha256-mejcnxiOBEfNXw1dLV5gnML9w37fkhQ7NLbTY7kFCO0=";
           };
           x86_64-linux = {
             platform = "linux_amd64";
-            agentSha256 = "7b4522916db85b7bb5c4a4c92e128a8498a23fc813f1b96ecd8e3d893d9cdb63";
-            cliSha256 = "36a402920f568af2940b4a90dfc3c15f93a16f5b915c7c70df59359628d2aba0";
+            agentHash = "sha256-e0UikW24W3u1xKTJLhKKhJiiP8gT8bluzY49iT2c22M=";
+            cliHash = "sha256-NqQCkg9WivKUC0qQ38PBX5Ohb1uRXHxw31k1lijSq6A=";
           };
           aarch64-linux = {
             platform = "linux_arm64";
-            agentSha256 = "7b236d4c42ca0564031f6dc26926b2964b69a746d169ab7d0cfdd7a8772c4fb2";
-            cliSha256 = "96a6eb361eae7cb9515d915c70b39eaafcd4aed6802a7379c12994c4e4e644f7";
+            agentHash = "sha256-eyNtTELKBWQDH23CaSaylktpp0bRaat9DP3XqHcsT7I=";
+            cliHash = "sha256-lqbrNh6ufLlRXZFccLOeqvzUrtaAKnN5wSmUxOTmRPc=";
           };
         };
 
         # Installs one fetched release binary as bin/woodpecker-<cmd>, the same
         # name the source builds get from postInstall. Nothing is compiled.
         fetchReleaseBin =
-          cmd: platform: sha256:
+          cmd: platform: hash:
           pkgs.stdenv.mkDerivation {
             pname = "woodpecker-${cmd}-bin";
-            inherit version;
+            version = releaseVersion;
 
             src = pkgs.fetchurl {
-              url = "https://github.com/RigelBuild/woodpecker/releases/download/v${version}/woodpecker-${cmd}_${platform}.tar.gz";
-              inherit sha256;
+              url = "https://github.com/RigelBuild/woodpecker/releases/download/v${releaseVersion}/woodpecker-${cmd}_${platform}.tar.gz";
+              inherit hash;
             };
 
             dontUnpack = true;
@@ -171,8 +172,8 @@
             asset = releaseAssets.${system};
           in
           {
-            woodpecker-agent-bin = fetchReleaseBin "agent" asset.platform asset.agentSha256;
-            woodpecker-cli-bin = fetchReleaseBin "cli" asset.platform asset.cliSha256;
+            woodpecker-agent-bin = fetchReleaseBin "agent" asset.platform asset.agentHash;
+            woodpecker-cli-bin = fetchReleaseBin "cli" asset.platform asset.cliHash;
           }
         );
       in
