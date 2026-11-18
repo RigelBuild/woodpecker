@@ -790,12 +790,11 @@ func TestFifoConcurrency(t *testing.T) {
 		waitForProcess()
 	})
 
-	t.Run("preserves instantiation order over readiness", func(t *testing.T) {
+	t.Run("waiting older copy does not block a ready newer copy", func(t *testing.T) {
 		// Pipeline 1's deploy (taskA) waits on its own slow check (dep), while
 		// pipeline 2's deploy (taskB) is immediately ready. A waiting taskA holds
-		// no slot, so the ready taskB starts first. This reverses the old intent
-		// of this subtest: older copies waiting on deps were starving ready
-		// deploys. taskA runs after taskB finishes, because the limit is 1.
+		// no slot, so the ready taskB starts first. taskA runs after taskB finishes,
+		// because the limit is 1.
 		dep := &model.Task{ID: "50", PipelineID: 1, Created: 100}
 		taskA := &model.Task{
 			ID:               "200",
@@ -1113,10 +1112,10 @@ func TestPipelineTurnAdmission(t *testing.T) {
 		require.NotNil(t, chosen)
 		assert.Same(t, late, element.Value, "a copy waiting on deps holds no slot")
 		q.pending.Remove(element)
-		q.waitingOnDeps.Init()
 		newer := newTask("newer", 4, 40, 1, false)
 		q.pending.PushBack(newer)
-		q.pending.PushBack(blocked) // dependency cleared: released to the tail
+		// dependency "build" is no longer queued, so filterWaiting releases blocked to pending in taskOrderLess order.
+		q.filterWaiting()
 		element, chosen = q.assignToWorker()
 		require.NotNil(t, element)
 		require.NotNil(t, chosen)
