@@ -817,6 +817,18 @@ func TestReportSupersededNeverStartedPostsNothing(t *testing.T) {
 	assert.Empty(t, *states)
 }
 
+// Cancel stores killed when a workflow is running but no step has started, and
+// finishWorkflow rewrites to killed after the agent ack. Both are the same
+// never-started supersede, so the guard must suppress the post for killed too.
+func TestReportSupersededKilledNeverStartedPostsNothing(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	workflows := []*model.Workflow{{Name: "build", State: model.StatusRunning, Children: []*model.Step{{Name: "test", State: model.StatusPending}}}}
+	c, ctx, repo, user, p, s := supersededPullFixture(t, handler, workflows)
+	p.Status = model.StatusKilled
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Empty(t, *states)
+}
+
 // A user cancel that is not a supersede keeps the failure report.
 func TestReportUserCanceledNeverStartedStillFails(t *testing.T) {
 	states, handler := postedStates(t, 0)

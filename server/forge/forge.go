@@ -224,13 +224,9 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 		return nil
 	}
 
-	// A superseded PR run that never started a step did no work. It posts
-	// nothing for CI (pr), and the commit keeps the pending it was created with
-	// (no successor overwrites it). Only the cancel's own terminal post is
-	// suppressed: a restart copies CancelInfo from its parent, so a restarted run
-	// in pending, error or declined must still post its own status. A started step
-	// keeps the failure below. A requeue resets step.Started but bumps Attempts,
-	// so it counts as started.
+	// A superseded PR run that never started posts nothing for CI (pr); its commit
+	// keeps the creation pending. Gate on the cancel's terminal status, so a restart's
+	// own posts go through. A requeue bumps Attempts, so it counts as started.
 	if b.Event == model.EventPull && (b.Status == model.StatusCanceled || b.Status == model.StatusKilled) &&
 		b.CancelInfo != nil && b.CancelInfo.SupersededBy != 0 {
 		if len(b.Workflows) == 0 {
