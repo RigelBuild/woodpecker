@@ -24,6 +24,7 @@ import (
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/compiler"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
+	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	forge_types "go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -99,14 +100,15 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 	if err != nil {
 		msg := fmt.Sprintf("failure to find or persist pipeline config for %s", repo.FullName)
 		log.Error().Err(err).Msg(msg)
-		return nil, errors.New(msg)
+		return nil, failRestartedPipeline(ctx, forge, store, newPipeline, repo, user, fmt.Errorf("%s: %w", msg, err))
 	}
 	if err := linkPipelineConfigs(store, configs, newPipeline.ID); err != nil {
 		msg := fmt.Sprintf("failure to persist pipeline config for %s.", repo.FullName)
 		log.Error().Err(err).Msg(msg)
-		return nil, errors.New(msg)
+		return nil, failRestartedPipeline(ctx, forge, store, newPipeline, repo, user, fmt.Errorf("%s: %w", msg, err))
 	}
 
+	saved := newPipeline
 	newPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, newPipeline, user, repo, pipelineFiles, envs, false, nil)
 	// A restart never releases a gated secret; it blocks until a fresh approval.
 	if compiler.OnlyApprovalErrors(parseErr) {
@@ -129,9 +131,13 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 	if err != nil {
 		msg := fmt.Sprintf("failure to createPipelineItems for %s", repo.FullName)
 		log.Error().Err(err).Msg(msg)
-		return nil, errors.New(msg)
+		return nil, failRestartedPipeline(ctx, forge, store, saved, repo, user, fmt.Errorf("%s: %w", msg, err))
 	}
-
+	// Filters dropped every workflow: nothing was persisted and nothing will run.
+	// Finalize the saved row to error so it does not wedge as pending.
+	if len(pipelineItems) == 0 {
+		return nil, failRestartedPipeline(ctx, forge, store, newPipeline, repo, user, errNoWorkflowsToRun)
+	}
 	publishPipeline(ctx, forge, store, newPipeline, repo, user)
 
 	newPipeline, err = start(ctx, forge, store, newPipeline, user, repo, pipelineItems)
@@ -143,6 +149,24 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 
 	return newPipeline, nil
 }
+
+// failRestartedPipeline finalizes a restarted pipeline row that was saved as
+// pending but will get no workflows, so it cannot stay pending forever. It
+// records cause the way Create does on its failure paths, and returns cause for
+// the caller to return.
+func failRestartedPipeline(ctx context.Context, forge forge.Forge, store store.Store, pipeline *model.Pipeline, repo *model.Repo, user *model.User, cause error) error {
+	updated, uErr := UpdateToStatusError(store, *pipeline, cause)
+	if uErr != nil {
+		log.Error().Err(uErr).Msgf("error setting error status of pipeline for %s#%d", repo.FullName, pipeline.Number)
+		return cause
+	}
+	publishPipeline(ctx, forge, store, updated, repo, user)
+	return cause
+}
+
+// errNoWorkflowsToRun is recorded on a restart whose filters dropped every
+// workflow. Nothing runs, so the saved pipeline is finalized to error.
+var errNoWorkflowsToRun = errors.New("restart produced no workflows to run (all filtered)")
 
 func createNewOutOfOld(old *model.Pipeline) *model.Pipeline {
 	newPipeline := *old
