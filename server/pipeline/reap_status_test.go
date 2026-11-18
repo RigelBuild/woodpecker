@@ -386,18 +386,11 @@ func TestReapNeverStoresSuccessOverPendingWorkflow(t *testing.T) {
 		"a pipeline with a pending code workflow must never be stored success")
 }
 
-// TestReapNeverStoresSuccessOverEmptyPendingPipeline is the RIG-7551 restart
-// window: Restart stores the pipeline pending before it inserts any workflow.
-// A reaper pass that reads the empty tree must not finalize it success.
-func TestReapNeverStoresSuccessOverEmptyPendingPipeline(t *testing.T) {
-	f := newLivenessFixture(t)
-	now := time.Now()
-
-	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
-	require.NoError(t, err)
-	pipeline.Status = model.StatusPending
-	require.NoError(t, f.store.UpdatePipeline(pipeline))
-
+// stubReaperServices swaps in mocks for the scheduler and forge manager that
+// the reaper touches, and restores the real services at test cleanup. Calls
+// are optional: a reaper pass may not reach either service.
+func stubReaperServices(t *testing.T) {
+	t.Helper()
 	schedulerMock := scheduler_mocks.NewMockScheduler(t)
 	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
 	schedulerMock.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -410,19 +403,16 @@ func TestReapNeverStoresSuccessOverEmptyPendingPipeline(t *testing.T) {
 		server.Config.Services.Scheduler = oldScheduler
 		server.Config.Services.Manager = oldManager
 	})
-
-	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
-
-	stored, err := f.store.GetPipeline(pipeline.ID)
-	require.NoError(t, err)
-	assert.NotEqual(t, model.StatusSuccess, stored.Status,
-		"a pending pipeline with no workflows must never be stored success")
 }
 
-// TestReapLeavesEmptyPendingPipelinePending pins the known gap RIG-7551 leaves
-// open: an all-filtered restart stores a pending pipeline with no workflow rows,
-// and nothing finalizes it. The reaper skips it and it stays pending.
-func TestReapLeavesEmptyPendingPipelinePending(t *testing.T) {
+// TestReapNeverStoresSuccessOverEmptyPendingPipeline is the RIG-7551 restart
+// window: Restart stores the pipeline pending before it inserts any workflow.
+// A reaper pass that reads the empty tree must not finalize it success.
+//
+// Known gap, RIG-11009: an all-filtered restart also leaves a pending pipeline
+// with no rows, and nothing finalizes it. This test pins that the reaper skips
+// it and leaves it pending, so the gap stays visible until RIG-11009 fixes it.
+func TestReapNeverStoresSuccessOverEmptyPendingPipeline(t *testing.T) {
 	f := newLivenessFixture(t)
 	now := time.Now()
 
@@ -431,21 +421,33 @@ func TestReapLeavesEmptyPendingPipelinePending(t *testing.T) {
 	pipeline.Status = model.StatusPending
 	require.NoError(t, f.store.UpdatePipeline(pipeline))
 
-	schedulerMock := scheduler_mocks.NewMockScheduler(t)
-	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
-	managerMock := manager_mocks.NewMockManager(t)
-	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
-	server.Config.Services.Scheduler = schedulerMock
-	server.Config.Services.Manager = managerMock
-	t.Cleanup(func() {
-		server.Config.Services.Scheduler = oldScheduler
-		server.Config.Services.Manager = oldManager
-	})
-
+	stubReaperServices(t)
 	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
 
 	stored, err := f.store.GetPipeline(pipeline.ID)
 	require.NoError(t, err)
 	assert.Equal(t, model.StatusPending, stored.Status,
-		"an empty pending pipeline is skipped, not finalized; restart never inserted its workflows")
+		"an empty pending pipeline is skipped, never finalized success; restart never inserted its workflows")
+}
+
+// TestReapFinalizesRunningPipelineWithNoWorkflows pins that the empty-tree skip
+// is limited to pending pipelines: a running pipeline with no rows is still
+// finalized, so the skip does not hold back every empty pipeline.
+func TestReapFinalizesRunningPipelineWithNoWorkflows(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusRunning
+	pipeline.Started = now.Add(-time.Hour).Unix()
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+
+	stubReaperServices(t)
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, model.StatusRunning, stored.Status,
+		"a running pipeline with no workflows must still be finalized, not skipped")
 }
