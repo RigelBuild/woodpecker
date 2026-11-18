@@ -380,6 +380,44 @@ func TestStatusAggregateTerminalStatusIsNotMaskedBySkippedCodeWorkflows(t *testi
 	}
 }
 
+// TestStatusAggregateSuccessPipelineNeverPostsSuccessOverPendingCodeWorkflows is
+// the RIG-7551 regression: a stored success pipeline row with a code workflow
+// that has not finished must not post a green CI (pr). The rollup is
+// non-terminal, so the terminal reconciliation must not return the stored
+// success; it must post failure.
+func TestStatusAggregateSuccessPipelineNeverPostsSuccessOverPendingCodeWorkflows(t *testing.T) {
+	tests := []struct {
+		name  string
+		state model.StatusValue
+	}{
+		{name: "pending code workflow", state: model.StatusPending},
+		{name: "running code workflow", state: model.StatusRunning},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var posted github.RepoStatus
+			c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+					t.Errorf("decode posted status: %v", err)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				if _, err := w.Write([]byte(`{}`)); err != nil {
+					t.Errorf("write response: %v", err)
+				}
+			})
+			pipeline.Status = model.StatusSuccess
+			workflows := []*model.Workflow{{Name: "build", State: tt.state}}
+
+			err := c.StatusAggregate(ctx, user, repo, pipeline, workflows)
+			require.NoError(t, err)
+			assert.Equal(t, statusFailure, posted.GetState(),
+				"a success pipeline with a non-terminal code workflow must post failure, never success")
+		})
+	}
+}
+
 // TestStatusAggregateCancelWhileRunningPostsTerminal is the terminal-never-pending
 // regression for the cancel path: a cancel sets a terminal pipeline status
 // (StatusKilled) but leaves the still-running workflows untouched (they finish on
