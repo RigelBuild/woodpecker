@@ -14,7 +14,7 @@
         # Fork build version. Must not collide with upstream tags (`v3.16.x`)
         # or upstream dev builds (`next-<sha>`). Bump the `-rigel.N` suffix per
         # fork release.
-        version = "3.17.0-rigel.25";
+        version = "3.17.0-rigel.26";
         # Bump releaseVersion and the hashes only after that release is published.
         releaseVersion = "3.17.0-rigel.25";
 
