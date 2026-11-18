@@ -240,6 +240,13 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			changed = true
 		}
 
+		if len(workflows) == 0 && pipeline.Status == model.StatusPending {
+			// Restart stores the pipeline pending before it inserts its workflows.
+			// An empty tree is not finished: PipelineStatus of no workflows is success.
+			log.Info().Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).
+				Msg("skipping orphan finalize for pipeline with no workflows")
+			continue
+		}
 		if !model.IsThereRunningStage(workflows) {
 			status := PipelineStatus(workflows)
 			// A never-started canceled pipeline posts success, so an error keeps its status.

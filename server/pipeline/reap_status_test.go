@@ -335,3 +335,117 @@ func TestReapDoesNotOverwriteCompletedStep(t *testing.T) {
 	assert.Equal(t, model.StatusSuccess, steps[0].State)
 	assert.Equal(t, now.Unix(), steps[0].Finished)
 }
+
+// TestReapNeverStoresSuccessOverPendingWorkflow is the RIG-7551 regression: a
+// pipeline with a code workflow still pending must not be finalized success.
+// The pending workflow has no queue task, so the reaper cannot end it.
+func TestReapNeverStoresSuccessOverPendingWorkflow(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusRunning
+	pipeline.Started = now.Add(-time.Hour).Unix()
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+	require.NoError(t, f.store.WorkflowsCreate([]*model.Workflow{
+		{
+			PipelineID: pipeline.ID,
+			PID:        1,
+			Name:       "build",
+			State:      model.StatusSuccess,
+			Started:    now.Add(-time.Hour).Unix(),
+			Finished:   now.Add(-time.Minute).Unix(),
+		},
+		{
+			PipelineID: pipeline.ID,
+			PID:        2,
+			Name:       "test",
+			State:      model.StatusPending,
+		},
+	}))
+
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	schedulerMock.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	managerMock := manager_mocks.NewMockManager(t)
+	managerMock.On("ForgeFromRepo", mock.Anything).Return(nil, nil).Maybe()
+	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
+	server.Config.Services.Scheduler = schedulerMock
+	server.Config.Services.Manager = managerMock
+	t.Cleanup(func() {
+		server.Config.Services.Scheduler = oldScheduler
+		server.Config.Services.Manager = oldManager
+	})
+
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, model.StatusSuccess, stored.Status,
+		"a pipeline with a pending code workflow must never be stored success")
+}
+
+// TestReapNeverStoresSuccessOverEmptyPendingPipeline is the RIG-7551 restart
+// window: Restart stores the pipeline pending before it inserts any workflow.
+// A reaper pass that reads the empty tree must not finalize it success.
+func TestReapNeverStoresSuccessOverEmptyPendingPipeline(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusPending
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	schedulerMock.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	managerMock := manager_mocks.NewMockManager(t)
+	managerMock.On("ForgeFromRepo", mock.Anything).Return(nil, nil).Maybe()
+	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
+	server.Config.Services.Scheduler = schedulerMock
+	server.Config.Services.Manager = managerMock
+	t.Cleanup(func() {
+		server.Config.Services.Scheduler = oldScheduler
+		server.Config.Services.Manager = oldManager
+	})
+
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, model.StatusSuccess, stored.Status,
+		"a pending pipeline with no workflows must never be stored success")
+}
+
+// TestReapLeavesEmptyPendingPipelinePending pins the known gap RIG-7551 leaves
+// open: an all-filtered restart stores a pending pipeline with no workflow rows,
+// and nothing finalizes it. The reaper skips it and it stays pending.
+func TestReapLeavesEmptyPendingPipelinePending(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusPending
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	managerMock := manager_mocks.NewMockManager(t)
+	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
+	server.Config.Services.Scheduler = schedulerMock
+	server.Config.Services.Manager = managerMock
+	t.Cleanup(func() {
+		server.Config.Services.Scheduler = oldScheduler
+		server.Config.Services.Manager = oldManager
+	})
+
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, stored.Status,
+		"an empty pending pipeline is skipped, not finalized; restart never inserted its workflows")
+}
