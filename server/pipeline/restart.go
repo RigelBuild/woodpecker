@@ -155,5 +155,7 @@ func createNewOutOfOld(old *model.Pipeline) *model.Pipeline {
 	// The old approval must not carry over: a restart has to be approved again.
 	newPipeline.Reviewer = ""
 	newPipeline.Reviewed = 0
+	// The parent's cancel record describes the parent run, not this one.
+	newPipeline.CancelInfo = nil
 	return &newPipeline
 }

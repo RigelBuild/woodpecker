@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -222,11 +224,15 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 		return nil
 	}
 
-	// A superseded PR run that never started a step did no work, so it posts
-	// nothing, as when a same-commit successor exists. Supersede alone does not
-	// decide this: a started step keeps the failure below. A requeue resets
-	// step.Started but bumps Attempts, so it counts as started.
-	if b.Event == model.EventPull && b.CancelInfo != nil && b.CancelInfo.SupersededBy != 0 {
+	// A superseded PR run that never started a step did no work. It posts
+	// nothing for CI (pr), and the commit keeps the pending it was created with
+	// (no successor overwrites it). Only the cancel's own terminal post is
+	// suppressed: a restart copies CancelInfo from its parent, so a restarted run
+	// in pending, error or declined must still post its own status. A started step
+	// keeps the failure below. A requeue resets step.Started but bumps Attempts,
+	// so it counts as started.
+	if b.Event == model.EventPull && (b.Status == model.StatusCanceled || b.Status == model.StatusKilled) &&
+		b.CancelInfo != nil && b.CancelInfo.SupersededBy != 0 {
 		if len(b.Workflows) == 0 {
 			tree, err := s.WorkflowGetTree(b)
 			if err != nil {
@@ -235,6 +241,11 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 			b.Workflows = tree
 		}
 		if neverStarted(b.Workflows) {
+			log.Debug().
+				Str("repo", r.FullName).
+				Int64("number", b.Number).
+				Int64("superseded_by", b.CancelInfo.SupersededBy).
+				Msg("superseded PR run never started; not posting CI (pr)")
 			return nil
 		}
 	}

@@ -858,6 +858,78 @@ func TestReportSupersededWithLaterSuccessorUnchanged(t *testing.T) {
 	assert.Empty(t, *states)
 }
 
+// A restarted run copies its parent's CancelInfo. Until its first step starts,
+// its own statuses (pending at creation, error or declined on a bad config or
+// approval) must still post normally. Only the cancel's own terminal post may
+// be suppressed.
+func TestReportRestartedSupersededRunPostsItsOwnStatus(t *testing.T) {
+	for _, status := range []model.StatusValue{model.StatusPending, model.StatusError, model.StatusDeclined} {
+		t.Run(string(status), func(t *testing.T) {
+			states, handler := postedStates(t, 0)
+			c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+			p.ID, p.Number, p.Status = 21, 8, status
+			p.Parent = 5
+			p.Ref = "refs/pull/7/head"
+			p.CancelInfo = &model.CancelInfo{SupersededBy: 6}
+			p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusPending, Children: []*model.Step{{Name: "test", State: model.StatusPending}}}}
+			s := store_mocks.NewMockStore(t)
+			// A non-terminal snapshot is re-read before the write; the stored row
+			// is the same pending restart, so the post must go through.
+			s.On("GetPipeline", int64(21)).Return(p, nil).Maybe()
+			s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+				Return([]*model.Pipeline{p}, nil).Maybe()
+			require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+			assert.Len(t, *states, 1, "a restart-shaped %s run must post its own status, not stay silent", status)
+		})
+	}
+}
+
+// A superseded run that has been requeued has Attempts > 0 and step.Started reset
+// to 0. It ran before the requeue, so it is not "never started" and keeps failure.
+func TestReportSupersededRequeuedRunStillFails(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	workflows := []*model.Workflow{{Name: "build", State: model.StatusCanceled, Attempts: 1, Children: []*model.Step{{Name: "test", State: model.StatusCanceled}}}}
+	c, ctx, repo, user, p, s := supersededPullFixture(t, handler, workflows)
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusFailure}, *states)
+}
+
+// A superseded run with no workflow tree on the pipeline (the cancel path calls
+// ReportAggregateStatus before it loads the tree) must load the tree itself and
+// use it to decide. Here the tree shows a step started, so it keeps failure.
+func TestReportSupersededLoadsTreeWhenNil(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.CancelInfo = &model.CancelInfo{SupersededBy: 6}
+	p.Workflows = nil
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p}, nil).Maybe()
+	s.On("WorkflowGetTree", mock.Anything).Return([]*model.Workflow{
+		{Name: "build", State: model.StatusCanceled, Children: []*model.Step{{Name: "test", State: model.StatusCanceled, Started: 100, Finished: 101}}},
+	}, nil).Once()
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusFailure}, *states)
+}
+
+// A failing tree load on a superseded run is returned, not silently posted over.
+func TestReportSupersededTreeLoadErrorPostsNothing(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.CancelInfo = &model.CancelInfo{SupersededBy: 6}
+	p.Workflows = nil
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p}, nil).Maybe()
+	s.On("WorkflowGetTree", mock.Anything).Return([]*model.Workflow(nil), errors.New("db down")).Once()
+	require.Error(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Empty(t, *states)
+}
+
 // A report computed from a running snapshot that retries after the pipeline
 // finished must post the stored terminal verdict, not its stale pending.
 func TestReportAggregateRetryPostsStoredTerminalVerdict(t *testing.T) {
