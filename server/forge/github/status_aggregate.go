@@ -138,6 +138,11 @@ func reconcileTerminalStatus(rolled, pipelineStatus model.StatusValue) model.Sta
 	if !model.IsTerminalStatus(pipelineStatus) {
 		return rolled
 	}
+	// A stored success cannot vouch for code workflows that have not finished
+	// (RIG-7551): report failure rather than a green status over pending work.
+	if pipelineStatus == model.StatusSuccess {
+		return model.StatusFailure
+	}
 	return pipelineStatus
 }
 
