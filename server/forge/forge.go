@@ -222,6 +222,23 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 		return nil
 	}
 
+	// A superseded PR run that never started a step did no work, so it posts
+	// nothing, as when a same-commit successor exists. Supersede alone does not
+	// decide this: a started step keeps the failure below. A requeue resets
+	// step.Started but bumps Attempts, so it counts as started.
+	if b.Event == model.EventPull && b.CancelInfo != nil && b.CancelInfo.SupersededBy != 0 {
+		if len(b.Workflows) == 0 {
+			tree, err := s.WorkflowGetTree(b)
+			if err != nil {
+				return err
+			}
+			b.Workflows = tree
+		}
+		if neverStarted(b.Workflows) {
+			return nil
+		}
+	}
+
 	canceledWithoutSuccessor := false
 	var later func() (bool, error)
 	if b.Event == model.EventPull && b.Status == model.StatusCanceled {
@@ -277,6 +294,22 @@ func hasLaterPullPipelineOnCommit(s store.Store, r *model.Repo, b *model.Pipelin
 		}
 	}
 	return false, nil
+}
+
+// neverStarted reports whether no workflow was requeued and no step in the tree
+// has a start time.
+func neverStarted(workflows []*model.Workflow) bool {
+	for _, w := range workflows {
+		if w.Attempts > 0 {
+			return false
+		}
+		for _, step := range w.Children {
+			if step.Started != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // MetaStatusReporter is an optional Forge capability: report a SECOND, selective

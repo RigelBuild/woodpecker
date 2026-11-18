@@ -791,6 +791,73 @@ func TestReportCanceledAggregateQueryErrorPostsNothing(t *testing.T) {
 	assert.Empty(t, *states)
 }
 
+// supersededPullFixture returns a canceled pull_request run on a PR ref that was
+// superseded by a later run. No same-commit successor is listed in the store.
+func supersededPullFixture(t *testing.T, handler http.HandlerFunc, workflows []*model.Workflow) (*client, context.Context, *model.Repo, *model.User, *model.Pipeline, *store_mocks.MockStore) {
+	t.Helper()
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.CancelInfo = &model.CancelInfo{SupersededBy: 6}
+	p.Workflows = workflows
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p}, nil).Maybe()
+	return c, ctx, repo, user, p, s
+}
+
+// A superseded PR run whose steps never started posts nothing for CI (pr).
+// The post would otherwise be failure, because a canceled PR run with no
+// successor is reported as failed.
+func TestReportSupersededNeverStartedPostsNothing(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	workflows := []*model.Workflow{{Name: "build", State: model.StatusPending, Children: []*model.Step{{Name: "test", State: model.StatusCanceled}}}}
+	c, ctx, repo, user, p, s := supersededPullFixture(t, handler, workflows)
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Empty(t, *states)
+}
+
+// A user cancel that is not a supersede keeps the failure report.
+func TestReportUserCanceledNeverStartedStillFails(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.CancelInfo = &model.CancelInfo{CanceledByUser: "matt"}
+	p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusPending, Children: []*model.Step{{Name: "test", State: model.StatusCanceled}}}}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p}, nil).Maybe()
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusFailure}, *states)
+}
+
+// A superseded run where a step started keeps the failure report.
+func TestReportSupersededStartedStepStillFails(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	workflows := []*model.Workflow{{Name: "build", State: model.StatusCanceled, Children: []*model.Step{{Name: "test", State: model.StatusCanceled, Started: 100, Finished: 101}}}}
+	c, ctx, repo, user, p, s := supersededPullFixture(t, handler, workflows)
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Equal(t, []string{statusFailure}, *states)
+}
+
+// A superseded run that a later same-commit run already owns posts nothing,
+// as before this change.
+func TestReportSupersededWithLaterSuccessorUnchanged(t *testing.T) {
+	states, handler := postedStates(t, 0)
+	c, ctx, repo, user, p := statusAggregateFixture(t, handler)
+	p.ID, p.Number, p.Status = 20, 5, model.StatusCanceled
+	p.Ref = "refs/pull/7/head"
+	p.CancelInfo = &model.CancelInfo{SupersededBy: 6}
+	p.Workflows = []*model.Workflow{{Name: "build", State: model.StatusPending, Children: []*model.Step{{Name: "test", State: model.StatusCanceled}}}}
+	successor := &model.Pipeline{Number: 6, Event: model.EventPull, Commit: p.Commit, Ref: p.Ref}
+	s := store_mocks.NewMockStore(t)
+	s.On("GetPipelineList", mock.Anything, mock.Anything, mock.Anything).
+		Return([]*model.Pipeline{p, successor}, nil).Maybe()
+	require.NoError(t, forge.ReportAggregateStatus(ctx, c, s, user, repo, p))
+	assert.Empty(t, *states)
+}
+
 // A report computed from a running snapshot that retries after the pipeline
 // finished must post the stored terminal verdict, not its stale pending.
 func TestReportAggregateRetryPostsStoredTerminalVerdict(t *testing.T) {
