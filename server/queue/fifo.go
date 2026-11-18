@@ -575,7 +575,8 @@ func (q *fifo) pushPendingFront(task *model.Task) {
 // canRunConcurrent applies pipeline turns when any live group member opts in.
 // The oldest pipeline owns the turn, including while its tasks wait on
 // dependencies. Running tasks from every pipeline count against the smallest
-// positive live limit. Without an opt-in, legacy slot reservations apply.
+// positive live limit. Without an opt-in, only ready tasks of other pipelines
+// reserve slots; tasks waiting on dependencies do not.
 // Same-pipeline pending tasks do not reserve slots against each other, so a
 // dependency can run before the task waiting for it.
 //
@@ -633,9 +634,9 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 		return false
 	}
 
-	// count not-yet-running members of the group from earlier pipelines. They
-	// have priority for the remaining slots, even if they are still waiting on
-	// their dependencies, so cross-pipeline ordering is preserved.
+	// count ready members of the group from earlier pipelines. Tasks still
+	// waiting on their dependencies hold no slot, so a ready task is not blocked
+	// behind them.
 	ahead := 0
 	countAhead := func(other *model.Task) {
 		if other.ConcurrencyGroup != group || other.ID == task.ID {
@@ -653,11 +654,6 @@ func (q *fifo) canRunConcurrent(task *model.Task) bool {
 		other, _ := element.Value.(*model.Task)
 		countAhead(other)
 	}
-	for element := q.waitingOnDeps.Front(); element != nil; element = element.Next() {
-		other, _ := element.Value.(*model.Task)
-		countAhead(other)
-	}
-
 	return running+ahead < task.ConcurrencyLimit
 }
 

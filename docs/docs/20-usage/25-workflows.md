@@ -195,7 +195,7 @@ concurrency: 1
 
 ### Ordering
 
-Queued workflows of the same group start in the order their pipelines were created, **not** in the order they become ready to run. This matters when a workflow depends on other workflows (via `depends_on`) whose duration varies: even if a later pipeline's checks finish first, its limited workflow will not overtake an earlier pipeline that is still waiting. This guarantees that, for example, deployments happen in commit order.
+Queued workflows of the same group start in the order their pipelines were created, **not** in the order they become ready to run. A workflow that is still waiting on its `depends_on` does not hold a slot, so a ready workflow from a later pipeline can start before it. To give the earliest live pipeline the whole group turn instead, use `pipeline_order` below.
 
 For a group that permits multiple workflows at once, set `pipeline_order: true` to give the earliest live pipeline the entire group turn:
 

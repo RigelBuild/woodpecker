@@ -792,9 +792,10 @@ func TestFifoConcurrency(t *testing.T) {
 
 	t.Run("preserves instantiation order over readiness", func(t *testing.T) {
 		// Pipeline 1's deploy (taskA) waits on its own slow check (dep), while
-		// pipeline 2's deploy (taskB) is immediately ready. taskB must still
-		// wait for the earlier taskA. Ordering is by Created, not ID, so taskA
-		// has the higher ID but the lower Created.
+		// pipeline 2's deploy (taskB) is immediately ready. A waiting taskA holds
+		// no slot, so the ready taskB starts first. This reverses the old intent
+		// of this subtest: older copies waiting on deps were starving ready
+		// deploys. taskA runs after taskB finishes, because the limit is 1.
 		dep := &model.Task{ID: "50", PipelineID: 1, Created: 100}
 		taskA := &model.Task{
 			ID:               "200",
@@ -814,29 +815,24 @@ func TestFifoConcurrency(t *testing.T) {
 		info := q.Info(ctx)
 		assert.Equal(t, 1, info.Stats.WaitingOnDeps) // taskA waiting on dep
 
-		// only the dependency is runnable; taskB is held back behind taskA.
 		got, err := q.Poll(ctx, 1, filterFnTrue)
 		assert.NoError(t, err)
 		assert.Equal(t, "50", got.ID)
 
-		pollCtx, pollCancel := context.WithTimeout(ctx, 200*time.Millisecond)
-		_, err = q.Poll(pollCtx, 2, filterFnTrue)
+		pollCtx, pollCancel := context.WithTimeout(ctx, 5*time.Second)
+		gotB, err := q.Poll(pollCtx, 2, filterFnTrue)
 		pollCancel()
-		assert.Error(t, err, "taskB must not overtake the earlier taskA")
+		require.NoError(t, err, "ready taskB must not wait behind the dependency-blocked taskA")
+		assert.Equal(t, "100", gotB.ID)
 
 		assert.NoError(t, q.Done(ctx, got.ID, model.StatusSuccess))
+		assert.NoError(t, q.Done(ctx, gotB.ID, model.StatusSuccess))
 		waitForProcess()
 
 		gotA, err := q.Poll(ctx, 1, filterFnTrue)
 		assert.NoError(t, err)
 		assert.Equal(t, "200", gotA.ID)
 		assert.NoError(t, q.Done(ctx, gotA.ID, model.StatusSuccess))
-		waitForProcess()
-
-		gotB, err := q.Poll(ctx, 2, filterFnTrue)
-		assert.NoError(t, err)
-		assert.Equal(t, "100", gotB.ID)
-		assert.NoError(t, q.Done(ctx, gotB.ID, model.StatusSuccess))
 		waitForProcess()
 	})
 
@@ -1088,6 +1084,43 @@ func TestPipelineTurnAdmission(t *testing.T) {
 		assert.True(t, q.canRunConcurrent(root))
 		assert.Len(t, q.running, 2)
 		assert.Same(t, newer, q.running[newer.ID].item)
+	})
+	t.Run("waiting older copies hold no slot against a ready task", func(t *testing.T) {
+		q := newQueue()
+		for i := range 6 {
+			older := newTask(fmt.Sprintf("older%d", i), int64(i+1), int64(10+i), 1, false)
+			older.Dependencies = []string{"build"}
+			q.waitingOnDeps.PushBack(older)
+		}
+		ready := newTask("ready", 99, 100, 1, false)
+		q.pending.PushBack(ready)
+		q.workers = map[*worker]struct{}{{filter: filterFnTrue}: {}}
+		element, chosen := q.assignToWorker()
+		require.NotNil(t, element)
+		require.NotNil(t, chosen)
+		assert.Same(t, ready, element.Value)
+	})
+	t.Run("released older copy keeps its turn against a newer ready copy", func(t *testing.T) {
+		q := newQueue()
+		q.workers = map[*worker]struct{}{{filter: filterFnTrue}: {}}
+		blocked := newTask("blocked", 1, 10, 1, false)
+		blocked.Dependencies = []string{"build"}
+		q.waitingOnDeps.PushBack(blocked)
+		late := newTask("late", 3, 30, 1, false)
+		q.pending.PushBack(late)
+		element, chosen := q.assignToWorker()
+		require.NotNil(t, element)
+		require.NotNil(t, chosen)
+		assert.Same(t, late, element.Value, "a copy waiting on deps holds no slot")
+		q.pending.Remove(element)
+		q.waitingOnDeps.Init()
+		newer := newTask("newer", 4, 40, 1, false)
+		q.pending.PushBack(newer)
+		q.pending.PushBack(blocked) // dependency cleared: released to the tail
+		element, chosen = q.assignToWorker()
+		require.NotNil(t, element)
+		require.NotNil(t, chosen)
+		assert.Same(t, blocked, element.Value, "released older copy must not be overtaken by a newer ready copy")
 	})
 }
 
