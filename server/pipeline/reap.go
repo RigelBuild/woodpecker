@@ -243,7 +243,13 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 		if len(workflows) == 0 && pipeline.Status == model.StatusPending {
 			// Restart stores the pipeline pending before it inserts its workflows.
 			// An empty tree is not finished: PipelineStatus of no workflows is success.
-			log.Info().Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).
+			// Inside the grace window this is normal restart timing, so log at debug.
+			age := now.Sub(time.Unix(pipeline.Created, 0))
+			event := log.Debug()
+			if age > grace {
+				event = log.Info()
+			}
+			event.Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).Dur("age", age).
 				Msg("skipping orphan finalize for pipeline with no workflows")
 			continue
 		}
