@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/rs/zerolog/log"
+	"go.uber.org/multierr"
 
 	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/frontend/yaml/compiler"
@@ -110,6 +111,11 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 
 	saved := newPipeline
 	newPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, forge, store, newPipeline, user, repo, pipelineFiles, envs, false, nil)
+	if err != nil {
+		msg := fmt.Sprintf("failure to createPipelineItems for %s", repo.FullName)
+		log.Error().Err(err).Msg(msg)
+		return nil, failRestartedPipeline(ctx, forge, store, saved, repo, user, fmt.Errorf("%s: %w", msg, err))
+	}
 	// A restart never releases a gated secret; it blocks until a fresh approval.
 	if compiler.OnlyApprovalErrors(parseErr) {
 		newPipeline.Errors = pipeline_errors.GetPipelineErrors(parseErr)
@@ -128,15 +134,18 @@ func Restart(ctx context.Context, store store.Store, lastPipeline *model.Pipelin
 		log.Error().Err(parseErr).Msg(msg)
 		return nil, errors.New(msg)
 	}
-	if err != nil {
-		msg := fmt.Sprintf("failure to createPipelineItems for %s", repo.FullName)
-		log.Error().Err(err).Msg(msg)
-		return nil, failRestartedPipeline(ctx, forge, store, saved, repo, user, fmt.Errorf("%s: %w", msg, err))
-	}
 	// Filters dropped every workflow: nothing was persisted and nothing will run.
-	// Finalize the saved row to error so it does not wedge as pending.
+	// Finalize the saved row to error so it does not wedge as pending. The lint
+	// warnings in parseErr stay on the row, with the reason added after them.
 	if len(pipelineItems) == 0 {
-		return nil, failRestartedPipeline(ctx, forge, store, newPipeline, repo, user, errNoWorkflowsToRun)
+		cause := multierr.Append(parseErr, errNoWorkflowsToRun)
+		finalized, uErr := UpdateToStatusError(store, *newPipeline, cause)
+		if uErr != nil {
+			log.Error().Err(uErr).Msgf("error setting error status of pipeline for %s#%d", repo.FullName, newPipeline.Number)
+			return nil, cause
+		}
+		publishPipeline(ctx, forge, store, finalized, repo, user)
+		return finalized, nil
 	}
 	publishPipeline(ctx, forge, store, newPipeline, repo, user)
 
