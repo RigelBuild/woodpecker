@@ -525,3 +525,11 @@ func TestCreateNewOutOfOldResetsReview(t *testing.T) {
 	assert.Empty(t, fresh.Reviewer)
 	assert.Zero(t, fresh.Reviewed)
 }
+
+func TestCreateNewOutOfOldClearsCancelInfo(t *testing.T) {
+	t.Parallel()
+
+	old := &model.Pipeline{ID: 4, Number: 2, Status: model.StatusCanceled, CancelInfo: &model.CancelInfo{SupersededBy: 3}}
+	fresh := createNewOutOfOld(old)
+	assert.Nil(t, fresh.CancelInfo, "a restart must not inherit the old run's cancel record")
+}

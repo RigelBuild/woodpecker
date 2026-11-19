@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge/types"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/store"
@@ -222,6 +224,28 @@ func ReportAggregateStatus(ctx context.Context, f Forge, s store.Store, u *model
 		return nil
 	}
 
+	// A superseded PR run that never started posts nothing for CI (pr); its commit
+	// keeps the creation pending. Gate on the cancel's terminal status, so a restart's
+	// own posts go through. A requeue bumps Attempts, so it counts as started.
+	if b.Event == model.EventPull && (b.Status == model.StatusCanceled || b.Status == model.StatusKilled) &&
+		b.CancelInfo != nil && b.CancelInfo.SupersededBy != 0 {
+		if len(b.Workflows) == 0 {
+			tree, err := s.WorkflowGetTree(b)
+			if err != nil {
+				return err
+			}
+			b.Workflows = tree
+		}
+		if neverStarted(b.Workflows) {
+			log.Debug().
+				Str("repo", r.FullName).
+				Int64("number", b.Number).
+				Int64("superseded_by", b.CancelInfo.SupersededBy).
+				Msg("superseded PR run never started; not posting CI (pr)")
+			return nil
+		}
+	}
+
 	canceledWithoutSuccessor := false
 	var later func() (bool, error)
 	if b.Event == model.EventPull && b.Status == model.StatusCanceled {
@@ -277,6 +301,22 @@ func hasLaterPullPipelineOnCommit(s store.Store, r *model.Repo, b *model.Pipelin
 		}
 	}
 	return false, nil
+}
+
+// neverStarted reports whether no workflow was requeued and no step in the tree
+// has a start time.
+func neverStarted(workflows []*model.Workflow) bool {
+	for _, w := range workflows {
+		if w.Attempts > 0 {
+			return false
+		}
+		for _, step := range w.Children {
+			if step.Started != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // MetaStatusReporter is an optional Forge capability: report a SECOND, selective
