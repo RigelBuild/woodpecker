@@ -244,13 +244,15 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			changed = true
 		}
 
-		// Restart stores the pipeline pending before it inserts its workflows, so an
-		// empty pending tree is normal only inside the grace window. Past it, the
-		// restart crashed or its own failure write failed: finalize it error below.
-		// An empty tree is never finished success.
+		// Restart and Approve store the pending row before its workflows. The grace age
+		// anchors on updated, which Approve's claim bumps; created is the fallback.
 		var emptyPendingExpired bool
 		if len(workflows) == 0 && pipeline.Status == model.StatusPending {
-			age := now.Sub(time.Unix(pipeline.Created, 0))
+			anchor := pipeline.Updated
+			if anchor == 0 {
+				anchor = pipeline.Created
+			}
+			age := now.Sub(time.Unix(anchor, 0))
 			if age <= grace {
 				log.Debug().Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).Dur("age", age).
 					Msg("skipping orphan finalize for pipeline with no workflows inside the grace window")
