@@ -41,7 +41,7 @@
         webuiHash = "sha256-bzvBMLnwuPKetCxRE7MY+pm1LB83N+mNY4ngSXhE4S0=";
 
         # Re-rooted to a content-addressed copy of this fork's own subtree
-        # (SEA-1860): `self.outPath` is a subpath into the whole-repo store
+        # `self.outPath` is a subpath into the whole-repo store
         # object, so coercing it (`src = self`) makes the server/agent/webui
         # depend on the whole-repo store path — a rebuild on every monorepo
         # commit. `builtins.path` re-copies only this subtree into a

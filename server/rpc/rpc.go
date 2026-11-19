@@ -77,7 +77,7 @@ const updateAgentLastWorkDelay = time.Minute
 
 // workflowPayloadBudget bounds the serialized workflow config that Next sends
 // to an agent in one message. 256 KiB is about 4.5x the largest config seen in
-// 1000 merged orion PRs (58 KB), and far below the 4 MiB default gRPC message
+// 1000 merged PRs (58 KB), and far below the 4 MiB default gRPC message
 // limit. An oversized workflow fails with a named error, not an opaque gRPC one.
 const workflowPayloadBudget = 256 * 1024
 

@@ -10,8 +10,7 @@ import type { PipelineWorkflow } from '~/lib/api/types';
 // no log pane opens.
 //
 // A skipped/stepless workflow serializes `children` as absent (`omitempty`) or
-// null, so the deref is guarded (`?? []`) -- an unguarded access is the SEA-1090
-// crash.
+// null, so the deref is guarded (`?? []`) -- an unguarded access is a crash.
 export function defaultSelectedStepPid(workflows: PipelineWorkflow[] | undefined): number | null {
   for (const workflow of workflows ?? []) {
     if (workflow.state === 'skipped') {
