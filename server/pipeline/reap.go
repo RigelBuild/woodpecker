@@ -23,6 +23,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
@@ -32,6 +33,9 @@ import (
 
 // defaultReapTimeout covers a stored timeout of zero, which the agent runs as one hour.
 const defaultReapTimeout = 60 * time.Minute
+
+// emptyPendingMessage is the pipeline error for a pending pipeline that never got workflows.
+const emptyPendingMessage = "pipeline has no workflows after the grace window"
 
 // ReapOrphanedWorkflows finalizes active workflows that cannot finish through an agent.
 func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Time, grace, pendingTimeout, pendingUnmatchedTimeout time.Duration) error {
@@ -240,12 +244,37 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			changed = true
 		}
 
+		// Restart and Approve store the pending row before its workflows. The grace age
+		// anchors on updated, which Approve's claim bumps; created is the fallback.
+		var emptyPendingExpired bool
+		if len(workflows) == 0 && pipeline.Status == model.StatusPending {
+			anchor := pipeline.Updated
+			if anchor == 0 {
+				anchor = pipeline.Created
+			}
+			age := now.Sub(time.Unix(anchor, 0))
+			if age <= grace {
+				log.Debug().Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).Dur("age", age).
+					Msg("skipping orphan finalize for pipeline with no workflows inside the grace window")
+				continue
+			}
+			log.Info().Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).Dur("age", age).
+				Msg("finalizing pending pipeline with no workflows after the grace window")
+			emptyPendingExpired = true
+		}
 		if !model.IsThereRunningStage(workflows) {
 			status := PipelineStatus(workflows)
 			// A never-started canceled pipeline posts success, so an error keeps its status.
 			hasError := slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return workflow.State == model.StatusError })
 			if changed && !pipelineEverStarted && !hasError {
 				status = model.StatusCanceled
+			}
+			if emptyPendingExpired {
+				status = model.StatusError
+				pipeline.Errors = []*pipeline_errors.PipelineError{{
+					Type:    pipeline_errors.PipelineErrorTypeGeneric,
+					Message: emptyPendingMessage,
+				}}
 			}
 			updated, err := finalizeIfUnchanged(storage, *pipeline, status, now.Unix())
 			switch {

@@ -335,3 +335,174 @@ func TestReapDoesNotOverwriteCompletedStep(t *testing.T) {
 	assert.Equal(t, model.StatusSuccess, steps[0].State)
 	assert.Equal(t, now.Unix(), steps[0].Finished)
 }
+
+// TestReapNeverStoresSuccessOverPendingWorkflow is the RIG-7551 regression: a
+// pipeline with a code workflow still pending must not be finalized success.
+// The pending workflow has no queue task, so the reaper cannot end it.
+func TestReapNeverStoresSuccessOverPendingWorkflow(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusRunning
+	pipeline.Started = now.Add(-time.Hour).Unix()
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+	require.NoError(t, f.store.WorkflowsCreate([]*model.Workflow{
+		{
+			PipelineID: pipeline.ID,
+			PID:        1,
+			Name:       "build",
+			State:      model.StatusSuccess,
+			Started:    now.Add(-time.Hour).Unix(),
+			Finished:   now.Add(-time.Minute).Unix(),
+		},
+		{
+			PipelineID: pipeline.ID,
+			PID:        2,
+			Name:       "test",
+			State:      model.StatusPending,
+		},
+	}))
+
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	schedulerMock.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	managerMock := manager_mocks.NewMockManager(t)
+	managerMock.On("ForgeFromRepo", mock.Anything).Return(nil, nil).Maybe()
+	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
+	server.Config.Services.Scheduler = schedulerMock
+	server.Config.Services.Manager = managerMock
+	t.Cleanup(func() {
+		server.Config.Services.Scheduler = oldScheduler
+		server.Config.Services.Manager = oldManager
+	})
+
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, model.StatusSuccess, stored.Status,
+		"a pipeline with a pending code workflow must never be stored success")
+}
+
+// stubReaperServices swaps in mocks for the scheduler and forge manager that
+// the reaper touches, and restores the real services at test cleanup. Info and
+// ForgeFromRepo are optional. PublishPipelineEvent is not registered here: a
+// test that expects a publish registers it on the returned scheduler mock.
+func stubReaperServices(t *testing.T) *scheduler_mocks.MockScheduler {
+	t.Helper()
+	schedulerMock := scheduler_mocks.NewMockScheduler(t)
+	schedulerMock.On("Info", mock.Anything).Return(queue.InfoT{}).Maybe()
+	managerMock := manager_mocks.NewMockManager(t)
+	managerMock.On("ForgeFromRepo", mock.Anything).Return(nil, nil).Maybe()
+	oldScheduler, oldManager := server.Config.Services.Scheduler, server.Config.Services.Manager
+	server.Config.Services.Scheduler = schedulerMock
+	server.Config.Services.Manager = managerMock
+	t.Cleanup(func() {
+		server.Config.Services.Scheduler = oldScheduler
+		server.Config.Services.Manager = oldManager
+	})
+	return schedulerMock
+}
+
+// TestReapNeverStoresSuccessOverEmptyPendingPipeline is the RIG-7551 restart
+// window: Restart stores the pipeline pending before it inserts any workflow.
+// A reaper pass that reads the empty tree must not finalize it success. Inside
+// the grace window it stays pending. Past the grace window it is finalized error.
+func TestReapNeverStoresSuccessOverEmptyPendingPipeline(t *testing.T) {
+	f := newLivenessFixture(t)
+	const grace = time.Minute
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusPending
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+	pipeline, err = f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	// Pin updated to created, so the grace window is measured from created.
+	ok, err := f.store.PipelineDispatchClaim(pipeline, pipeline.Created)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	sched := stubReaperServices(t)
+	created := time.Unix(pipeline.Created, 0)
+
+	t.Run("stays pending inside the grace window", func(t *testing.T) {
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, created.Add(grace), grace, 0, 0))
+
+		stored, err := f.store.GetPipeline(pipeline.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusPending, stored.Status,
+			"an empty pending pipeline inside the grace window is skipped; restart may still be inserting workflows")
+	})
+
+	t.Run("errors past the grace window, never success", func(t *testing.T) {
+		sched.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+		now := created.Add(grace + time.Second)
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, grace, 0, 0))
+
+		stored, err := f.store.GetPipeline(pipeline.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusError, stored.Status,
+			"an empty pending pipeline past the grace window must be finalized error, never success")
+		assert.Equal(t, now.Unix(), stored.Finished, "finalize stamps finished at the reaper's clock")
+		require.Len(t, stored.Errors, 1)
+		assert.Equal(t, "pipeline has no workflows after the grace window", stored.Errors[0].Message)
+	})
+}
+
+// TestReapKeepsApprovedEmptyPendingPipelineInsideGrace is the Approve window.
+// Approve claims a blocked row, which bumps updated, and only then inserts its
+// workflows. The row's created is old, so an anchor on created would finalize
+// it error while Approve is still building workflows.
+func TestReapKeepsApprovedEmptyPendingPipelineInsideGrace(t *testing.T) {
+	f := newLivenessFixtureAged(t, false)
+	const grace = time.Minute
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusPending
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+	pipeline, err = f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+
+	// The claim stamps updated 30 seconds after created. At the reaper clock below,
+	// created is past the grace window and updated is inside it.
+	created := time.Unix(pipeline.Created, 0)
+	ok, err := f.store.PipelineDispatchClaim(pipeline, created.Add(30*time.Second).Unix())
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	sched := stubReaperServices(t)
+	sched.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, created.Add(grace+time.Second), grace, 0, 0))
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.StatusPending, stored.Status,
+		"an approved empty pending pipeline is measured from its claim, so it stays pending inside the grace window")
+}
+
+// TestReapFinalizesRunningPipelineWithNoWorkflows pins that the empty-tree skip
+// is limited to pending pipelines: a running pipeline with no rows is still
+// finalized, so the skip does not hold back every empty pipeline.
+func TestReapFinalizesRunningPipelineWithNoWorkflows(t *testing.T) {
+	f := newLivenessFixture(t)
+	now := time.Now()
+
+	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
+	require.NoError(t, err)
+	pipeline.Status = model.StatusRunning
+	pipeline.Started = now.Add(-time.Hour).Unix()
+	require.NoError(t, f.store.UpdatePipeline(pipeline))
+
+	sched := stubReaperServices(t)
+	sched.On("PublishPipelineEvent", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
+
+	stored, err := f.store.GetPipeline(pipeline.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, model.StatusRunning, stored.Status,
+		"a running pipeline with no workflows must still be finalized, not skipped")
+}
