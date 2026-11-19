@@ -407,14 +407,11 @@ func stubReaperServices(t *testing.T) {
 
 // TestReapNeverStoresSuccessOverEmptyPendingPipeline is the RIG-7551 restart
 // window: Restart stores the pipeline pending before it inserts any workflow.
-// A reaper pass that reads the empty tree must not finalize it success.
-//
-// Known gap, RIG-11009: an all-filtered restart also leaves a pending pipeline
-// with no rows, and nothing finalizes it. This test pins that the reaper skips
-// it and leaves it pending, so the gap stays visible until RIG-11009 fixes it.
+// A reaper pass that reads the empty tree must not finalize it success. Inside
+// the grace window it stays pending. Past the grace window it is finalized error.
 func TestReapNeverStoresSuccessOverEmptyPendingPipeline(t *testing.T) {
 	f := newLivenessFixture(t)
-	now := time.Now()
+	const grace = time.Minute
 
 	pipeline, err := f.store.GetPipeline(f.pipeline.ID)
 	require.NoError(t, err)
@@ -422,12 +419,27 @@ func TestReapNeverStoresSuccessOverEmptyPendingPipeline(t *testing.T) {
 	require.NoError(t, f.store.UpdatePipeline(pipeline))
 
 	stubReaperServices(t)
-	require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, now, time.Minute, 0, 0))
+	created := time.Unix(pipeline.Created, 0)
 
-	stored, err := f.store.GetPipeline(pipeline.ID)
-	require.NoError(t, err)
-	assert.Equal(t, model.StatusPending, stored.Status,
-		"an empty pending pipeline is skipped, never finalized success; restart never inserted its workflows")
+	t.Run("stays pending inside the grace window", func(t *testing.T) {
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, created.Add(grace), grace, 0, 0))
+
+		stored, err := f.store.GetPipeline(pipeline.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusPending, stored.Status,
+			"an empty pending pipeline inside the grace window is skipped; restart may still be inserting workflows")
+	})
+
+	t.Run("errors past the grace window, never success", func(t *testing.T) {
+		require.NoError(t, ReapOrphanedWorkflows(t.Context(), f.store, created.Add(grace+time.Second), grace, 0, 0))
+
+		stored, err := f.store.GetPipeline(pipeline.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.StatusError, stored.Status,
+			"an empty pending pipeline past the grace window must be finalized error, never success")
+		require.Len(t, stored.Errors, 1)
+		assert.Equal(t, "pipeline has no workflows after the grace window", stored.Errors[0].Message)
+	})
 }
 
 // TestReapFinalizesRunningPipelineWithNoWorkflows pins that the empty-tree skip

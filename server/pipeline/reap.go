@@ -23,6 +23,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	pipeline_errors "go.woodpecker-ci.org/woodpecker/v3/pipeline/errors"
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 	"go.woodpecker-ci.org/woodpecker/v3/server/scheduler"
@@ -32,6 +33,9 @@ import (
 
 // defaultReapTimeout covers a stored timeout of zero, which the agent runs as one hour.
 const defaultReapTimeout = 60 * time.Minute
+
+// emptyPendingMessage is the pipeline error for a pending pipeline that never got workflows.
+const emptyPendingMessage = "pipeline has no workflows after the grace window"
 
 // ReapOrphanedWorkflows finalizes active workflows that cannot finish through an agent.
 func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Time, grace, pendingTimeout, pendingUnmatchedTimeout time.Duration) error {
@@ -240,18 +244,21 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			changed = true
 		}
 
+		// Restart stores the pipeline pending before it inserts its workflows, so an
+		// empty pending tree is normal only inside the grace window. Past it, the
+		// restart crashed or its own failure write failed: finalize it error below.
+		// An empty tree is never finished success.
+		var emptyPendingExpired bool
 		if len(workflows) == 0 && pipeline.Status == model.StatusPending {
-			// Restart stores the pipeline pending before it inserts its workflows.
-			// An empty tree is not finished: PipelineStatus of no workflows is success.
-			// Inside the grace window this is normal restart timing, so log at debug.
 			age := now.Sub(time.Unix(pipeline.Created, 0))
-			event := log.Debug()
-			if age > grace {
-				event = log.Info()
+			if age <= grace {
+				log.Debug().Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).Dur("age", age).
+					Msg("skipping orphan finalize for pipeline with no workflows inside the grace window")
+				continue
 			}
-			event.Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).Dur("age", age).
-				Msg("skipping orphan finalize for pipeline with no workflows")
-			continue
+			log.Info().Str("repo", repo.FullName).Int64("pipeline", pipeline.Number).Dur("age", age).
+				Msg("finalizing pending pipeline with no workflows after the grace window")
+			emptyPendingExpired = true
 		}
 		if !model.IsThereRunningStage(workflows) {
 			status := PipelineStatus(workflows)
@@ -259,6 +266,13 @@ func ReapOrphanedWorkflows(ctx context.Context, storage store.Store, now time.Ti
 			hasError := slices.ContainsFunc(workflows, func(workflow *model.Workflow) bool { return workflow.State == model.StatusError })
 			if changed && !pipelineEverStarted && !hasError {
 				status = model.StatusCanceled
+			}
+			if emptyPendingExpired {
+				status = model.StatusError
+				pipeline.Errors = []*pipeline_errors.PipelineError{{
+					Type:    pipeline_errors.PipelineErrorTypeGeneric,
+					Message: emptyPendingMessage,
+				}}
 			}
 			updated, err := finalizeIfUnchanged(storage, *pipeline, status, now.Unix())
 			switch {
