@@ -18,7 +18,7 @@ function makeStep(pid: number): PipelineStep {
 
 // `children` is typed `PipelineStep[]` (optional), but the backend serializes a
 // skipped (stepless) workflow's children as `null` or omits the key entirely
-// (`json:"children,omitempty"`) -- the exact mismatch SEA-1090 crashed on. Modeling
+// (`json:"children,omitempty"`) -- the exact mismatch that crashed the UI. Modeling
 // both runtime shapes requires stepping outside the declared type, so we build a
 // loose object and cast once at the boundary. `children?` covers the absent-key
 // (omitempty) case; `| null` covers the skipped-workflow case.
@@ -41,7 +41,7 @@ function makeWorkflow(id: number, children: PipelineStep[] | null, state: Pipeli
 
 // Single deliberate boundary cast: the fixtures intentionally carry `children: null`
 // or omit `children` altogether, runtime shapes the declared `PipelineStep[]` type
-// forbids -- precisely the SEA-1090 null/absent-children shape the scan must tolerate.
+// forbids -- precisely the null/absent-children shape the scan must tolerate.
 function run(workflows: LooseWorkflow[]): number | null {
   return defaultSelectedStepPid(workflows as unknown as PipelineWorkflow[]);
 }

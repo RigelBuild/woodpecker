@@ -42,12 +42,12 @@ func TestDropCreatedPipelineLogsAtInfo(t *testing.T) {
 	pl := &model.Pipeline{ID: 7, Number: 35583, Event: model.EventPull, Ref: "refs/pull/3572/head", Commit: "116e079f"}
 	mockStore.On("DeletePipeline", pl).Return(nil)
 
-	dropCreatedPipeline(mockStore, &model.Repo{FullName: "RigelBuild/orion"}, pl, "no-workflows", errors.New("why"))
+	dropCreatedPipeline(mockStore, &model.Repo{FullName: "RigelBuild/example"}, pl, "no-workflows", errors.New("why"))
 
 	var line map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &line), buf.String())
 	assert.Equal(t, "info", line["level"])
-	assert.Equal(t, "RigelBuild/orion", line["repo"])
+	assert.Equal(t, "RigelBuild/example", line["repo"])
 	assert.EqualValues(t, 35583, line["number"])
 	assert.Equal(t, "pull_request", line["event"])
 	assert.Equal(t, "refs/pull/3572/head", line["ref"])

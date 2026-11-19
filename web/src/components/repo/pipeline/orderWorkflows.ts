@@ -46,7 +46,7 @@ export interface OrderWorkflowsOptions {
 //
 // A skipped/stepless workflow serializes `children` as absent (`omitempty`) or
 // null, so the selected-step scan guards the deref (`?? []`) -- an unguarded
-// access is the SEA-1090 crash.
+// access is a crash.
 export function orderWorkflows(
   workflows: PipelineWorkflow[],
   { showSkipped, selectedStepId }: OrderWorkflowsOptions,

@@ -146,7 +146,7 @@ func TestStatusSkippedGateReportsNonSkippedWhenReportingDisabled(t *testing.T) {
 		"a non-skipped workflow must still be reported even when ReportSkippedToForge is off")
 }
 
-// TestStatusSkippedPersistedButNotReportedToForge is the SEA-1102 decouple
+// TestStatusSkippedPersistedButNotReportedToForge is the decouple
 // contract: persisting skipped workflows (so the Woodpecker UI shows them) must
 // NOT drag them onto the GitHub check list. With persist ON (ReportSkippedWorkflows)
 // but forge-report OFF (ReportSkippedToForge), a skipped workflow must make zero
