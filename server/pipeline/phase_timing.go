@@ -22,7 +22,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
 )
 
-// startPhase starts timing one phase of pipeline creation. The returned
+// startPhase starts timing one pipeline phase. The returned
 // function logs one debug line with the phase name, its duration, and the
 // repo and pipeline identity. Pass the phase's error, or nil on success.
 func startPhase(repo *model.Repo, pipeline *model.Pipeline, phase string) func(err error) {

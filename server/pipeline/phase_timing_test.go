@@ -36,7 +36,7 @@ func TestLogPhaseDebugLine(t *testing.T) {
 	log.Logger = zerolog.New(&buf).Level(zerolog.DebugLevel)
 	t.Cleanup(func() { log.Logger = prev })
 
-	repo := &model.Repo{ID: 42, FullName: "RigelBuild/orion"}
+	repo := &model.Repo{ID: 42, FullName: "RigelBuild/example"}
 	pl := &model.Pipeline{ID: 7, Number: 35583}
 
 	done := startPhase(repo, pl, "store-insert")
@@ -47,7 +47,7 @@ func TestLogPhaseDebugLine(t *testing.T) {
 	assert.Equal(t, "debug", line["level"])
 	assert.Equal(t, "store-insert", line["phase"])
 	assert.Equal(t, "pipeline phase", line["message"])
-	assert.Equal(t, "RigelBuild/orion", line["repo"])
+	assert.Equal(t, "RigelBuild/example", line["repo"])
 	assert.EqualValues(t, 42, line["repo_id"])
 	assert.EqualValues(t, 35583, line["number"])
 	assert.Contains(t, line, "duration")
@@ -62,7 +62,7 @@ func TestLogPhaseRecordsError(t *testing.T) {
 	log.Logger = zerolog.New(&buf).Level(zerolog.DebugLevel)
 	t.Cleanup(func() { log.Logger = prev })
 
-	repo := &model.Repo{ID: 42, FullName: "RigelBuild/orion"}
+	repo := &model.Repo{ID: 42, FullName: "RigelBuild/example"}
 	pl := &model.Pipeline{ID: 7, Number: 35583}
 
 	done := startPhase(repo, pl, "config-fetch")
@@ -72,7 +72,7 @@ func TestLogPhaseRecordsError(t *testing.T) {
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &line), buf.String())
 	assert.Equal(t, "config-fetch", line["phase"])
 	assert.Equal(t, "pipeline phase", line["message"])
-	assert.Equal(t, "RigelBuild/orion", line["repo"])
+	assert.Equal(t, "RigelBuild/example", line["repo"])
 	assert.Equal(t, "forge timeout", line["error"])
 	assert.Contains(t, line, "duration")
 }
