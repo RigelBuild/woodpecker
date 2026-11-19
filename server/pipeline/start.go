@@ -40,12 +40,17 @@ func start(ctx context.Context, forge forge.Forge, store store.Store, activePipe
 	}
 
 	// announce the new pipeline to UI subscribers and enqueue its tasks in one go
-	if err := server.Config.Services.Scheduler.StartPipeline(ctx, repo, activePipeline, tasks); err != nil {
+	doneQueue := startPhase(repo, activePipeline, "queue-push")
+	err = server.Config.Services.Scheduler.StartPipeline(ctx, repo, activePipeline, tasks)
+	doneQueue(err)
+	if err != nil {
 		log.Error().Err(err).Msg("startPipeline")
 		return nil, err
 	}
 
+	doneStatus := startPhase(repo, activePipeline, "forge-status")
 	updatePipelineStatus(ctx, forge, store, activePipeline, repo, user)
+	doneStatus(nil)
 
 	return activePipeline, nil
 }
@@ -54,5 +59,7 @@ func publishPipeline(ctx context.Context, forge forge.Forge, store store.Store, 
 	if err := server.Config.Services.Scheduler.PublishPipelineEvent(ctx, repo, pipeline); err != nil {
 		log.Error().Err(err).Msg("could not push pipeline status change to pubsub provider")
 	}
+	doneStatus := startPhase(repo, pipeline, "forge-status")
 	updatePipelineStatus(ctx, forge, store, pipeline, repo, repoUser)
+	doneStatus(nil)
 }

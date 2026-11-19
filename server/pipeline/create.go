@@ -68,7 +68,9 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 	pipeline.Status = model.StatusCreated
 	pipeline.Version = version.String()
 	setApprovalState(repo, pipeline)
+	doneStore := startPhase(repo, pipeline, "store-insert")
 	err = _store.CreatePipeline(pipeline)
+	doneStore(err)
 	if err != nil {
 		msg := fmt.Errorf("failed to save pipeline for %s", repo.FullName)
 		log.Error().Str("repo", repo.FullName).Err(err).Msg(msg.Error())
@@ -77,7 +79,9 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 
 	// fetch the pipeline file from the forge
 	configService := server.Config.Services.Manager.ConfigServiceFromRepo(repo)
+	doneFetch := startPhase(repo, pipeline, "config-fetch")
 	forgeYamlConfigs, configFetchErr := configService.Fetch(ctx, _forge, repoUser, repo, pipeline, nil, false)
+	doneFetch(configFetchErr)
 	switch {
 	case errors.Is(configFetchErr, &forge_types.ErrConfigNotFound{}):
 		dropCreatedPipeline(_store, repo, pipeline, "config-not-found", configFetchErr)
@@ -105,7 +109,9 @@ func Create(ctx context.Context, _store store.Store, repo *model.Repo, pipeline 
 		return nil, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, fmt.Errorf("%s: %w", msg, err))
 	}
 
+	doneParse := startPhase(repo, pipeline, "parse")
 	currentPipeline, pipelineItems, parseErr, err := createPipelineItems(ctx, _forge, _store, pipeline, repoUser, repo, forgeYamlConfigs, nil, false, nil)
+	doneParse(err)
 	if err != nil {
 		return nil, updatePipelineWithErr(ctx, _forge, _store, pipeline, repo, repoUser, fmt.Errorf("createPipelineItems failed: %w", err))
 	}
