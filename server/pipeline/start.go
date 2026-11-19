@@ -48,7 +48,7 @@ func start(ctx context.Context, forge forge.Forge, store store.Store, activePipe
 		return nil, err
 	}
 
-	doneStatus := startPhase(repo, activePipeline, "forge-status")
+	doneStatus := startPhase(repo, activePipeline, "forge-status-start")
 	updatePipelineStatus(ctx, forge, store, activePipeline, repo, user)
 	doneStatus(nil)
 
@@ -59,7 +59,7 @@ func publishPipeline(ctx context.Context, forge forge.Forge, store store.Store, 
 	if err := server.Config.Services.Scheduler.PublishPipelineEvent(ctx, repo, pipeline); err != nil {
 		log.Error().Err(err).Msg("could not push pipeline status change to pubsub provider")
 	}
-	doneStatus := startPhase(repo, pipeline, "forge-status")
+	doneStatus := startPhase(repo, pipeline, "forge-status-publish")
 	updatePipelineStatus(ctx, forge, store, pipeline, repo, repoUser)
 	doneStatus(nil)
 }

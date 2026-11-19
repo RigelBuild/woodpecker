@@ -46,6 +46,8 @@ func TestLogPhaseDebugLine(t *testing.T) {
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &line), buf.String())
 	assert.Equal(t, "debug", line["level"])
 	assert.Equal(t, "store-insert", line["phase"])
+	assert.Equal(t, "pipeline phase", line["message"])
+	assert.Equal(t, "RigelBuild/orion", line["repo"])
 	assert.EqualValues(t, 42, line["repo_id"])
 	assert.EqualValues(t, 35583, line["number"])
 	assert.Contains(t, line, "duration")
@@ -69,6 +71,8 @@ func TestLogPhaseRecordsError(t *testing.T) {
 	var line map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &line), buf.String())
 	assert.Equal(t, "config-fetch", line["phase"])
+	assert.Equal(t, "pipeline phase", line["message"])
+	assert.Equal(t, "RigelBuild/orion", line["repo"])
 	assert.Equal(t, "forge timeout", line["error"])
 	assert.Contains(t, line, "duration")
 }

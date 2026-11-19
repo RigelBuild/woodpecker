@@ -31,11 +31,12 @@ func startPhase(repo *model.Repo, pipeline *model.Pipeline, phase string) func(e
 		ev := log.Debug().
 			Str("phase", phase).
 			Dur("duration", time.Since(start)).
+			Str("repo", repo.FullName).
 			Int64("repo_id", repo.ID).
 			Int64("number", pipeline.Number)
 		if err != nil {
 			ev = ev.Err(err)
 		}
-		ev.Msg("pipeline create phase")
+		ev.Msg("pipeline phase")
 	}
 }
