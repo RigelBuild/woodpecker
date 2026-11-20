@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"sync"
 	"time"
 
 	backend_types "go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
@@ -111,9 +110,9 @@ func (r *Runtime) setStepEnv(step *backend_types.Step) error {
 
 // startStep starts the step container and spawns a goroutine to stream its logs.
 // It returns:
-//   - waitForLogs: must be called before WaitStep — it blocks until the log stream
-//     is fully drained. Some backends (e.g. local) close the log stream when
-//     WaitStep is called, so draining first is required.
+//   - waitForLogs: must be called before WaitStep. It blocks until the log stream
+//     is fully drained, or until the workflow context is done. Some backends (e.g.
+//     local) close the log stream when WaitStep is called, so draining first is required.
 //   - startTime: unix timestamp recorded right after the container started, used
 //     later to fill waitState.Started.
 //
@@ -130,16 +129,24 @@ func (r *Runtime) startStep(step *backend_types.Step) (func(), int64, error) {
 		return nil, 0, err
 	}
 
-	var wg sync.WaitGroup
-	wg.Go(func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		logger := r.makeLogger()
 		if err := r.logger(step, rc); err != nil {
 			logger.Error().Err(err).Str("step", step.Name).Msg("step log streaming failed")
 		}
 		_ = rc.Close()
-	})
+	}()
 
-	return wg.Wait, startTime, nil
+	// A stalled log stream must not hold the step past the workflow deadline.
+	waitForLogs := func() {
+		select {
+		case <-done:
+		case <-r.ctx.Done():
+		}
+	}
+	return waitForLogs, startTime, nil
 }
 
 // cancelFallout reports whether err is a consequence of the workflow being
