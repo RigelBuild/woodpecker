@@ -250,6 +250,7 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 			if !ok || (&model.Task{RunOn: task.RunOn, DepStatus: deps}).ShouldRun() {
 				continue
 			}
+			culprit := failedDependency(task, deps)
 			reason := "dependency-failed"
 			if len(deleted) > 0 {
 				reason = "dependency-deleted"
@@ -267,6 +268,7 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 			log.Info().
 				Int64("workflow_id", workflow.ID).
 				Str("reason", reason).
+				Str("dependency_workflow_id", culprit).
 				Strs("labels", reasonLabels(task)).
 				Msg("finalized queued workflow")
 			finalized = append(finalized, workflow)
@@ -274,6 +276,18 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 		}
 	}
 	return finalized
+}
+
+// failedDependency names the first dependency that alone stops the task from running.
+// It is empty when no single dependency does.
+func failedDependency(task *model.Task, deps map[string]model.StatusValue) string {
+	for _, dep := range task.Dependencies {
+		alone := &model.Task{RunOn: task.RunOn, DepStatus: map[string]model.StatusValue{dep: deps[dep]}}
+		if !alone.ShouldRun() {
+			return dep
+		}
+	}
+	return ""
 }
 
 // deletedDependencyReason names the lowest deleted dependency ID.

@@ -86,6 +86,21 @@ var (
 	shutdownCtx                                = context.Background()
 )
 
+// runOrphanReaper runs reap once per tick until ctx ends; nothing runs before the first tick.
+func runOrphanReaper(ctx context.Context, ticks <-chan time.Time, reap func() error) {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("orphan workflow reaper stopped")
+			return
+		case <-ticks:
+		}
+		if err := reap(); err != nil {
+			log.Error().Err(err).Msg("orphan workflow reaper failed")
+		}
+	}
+}
+
 func run(ctx context.Context, c *cli.Command) error {
 	if err := logger.SetupGlobalLogger(ctx, c, true); err != nil {
 		return err
@@ -201,17 +216,10 @@ func run(ctx context.Context, c *cli.Command) error {
 			log.Info().Msg("starting orphan workflow reaper ...")
 			ticker := time.NewTicker(server.Config.Server.OrphanReapInterval)
 			defer ticker.Stop()
-			for {
-				if err := pipeline.ReapOrphanedWorkflows(ctx, _store, time.Now(), server.Config.Server.OrphanReapGrace, server.Config.Server.PendingTimeout, server.Config.Server.PendingUnmatchedTimeout); err != nil {
-					log.Error().Err(err).Msg("orphan workflow reaper failed")
-				}
-				select {
-				case <-ctx.Done():
-					log.Info().Msg("orphan workflow reaper stopped")
-					return nil
-				case <-ticker.C:
-				}
-			}
+			runOrphanReaper(ctx, ticker.C, func() error {
+				return pipeline.ReapOrphanedWorkflows(ctx, _store, time.Now(), server.Config.Server.OrphanReapGrace, server.Config.Server.PendingTimeout, server.Config.Server.PendingUnmatchedTimeout)
+			})
+			return nil
 		})
 	}
 
