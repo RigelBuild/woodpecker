@@ -635,6 +635,49 @@ func TestPersistentQueueExpiryRequeueClearsStartedInInfoAndStore(t *testing.T) {
 	assert.Equal(t, int64(123), stored[0].Enqueued)
 }
 
+// setupRestartedDependency polls the dependency so its row is deleted, then
+// restarts the queue over the same store and returns it with both task IDs.
+func setupRestartedDependency(t *testing.T) (context.Context, Queue, string, string) {
+	t.Helper()
+	s := newQueueSQLiteStore(t)
+	ctx, _, q := setupTestQueue(t)
+	workflows := []*model.Workflow{
+		{PipelineID: 1, PID: 1, Name: "dep", State: model.StatusPending},
+		{PipelineID: 1, PID: 2, Name: "consumer", State: model.StatusPending, DependsOn: []string{"dep"}},
+	}
+	require.NoError(t, s.WorkflowsCreate(workflows))
+	depID := strconv.FormatInt(workflows[0].ID, 10)
+	consumerID := strconv.FormatInt(workflows[1].ID, 10)
+
+	pq := WithTaskStore(ctx, q, s)
+	require.NoError(t, pq.PushAtOnce(ctx, []*model.Task{
+		{ID: depID, DepStatus: map[string]model.StatusValue{}},
+		{ID: consumerID, Dependencies: []string{depID}, DepStatus: map[string]model.StatusValue{}},
+	}))
+	dep, err := pq.Poll(ctx, 1, func(task *model.Task) (bool, int) { return task.ID == depID, 1 })
+	require.NoError(t, err)
+	require.NotNil(t, dep)
+	require.Equal(t, depID, dep.ID)
+
+	ctx2, _, q2 := setupTestQueue(t)
+	return ctx2, WithTaskStore(ctx2, q2, s), depID, consumerID
+}
+
+// After a restart the dependency is no longer in the queue. Its Done must
+// still release the dependent with the dependency's status.
+func TestWithTaskStoreRestartReleasesDependentOnUnknownDone(t *testing.T) {
+	ctx, restarted, depID, consumerID := setupRestartedDependency(t)
+
+	require.ErrorIs(t, restarted.Done(ctx, depID, model.StatusSuccess), ErrNotFound)
+
+	pollCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	consumer, err := restarted.Poll(pollCtx, 1, func(task *model.Task) (bool, int) { return task.ID == consumerID, 1 })
+	require.NoError(t, err)
+	require.NotNil(t, consumer)
+	assert.Equal(t, model.StatusSuccess, consumer.DepStatus[depID])
+}
+
 func newQueueSQLiteStore(t *testing.T) store.Store {
 	t.Helper()
 	s, err := datastore.NewEngine(&store.Opts{
