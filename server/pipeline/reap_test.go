@@ -638,7 +638,7 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 				41: model.StatusError, 42: model.StatusSkipped, 43: model.StatusSkipped,
 			},
 			stepStates: map[int64]model.StatusValue{
-				411: model.StatusError, 421: model.StatusCanceled, 431: model.StatusCanceled,
+				411: model.StatusError, 421: model.StatusCanceled, 431: model.StatusKilled,
 			},
 			cancels:           []string{"41", "42", "43"},
 			timedOut:          1,
@@ -1286,6 +1286,15 @@ func TestReapPendingTimeoutNextPass(t *testing.T) {
 		assert.True(t, skipDeadWorkflow(storeMock, workflow, map[string]model.StatusValue{"40": model.StatusSuccess, "41": model.StatusError}, nowUnix))
 		assert.Equal(t, model.StatusSkipped, workflow.State)
 		assert.Equal(t, model.StatusCanceled, workflow.Children[0].State)
+	})
+
+	t.Run("skipped dependency writes killed steps like the scheduler", func(t *testing.T) {
+		storeMock, _, _ := setup(t)
+		workflow := &model.Workflow{ID: 42, State: model.StatusPending, Children: []*model.Step{{ID: 421, State: model.StatusPending}}}
+		storeMock.On("WorkflowUpdateIfState", isState(42, model.StatusSkipped), model.StatusPending, isStep(421, model.StatusKilled)).Return(nil).Once()
+		assert.True(t, skipDeadWorkflow(storeMock, workflow, map[string]model.StatusValue{"40": model.StatusSkipped}, nowUnix))
+		assert.Equal(t, model.StatusSkipped, workflow.State)
+		assert.Equal(t, model.StatusKilled, workflow.Children[0].State)
 	})
 
 	t.Run("skip with a killed dependency writes canceled steps", func(t *testing.T) {
