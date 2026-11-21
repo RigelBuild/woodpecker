@@ -158,35 +158,35 @@ func codeStatus(p *model.Pipeline, workflows []*model.Workflow) model.StatusValu
 	if len(code) == 0 {
 		return p.Status
 	}
-	// Every code workflow skipped under a stored success: the reaper's dead-
-	// dependency skip (Woodpecker pipeline #10874, RIG-7551) or a `when` filter.
-	// A filtered workflow has no steps; the reaper keeps a skipped workflow's
-	// steps. Only the reaper shape must not roll up green, because no code
-	// workflow ran. A filter-only set keeps its stored success.
-	if p.Status == model.StatusSuccess && allSkippedWithSteps(code) {
+	// A code workflow the reaper ended under a stored success (RIG-7551,
+	// Woodpecker pipeline #10874): it was skipped with canceled steps, and no
+	// code workflow ran to failure to say so. Scheduler-skipped dependents keep
+	// pending steps and build-time filtered workflows have none, so both stay
+	// green.
+	if p.Status == model.StatusSuccess && anyReapedCodeWorkflow(code) {
 		log.Info().
 			Int64("pipeline_id", p.ID).
-			Int("skipped_code_workflows", len(code)).
-			Msg("CI (pr) overrides a stored success: every code workflow is skipped")
+			Int("code_workflows", len(code)).
+			Msg("CI (pr) overrides a stored success: a code workflow was reaped with canceled steps")
 		return model.StatusFailure
 	}
 	return reconcileTerminalStatus(pipeline.PipelineStatus(code), p.Status)
 }
 
-// allSkippedWithSteps reports whether every workflow is skipped and at least one
-// of them carries steps. Filtered-out workflows carry no steps, so a set made
-// only of them does not count as skipped work.
-func allSkippedWithSteps(workflows []*model.Workflow) bool {
-	hasSteps := false
+// anyReapedCodeWorkflow reports whether a code workflow was skipped by the
+// reaper: skipped, with at least one step canceled rather than left pending.
+func anyReapedCodeWorkflow(workflows []*model.Workflow) bool {
 	for _, workflow := range workflows {
 		if workflow.State != model.StatusSkipped {
-			return false
+			continue
 		}
-		if len(workflow.Children) > 0 {
-			hasSteps = true
+		for _, step := range workflow.Children {
+			if step.State == model.StatusCanceled {
+				return true
+			}
 		}
 	}
-	return hasSteps
+	return false
 }
 
 // metaGateStatus rolls up only the meta-gate workflows.
