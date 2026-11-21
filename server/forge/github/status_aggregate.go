@@ -158,7 +158,22 @@ func codeStatus(p *model.Pipeline, workflows []*model.Workflow) model.StatusValu
 	if len(code) == 0 {
 		return p.Status
 	}
+	// No code workflow ran (RIG-10874): the reaper skipped every one as dead.
+	// PipelineStatus folds skipped below success, so a stored success must not
+	// vouch for work that never happened.
+	if p.Status == model.StatusSuccess && allSkipped(code) {
+		return model.StatusFailure
+	}
 	return reconcileTerminalStatus(pipeline.PipelineStatus(code), p.Status)
+}
+
+func allSkipped(workflows []*model.Workflow) bool {
+	for _, workflow := range workflows {
+		if workflow.State != model.StatusSkipped {
+			return false
+		}
+	}
+	return true
 }
 
 // metaGateStatus rolls up only the meta-gate workflows.
