@@ -158,11 +158,10 @@ func codeStatus(p *model.Pipeline, workflows []*model.Workflow) model.StatusValu
 	if len(code) == 0 {
 		return p.Status
 	}
-	// A code workflow the reaper ended under a stored success (RIG-7551,
-	// Woodpecker pipeline #10874): it was skipped with canceled steps, and no
-	// code workflow ran to failure to say so. Scheduler-skipped dependents keep
-	// pending steps and build-time filtered workflows have none, so both stay
-	// green.
+	// A code workflow the reaper ended with canceled steps under a stored success
+	// (RIG-7551, Woodpecker pipeline #10874): a lost dependency, so no code
+	// workflow ran to say so. A scheduler skip writes killed steps instead, and a
+	// build-time filtered workflow has no steps; both stay green.
 	if p.Status == model.StatusSuccess && anyReapedCodeWorkflow(code) {
 		log.Info().
 			Int64("pipeline_id", p.ID).

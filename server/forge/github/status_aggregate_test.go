@@ -421,10 +421,10 @@ func TestStatusAggregateAllCodeSkippedIsNotGreen(t *testing.T) {
 
 // TestStatusAggregateReapedCodeWorkflowUnderSuccessIsNotGreen is the RIG-7551
 // mixed shape (Woodpecker pipeline #10874): the stored pipeline reads success
-// while the reaper has ended a code workflow and canceled its pending steps.
-// Successful siblings fold skipped below success, so the rollup alone reports
-// success. A scheduler-skipped dependent keeps its pending steps, and a
-// build-time filtered workflow has none; both are honest skips and stay green.
+// while the reaper has ended a code workflow with canceled steps, a lost
+// dependency. Successful siblings fold skipped below success, so the rollup
+// alone reports success. A scheduler skip writes killed steps, and a build-time
+// filtered workflow has none; both are honest skips and stay green.
 func TestStatusAggregateReapedCodeWorkflowUnderSuccessIsNotGreen(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -456,10 +456,10 @@ func TestStatusAggregateReapedCodeWorkflowUnderSuccessIsNotGreen(t *testing.T) {
 			want: statusFailure,
 		},
 		{
-			name: "scheduler-skipped dependent keeps its pending steps",
+			name: "scheduler-skipped dependent has killed steps (markSkipped shape)",
 			workflows: []*model.Workflow{
 				{Name: "build", State: model.StatusSuccess},
-				{Name: "test", State: model.StatusSkipped, Children: []*model.Step{{Name: "test", State: model.StatusPending}}},
+				{Name: "test", State: model.StatusSkipped, Children: []*model.Step{{Name: "test", State: model.StatusKilled}}},
 			},
 			want: statusSuccess,
 		},
@@ -495,18 +495,18 @@ func TestStatusAggregateReapedCodeWorkflowUnderSuccessIsNotGreen(t *testing.T) {
 	}
 }
 
-// TestStatusAggregateUserCancelKeepsStoredStatus pins that the reaped-workflow
-// guard only overrides a stored success. A user cancel leaves skipped workflows
-// with canceled steps too, but stores killed or canceled, so its verdict must
-// not change: killed stays failure, and canceled keeps the rollup result.
-func TestStatusAggregateUserCancelKeepsStoredStatus(t *testing.T) {
+// TestStatusAggregateUserKilledKeepsFailure pins that the reaped-workflow guard
+// only overrides a stored success. A user cancel leaves skipped workflows with
+// canceled steps too, but stores killed, so its verdict stays failure. A stored
+// canceled pipeline is not asserted here: ReportAggregateStatus rewrites it
+// before this rollup runs.
+func TestStatusAggregateUserKilledKeepsFailure(t *testing.T) {
 	tests := []struct {
 		name   string
 		status model.StatusValue
 		want   string
 	}{
 		{name: "killed by user", status: model.StatusKilled, want: statusFailure},
-		{name: "canceled by user before dispatch", status: model.StatusCanceled, want: statusSuccess},
 	}
 
 	for _, tt := range tests {
