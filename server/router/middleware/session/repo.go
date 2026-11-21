@@ -125,7 +125,26 @@ func SetPerm() gin.HandlerFunc {
 			// a user of another forge has no permissions on this repo and
 			// their token must not be sent to the repo's forge
 			if user.ForgeID == repo.ForgeID && time.Unix(perm.Synced, 0).Add(time.Hour).Before(time.Now()) {
+				syncedAge := time.Since(time.Unix(perm.Synced, 0))
+				start := time.Now()
 				_repo, err := _forge.Repo(c, user, repo.ForgeRemoteID, repo.Owner, repo.Name)
+				duration := time.Since(start)
+				log.Info().
+					Dur("duration", duration).
+					Dur("synced_age", syncedAge).
+					Str("repo", repo.FullName).
+					Str("user", user.Login).
+					Err(err).
+					Msg("SetPerm refresh")
+				if duration > 5*time.Second {
+					log.Warn().
+						Dur("duration", duration).
+						Dur("synced_age", syncedAge).
+						Str("repo", repo.FullName).
+						Str("user", user.Login).
+						Err(err).
+						Msg("SetPerm refresh slow")
+				}
 				if err == nil {
 					log.Debug().Msgf("synced user permission for %s %s", user.Login, repo.FullName)
 					_repo.ForgeID = repo.ForgeID
