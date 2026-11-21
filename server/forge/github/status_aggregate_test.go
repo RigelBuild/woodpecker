@@ -335,8 +335,18 @@ func TestStatusAggregateTerminalStatusIsNotMaskedBySkippedCodeWorkflows(t *testi
 		{
 			name:           "successful pipeline with every code workflow skipped",
 			pipelineStatus: model.StatusSuccess,
-			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSkipped}},
+			workflows:      []*model.Workflow{{Name: "build", State: model.StatusSkipped, Children: []*model.Step{{Name: "build", State: model.StatusCanceled}}}},
 			want:           statusFailure,
+		},
+		{
+			name:           "successful pipeline whose code workflows were all filtered out stays green",
+			pipelineStatus: model.StatusSuccess,
+			workflows: []*model.Workflow{
+				{Name: "build", State: model.StatusSkipped},
+				{Name: "test", State: model.StatusSkipped},
+				{Name: "pr-title-issue-ref", State: model.StatusSuccess, OnMetadataEdit: true},
+			},
+			want: statusSuccess,
 		},
 		{
 			name:           "errored pipeline with all code workflows successful",
@@ -380,10 +390,11 @@ func TestStatusAggregateTerminalStatusIsNotMaskedBySkippedCodeWorkflows(t *testi
 	}
 }
 
-// TestStatusAggregateAllCodeSkippedIsNotGreen is the RIG-10874 shape: the reaper
-// skipped every code workflow as dead, a meta gate still passed, and the stored
-// pipeline reads success. No code workflow ran, so CI (pr) must not report green.
-// PipelineStatus folds skipped below success, so the rollup alone would say success.
+// TestStatusAggregateAllCodeSkippedIsNotGreen is the Woodpecker pipeline #10874
+// (RIG-7551) shape: every code workflow skipped after the reaper ended it, a
+// meta gate still passed, and the stored pipeline reads success. No code
+// workflow ran, so CI (pr) must not report green. PipelineStatus folds skipped
+// below success, so the rollup alone would say success.
 func TestStatusAggregateAllCodeSkippedIsNotGreen(t *testing.T) {
 	var posted github.RepoStatus
 	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
@@ -398,11 +409,10 @@ func TestStatusAggregateAllCodeSkippedIsNotGreen(t *testing.T) {
 	})
 	pipeline.Status = model.StatusSuccess
 	workflows := []*model.Workflow{
-		{Name: "build", State: model.StatusSkipped},
-		{Name: "test", State: model.StatusSkipped},
+		{Name: "build", State: model.StatusSkipped, Children: []*model.Step{{Name: "build", State: model.StatusCanceled}}},
+		{Name: "test", State: model.StatusSkipped, Children: []*model.Step{{Name: "test", State: model.StatusCanceled}}},
 		{Name: "pr-title-issue-ref", State: model.StatusSuccess, OnMetadataEdit: true},
 	}
-
 	err := c.StatusAggregate(ctx, user, repo, pipeline, workflows)
 	require.NoError(t, err)
 	assert.Equal(t, statusFailure, posted.GetState(),
