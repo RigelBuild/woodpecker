@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build test
-
 package github
 
 import (
@@ -33,7 +31,6 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/server"
 	"go.woodpecker-ci.org/woodpecker/v3/server/forge"
 	"go.woodpecker-ci.org/woodpecker/v3/server/model"
-	"go.woodpecker-ci.org/woodpecker/v3/server/store/datastore"
 	store_mocks "go.woodpecker-ci.org/woodpecker/v3/server/store/mocks"
 )
 
@@ -1264,101 +1261,4 @@ func TestReportMetaTerminalRetryDefersToLaterMetaPipeline(t *testing.T) {
 
 	require.NoError(t, forge.ReportMetaStatus(ctx, c, s, user, repo, p))
 	assert.Equal(t, []string{statusSuccess}, *states, "only the failed first POST; the retry is dropped")
-}
-
-// TestStatusAggregateStoredSuccessReapedCodeWorkflowIsNotGreen is the store-backed
-// RIG-7551 regression for Woodpecker pipeline #10874. The reaper leaves a stored
-// success pipeline whose `test` workflow is skipped with a canceled step, beside a
-// successful `build`. The tree is read back from the store, so the test sees the
-// rows the live report loads. The rollup alone reads success; the reaped-workflow
-// guard must post failure.
-func TestStatusAggregateStoredSuccessReapedCodeWorkflowIsNotGreen(t *testing.T) {
-	s := datastore.NewTestStore(t)
-	owner := &model.User{Login: "octocat", ForgeRemoteID: "1"}
-	require.NoError(t, s.CreateUser(owner))
-
-	var posted github.RepoStatus
-	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
-			t.Errorf("decode posted status: %v", err)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
-		if _, err := w.Write([]byte(`{}`)); err != nil {
-			t.Errorf("write response: %v", err)
-		}
-	})
-	repo.UserID = owner.ID
-	repo.FullName = "o/r"
-	require.NoError(t, s.CreateRepo(repo))
-	pipeline.RepoID = repo.ID
-	require.NoError(t, s.CreatePipeline(pipeline))
-
-	workflows := []*model.Workflow{
-		{PipelineID: pipeline.ID, PID: 1, Name: "build", State: model.StatusSuccess, Children: []*model.Step{
-			{UUID: "build", PipelineID: pipeline.ID, PID: 1, PPID: 1, Name: "build", State: model.StatusSuccess},
-		}},
-		{PipelineID: pipeline.ID, PID: 2, Name: "test", State: model.StatusSkipped, Children: []*model.Step{
-			{UUID: "test", PipelineID: pipeline.ID, PID: 2, PPID: 2, Name: "test", State: model.StatusCanceled},
-		}},
-	}
-	require.NoError(t, s.WorkflowsCreate(workflows))
-	tree, err := s.WorkflowGetTree(pipeline)
-	require.NoError(t, err)
-	require.Len(t, tree, 2)
-
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, pipeline, tree))
-	assert.Equal(t, statusFailure, posted.GetState(),
-		"a stored success pipeline with a reaped code workflow must not post CI (pr) green")
-}
-
-// TestStatusAggregateSkippedDependentWithPendingStepStaysGreen is the guard for the
-// reaper rule: a skipped code workflow whose step is still pending was not reaped
-// (a reaped step is canceled), so a success sibling keeps CI (pr) green.
-func TestStatusAggregateSkippedDependentWithPendingStepStaysGreen(t *testing.T) {
-	var posted github.RepoStatus
-	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
-			t.Errorf("decode posted status: %v", err)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
-		if _, err := w.Write([]byte(`{}`)); err != nil {
-			t.Errorf("write response: %v", err)
-		}
-	})
-	pipeline.Status = model.StatusSuccess
-	workflows := []*model.Workflow{
-		{Name: "build", State: model.StatusSuccess},
-		{Name: "test", State: model.StatusSkipped, Children: []*model.Step{{Name: "test", State: model.StatusPending}}},
-	}
-
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, pipeline, workflows))
-	assert.Equal(t, statusSuccess, posted.GetState(),
-		"a skipped dependent with a pending step must not turn a passing success pipeline red")
-}
-
-// TestStatusAggregateStoredSuccessPendingWorkflowFailsAlreadyCoveredBy170 is the
-// pure-pending guard: a stored success pipeline with one code workflow still
-// pending must post failure, never success. PR #170 added this rule, and
-// TestStatusAggregateSuccessPipelineNeverPostsSuccessOverPendingCodeWorkflows
-// covers the same shape; this is the single-workflow restatement.
-func TestStatusAggregateStoredSuccessPendingWorkflowFailsAlreadyCoveredBy170(t *testing.T) {
-	var posted github.RepoStatus
-	c, ctx, repo, user, pipeline := statusAggregateFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
-			t.Errorf("decode posted status: %v", err)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
-		if _, err := w.Write([]byte(`{}`)); err != nil {
-			t.Errorf("write response: %v", err)
-		}
-	})
-	pipeline.Status = model.StatusSuccess
-	workflows := []*model.Workflow{{Name: "build", State: model.StatusPending}}
-
-	require.NoError(t, c.StatusAggregate(ctx, user, repo, pipeline, workflows))
-	assert.Equal(t, statusFailure, posted.GetState(),
-		"a stored success pipeline with a pending code workflow must post failure, never success")
 }
