@@ -56,6 +56,10 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 		task.RunOn = []string{string(model.StatusFailure)}
 		return task
 	}
+	runsOnSuccess := func(task *model.Task) *model.Task {
+		task.RunOn = []string{string(model.StatusSuccess)}
+		return task
+	}
 	queuedWorkflow := func(id int64) *model.Workflow {
 		return &model.Workflow{ID: id, State: model.StatusPending, Children: []*model.Step{{ID: id*10 + 1, State: model.StatusPending}}}
 	}
@@ -327,6 +331,22 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			pipelineFinalized: true,
 		},
 		{
+			name:            "permitted runs_on with succeeded dependency times out as lost work, not skipped",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - 7*hour,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusSuccess, Started: nowUnix - 8*hour, Finished: nowUnix - 7*hour},
+				queuedWorkflow(41),
+			},
+			pending:           []*model.Task{runsOnSuccess(linuxTask("41", "40"))},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusError},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusError},
+			cancels:           []string{"41"},
+			timedOut:          1,
+			pipelineFinal:     model.StatusError,
+			pipelineFinalized: true,
+		},
+		{
 			name:              "timed out push pipeline reports error aggregate",
 			pipelineStatus:    model.StatusPending,
 			pipelineCreated:   nowUnix - 7*hour,
@@ -415,9 +435,24 @@ func TestReapOrphanedWorkflows(t *testing.T) {
 			},
 			pending:           []*model.Task{linuxTask("41", "40")},
 			workflowStates:    map[int64]model.StatusValue{41: model.StatusSkipped},
-			stepStates:        map[int64]model.StatusValue{411: model.StatusCanceled},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusKilled},
 			cancels:           []string{"41"},
 			pipelineFinal:     model.StatusFailure,
+			pipelineFinalized: true,
+		},
+		{
+			name:            "failure-only dependent of a successful workflow is skipped like the scheduler",
+			pipelineStatus:  model.StatusRunning,
+			pipelineCreated: nowUnix - 10*60,
+			workflows: []*model.Workflow{
+				{ID: 40, State: model.StatusSuccess, Started: nowUnix - 2*60, Finished: nowUnix - 60},
+				queuedWorkflow(41),
+			},
+			pending:           []*model.Task{runsOnFailure(linuxTask("41", "40"))},
+			workflowStates:    map[int64]model.StatusValue{41: model.StatusSkipped},
+			stepStates:        map[int64]model.StatusValue{411: model.StatusKilled},
+			cancels:           []string{"41"},
+			pipelineFinal:     model.StatusSuccess,
 			pipelineFinalized: true,
 		},
 		{
@@ -1229,10 +1264,36 @@ func TestReapPendingTimeoutNextPass(t *testing.T) {
 	t.Run("dependent step conflict leaves workflow unchanged", func(t *testing.T) {
 		storeMock, _, _ := setup(t)
 		workflow := &model.Workflow{ID: 42, State: model.StatusPending, Children: []*model.Step{{ID: 421, State: model.StatusPending}}}
-		storeMock.On("WorkflowUpdateIfState", isState(42, model.StatusSkipped), model.StatusPending, isStep(421, model.StatusCanceled)).Return(store_types.ErrUpdateConflict).Once()
-		assert.False(t, skipDeadWorkflow(storeMock, workflow, nowUnix))
+		storeMock.On("WorkflowUpdateIfState", isState(42, model.StatusSkipped), model.StatusPending, isStep(421, model.StatusKilled)).Return(store_types.ErrUpdateConflict).Once()
+		assert.False(t, skipDeadWorkflow(storeMock, workflow, map[string]model.StatusValue{"40": model.StatusSuccess}, nowUnix))
 		assert.Equal(t, model.StatusPending, workflow.State)
 		assert.Equal(t, model.StatusPending, workflow.Children[0].State)
+	})
+
+	t.Run("skip forbidden by verdicts writes killed steps", func(t *testing.T) {
+		storeMock, _, _ := setup(t)
+		workflow := &model.Workflow{ID: 42, State: model.StatusPending, Children: []*model.Step{{ID: 421, State: model.StatusPending}}}
+		storeMock.On("WorkflowUpdateIfState", isState(42, model.StatusSkipped), model.StatusPending, isStep(421, model.StatusKilled)).Return(nil).Once()
+		assert.True(t, skipDeadWorkflow(storeMock, workflow, map[string]model.StatusValue{"40": model.StatusSuccess, "41": model.StatusFailure}, nowUnix))
+		assert.Equal(t, model.StatusSkipped, workflow.State)
+		assert.Equal(t, model.StatusKilled, workflow.Children[0].State)
+	})
+
+	t.Run("lost dependency writes canceled steps", func(t *testing.T) {
+		storeMock, _, _ := setup(t)
+		workflow := &model.Workflow{ID: 42, State: model.StatusPending, Children: []*model.Step{{ID: 421, State: model.StatusPending}}}
+		storeMock.On("WorkflowUpdateIfState", isState(42, model.StatusSkipped), model.StatusPending, isStep(421, model.StatusCanceled)).Return(nil).Once()
+		assert.True(t, skipDeadWorkflow(storeMock, workflow, map[string]model.StatusValue{"40": model.StatusSuccess, "41": model.StatusError}, nowUnix))
+		assert.Equal(t, model.StatusSkipped, workflow.State)
+		assert.Equal(t, model.StatusCanceled, workflow.Children[0].State)
+	})
+
+	t.Run("skip with a killed dependency writes canceled steps", func(t *testing.T) {
+		storeMock, _, _ := setup(t)
+		workflow := &model.Workflow{ID: 42, State: model.StatusPending, Children: []*model.Step{{ID: 421, State: model.StatusPending}}}
+		storeMock.On("WorkflowUpdateIfState", isState(42, model.StatusSkipped), model.StatusPending, isStep(421, model.StatusCanceled)).Return(nil).Once()
+		assert.True(t, skipDeadWorkflow(storeMock, workflow, map[string]model.StatusValue{"40": model.StatusKilled}, nowUnix))
+		assert.Equal(t, model.StatusCanceled, workflow.Children[0].State)
 	})
 
 	t.Run("pending timeout conflict leaves concurrent workflow queued", func(t *testing.T) {

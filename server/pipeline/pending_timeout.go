@@ -257,7 +257,7 @@ func finalizeDeadWorkflows(ctx context.Context, storage store.Store, workflows [
 					failed[workflow.ID] = struct{}{}
 					continue
 				}
-			} else if !skipDeadWorkflow(storage, workflow, now) {
+			} else if !skipDeadWorkflow(storage, workflow, deps, now) {
 				failed[workflow.ID] = struct{}{}
 				continue
 			}
@@ -281,8 +281,19 @@ func deletedDependencyReason(deleted map[int64]bool) string {
 	return fmt.Sprintf("dependency workflow %d no longer exists", slices.Min(slices.Collect(maps.Keys(deleted))))
 }
 
-// skipDeadWorkflow claims the workflow before updating its pending steps.
-func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) bool {
+// skipDeadWorkflow ends a queued workflow that cannot run, and picks the step
+// shape from the reason it cannot run.
+//
+// When every dependency reached a verdict (success or failure) and runs_on
+// rejects that outcome, the scheduler would skip the workflow too. That skip
+// writes the same shape as markSkipped: pending steps killed. Otherwise a
+// dependency was lost (killed, canceled, error, skipped or declined), so the
+// steps are canceled to mark them as lost work.
+func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, deps map[string]model.StatusValue, now int64) bool {
+	stepState := model.StatusCanceled
+	if verdictForbids(deps) {
+		stepState = model.StatusKilled
+	}
 	updated := *workflow
 	updated.Finished = now
 	updated.State = model.StatusSkipped
@@ -293,7 +304,7 @@ func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) 
 			continue
 		}
 		updatedStep := *step
-		setSkippedStepStatus(&updatedStep, 0, model.StatusCanceled)
+		setSkippedStepStatus(&updatedStep, 0, stepState)
 		steps = append(steps, store.StepStateUpdate{Step: &updatedStep, From: step.State})
 		originals = append(originals, step)
 	}
@@ -306,6 +317,17 @@ func skipDeadWorkflow(storage store.Store, workflow *model.Workflow, now int64) 
 	*workflow = updated
 	for i, step := range originals {
 		*step = *steps[i].Step
+	}
+	return true
+}
+
+// verdictForbids reports whether every dependency reached a verdict that a
+// runs_on-gated workflow would reject. A lost dependency is not a verdict.
+func verdictForbids(deps map[string]model.StatusValue) bool {
+	for _, status := range deps {
+		if status != model.StatusSuccess && status != model.StatusFailure {
+			return false
+		}
 	}
 	return true
 }
