@@ -20,9 +20,8 @@ import (
 	kube_core_v1 "k8s.io/api/core/v1"
 )
 
-// observePodUp records what one pod observation says about startup and closes up when the
-// pod has started or failed to start. A Running pod is marked started: WaitStep only
-// recreates pods that reached Running.
+// observePodUp records startup observations and closes up when the pod starts or fails to start.
+// A Running pod is marked started; WaitStep recreates only pods whose containers have not started.
 func (e *kube) observePodUp(pod *kube_core_v1.Pod, podName string, up chan struct{}, upOnce *sync.Once) {
 	if pod.Name != podName {
 		return

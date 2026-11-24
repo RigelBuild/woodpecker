@@ -1071,14 +1071,24 @@ func TestWaitStepUsesInformerExitZeroOnFinalNotFound(t *testing.T) {
 // A Spot pod can vanish while Pending; TailStep must return so WaitStep reports the loss.
 func TestTailStepReturnsWhenPendingPodIsDeleted(t *testing.T) {
 	for _, beforeSync := range []bool{true, false} {
-		t.Run(fmt.Sprintf("beforeSync=%v", beforeSync), func(t *testing.T) {
+		name := "observed loss recreates once"
+		if beforeSync {
+			name = "unobserved loss fails closed"
+		}
+		t.Run(name, func(t *testing.T) {
 			client := fake.NewClientset()
 			engine := makeEngine(client)
 			step := makeStep(fmt.Sprintf("pending-lost-%v", beforeSync))
 			podName := createPod(t, client, step, "test-ns")
+			creates := countPodCreates(client)
+			replacement := make(chan *kube_core_v1.Pod, 1)
+			client.PrependReactor("create", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
+				replacement <- action.(kube_testing.CreateAction).GetObject().(*kube_core_v1.Pod).DeepCopy()
+				return false, nil, nil
+			})
 			// Delete after the informer's watch is registered, so the event is delivered.
-			watching := make(chan struct{})
-			var deleteOnce, watchOnce sync.Once
+			watching := make(chan struct{}, 4)
+			var deleteOnce sync.Once
 			client.PrependReactor("list", "pods", func(action kube_testing.Action) (bool, kube_runtime.Object, error) {
 				if beforeSync {
 					deleteOnce.Do(func() {
@@ -1091,11 +1101,11 @@ func TestTailStepReturnsWhenPendingPodIsDeleted(t *testing.T) {
 			})
 			client.PrependWatchReactor("pods", func(action kube_testing.Action) (bool, watch.Interface, error) {
 				w, err := client.Tracker().Watch(action.GetResource(), action.GetNamespace())
-				watchOnce.Do(func() { close(watching) })
+				watching <- struct{}{}
 				return true, w, err
 			})
 
-			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
@@ -1118,7 +1128,39 @@ func TestTailStepReturnsWhenPendingPodIsDeleted(t *testing.T) {
 			}
 
 			var teardown atomic.Bool
-			state, err := engine.WaitStep(types.WithTeardown(ctx, &teardown), step, "task-1")
+			type waitResult struct {
+				state *types.State
+				err   error
+			}
+			waitDone := make(chan waitResult, 1)
+			go func() {
+				state, err := engine.WaitStep(types.WithTeardown(ctx, &teardown), step, "task-1")
+				waitDone <- waitResult{state, err}
+			}()
+			if !beforeSync {
+				awaitNextRegistration(t, watching, "first attempt watch")
+			}
+			if !beforeSync {
+				select {
+				case pod := <-replacement:
+					assert.Empty(t, pod.Spec.NodeName)
+					waitForRecreate(t, client, podName)
+				case <-ctx.Done():
+					t.Fatal("WaitStep did not recreate the deleted Pending pod")
+				}
+				awaitNextRegistration(t, watching, "replacement watch")
+				require.NoError(t, client.CoreV1().Pods("test-ns").Delete(ctx, podName, kube_meta_v1.DeleteOptions{}))
+			}
+			var result waitResult
+			select {
+			case result = <-waitDone:
+			case <-ctx.Done():
+				t.Fatal("WaitStep blocked after pod loss")
+			}
+			state, err := result.state, result.err
+			if beforeSync {
+				assert.Zero(t, creates.Load(), "an unobserved loss must not create a replacement")
+			}
 			var loss *types.PodLossError
 			require.ErrorAs(t, err, &loss)
 			assert.Nil(t, state)
