@@ -25,8 +25,7 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/pipeline/backend/types"
 )
 
-// deletedPodError marks a loss where the pod object was deleted, not left behind.
-// Only this loss is eligible for a recreate; an evicted pod whose object remains is not.
+// deletedPodError marks a deleted Pending pod whose step container never started.
 type deletedPodError struct {
 	err error
 }
@@ -34,10 +33,44 @@ type deletedPodError struct {
 func (e *deletedPodError) Error() string { return e.err.Error() }
 func (e *deletedPodError) Unwrap() error { return e.err }
 
-// awaitObservedDelete reports whether the informer delivers a watch DELETED for the pod. A bare
-// Get NotFound can reach WaitStep before that event is handled, so the NotFound path waits here,
-// bounded by the informer's resync interval. It fails closed: a timer or context end reports no
-// observed delete, so the loss is never recreated on an unconfirmed delete.
+// deletedLoss permits recreation only for an observed delete of a Pending pod whose container never started.
+func deletedLoss(last *kube_core_v1.Pod, observedDelete bool, podName string, err error) error {
+	if !isRecreatableDeletedLoss(last, observedDelete, podName) {
+		return err
+	}
+	return &deletedPodError{err: err}
+}
+
+func stepContainerStarted(container kube_core_v1.ContainerStatus, found bool) bool {
+	return found && (container.State.Running != nil || container.State.Terminated != nil ||
+		container.LastTerminationState.Terminated != nil || container.RestartCount > 0 ||
+		(container.Started != nil && *container.Started))
+}
+
+func isRecreatableDeletedLoss(last *kube_core_v1.Pod, observedDelete bool, podName string) bool {
+	if !observedDelete || last == nil || last.Status.Phase != kube_core_v1.PodPending {
+		return false
+	}
+	container, found := stepContainerStatus(last, podName)
+	return !stepContainerStarted(container, found)
+}
+
+func (e *kube) willRecreateDeletedPod(ctx context.Context, last *kube_core_v1.Pod, observedDelete bool, podName string) bool {
+	if types.InTeardown(ctx) {
+		return false
+	}
+	if _, started := e.started.Load(podName); started {
+		return false
+	}
+	if isRecreatableDeletedLoss(last, observedDelete, podName) {
+		return true
+	}
+	pending, found := e.pendingDeletes.Load(podName)
+	pod, ok := pending.(*kube_core_v1.Pod)
+	return found && ok && isRecreatableDeletedLoss(pod, true, podName)
+}
+
+// awaitObservedDelete waits for a direct watch delete; other disappearance signals fail closed.
 func awaitObservedDelete(ctx context.Context, deleted <-chan struct{}) bool {
 	timer := time.NewTimer(defaultResyncDuration)
 	defer timer.Stop()
@@ -49,21 +82,6 @@ func awaitObservedDelete(ctx context.Context, deleted <-chan struct{}) bool {
 	case <-ctx.Done():
 		return false
 	}
-}
-
-// deletedLoss marks a loss recreatable only when the informer observed a real DELETED event for
-// the pod and the final object shows the step container running or waiting. A tombstone, a bare
-// Get NotFound, or a nil snapshot is not recreated: nothing shows the step was ever started.
-// A terminated container has neither Running nor Waiting set, so it is not recreated.
-func deletedLoss(last *kube_core_v1.Pod, observedDelete bool, podName string, err error) error {
-	if !observedDelete || last == nil {
-		return err
-	}
-	container, found := stepContainerStatus(last, podName)
-	if !found || (container.State.Running == nil && container.State.Waiting == nil) {
-		return err
-	}
-	return &deletedPodError{err: err}
 }
 
 // stepBackendOptions resolves the backend options a step pod is created with.
@@ -80,35 +98,42 @@ func (e *kube) stepBackendOptions(step *types.Step, taskUUID string) BackendOpti
 	return options
 }
 
-// WaitStep waits for the step pod to finish. If the pod was deleted after it reached Running,
-// it recreates the pod once and waits again. A second loss fails the step.
-// Only an abrupt node loss is recreated: a container that is terminated at its last snapshot,
-// including a DisruptionTarget pod that exited 137, is not. A pod lost before it reached Running
-// is reported without a recreate.
+// WaitStep recreates a deleted Pending pod at most once, before its container has started.
 func (e *kube) WaitStep(ctx context.Context, step *types.Step, taskUUID string) (*types.State, error) {
 	podName, err := stepToPodName(step)
 	if err != nil {
 		return nil, err
 	}
+	defer e.pendingDeletes.Delete(podName)
 
 	state, err := e.waitStepAttempt(ctx, step, taskUUID)
-	if !isDeletedLoss(err) {
-		return state, err
+	var deleted *deletedPodError
+	if !errors.As(err, &deleted) {
+		var loss *types.PodLossError
+		if !errors.As(err, &loss) {
+			return state, err
+		}
+		pending, found := e.pendingDeletes.LoadAndDelete(podName)
+		pod, ok := pending.(*kube_core_v1.Pod)
+		if !found || !ok || pod.Status.Phase != kube_core_v1.PodPending {
+			return state, err
+		}
+		err = deletedLoss(pod, true, podName, err)
+		if !errors.As(err, &deleted) {
+			return nil, err
+		}
 	}
-	if _, started := e.started.Load(podName); !started || types.InTeardown(ctx) {
+
+	if _, started := e.started.Load(podName); started || types.InTeardown(ctx) {
 		return nil, err
 	}
 
-	log.Warn().Str("workflow_id", taskUUID).Str("step", step.Name).Str("pod", podName).Msg("step pod deleted after start; recreating once; logs of the new pod are not streamed")
+	log.Warn().Str("workflow_id", taskUUID).Str("step", step.Name).Str("pod", podName).Msg("step pod deleted; recreating once; logs of the new pod are not streamed")
 	e.started.Delete(podName)
 	e.nodes.Delete(podName)
+	e.pendingDeletes.Delete(podName)
 	if _, startErr := startPod(ctx, e, step, e.stepBackendOptions(step, taskUUID), taskUUID); startErr != nil {
 		return nil, errors.Join(err, startErr)
 	}
 	return e.waitStepAttempt(ctx, step, taskUUID)
-}
-
-func isDeletedLoss(err error) bool {
-	var deleted *deletedPodError
-	return errors.As(err, &deleted)
 }

@@ -59,18 +59,17 @@ const (
 )
 
 type kube struct {
-	client          kubernetes.Interface
-	config          *config
-	goos            string
-	openLogStream   func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
-	logRetryNow     func() time.Time
-	logRetryTimeout time.Duration
-	waitLogReopen   func(context.Context, time.Duration) error
-	// snapshotObserved is called after WaitStep's informer stores a Running snapshot for the pod.
-	// Only tests set it; production leaves it nil.
-	snapshotObserved    func(podName string)
+	client              kubernetes.Interface
+	config              *config
+	goos                string
+	openLogStream       func(context.Context, string, string, *kube_core_v1.PodLogOptions) (io.ReadCloser, error)
+	logRetryNow         func() time.Time
+	logRetryTimeout     time.Duration
+	waitLogReopen       func(context.Context, time.Duration) error
+	snapshotObserved    func(podName string) // Test hook called after the informer stores a snapshot.
 	nodes               sync.Map
 	started             sync.Map
+	pendingDeletes      sync.Map
 	workflowResourcesMu sync.RWMutex
 	workflowResources   map[string]Resources
 }
@@ -163,7 +162,7 @@ func lossTime(last *kube_core_v1.Pod) time.Time {
 	return time.Now()
 }
 
-func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID string, lossAt time.Time) error {
+func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID string, lossAt time.Time, recreating bool) error {
 	node, _ := e.nodes.Load(podName)
 	nodeName, _ := node.(string)
 	evidence, confirmed, err := e.preemptionEvidence(ctx, nodeName, lossAt)
@@ -171,11 +170,16 @@ func (e *kube) podLoss(ctx context.Context, podName, step, reason, taskUUID stri
 		evidence = err.Error()
 	}
 	loss := &types.PodLossError{Pod: podName, Node: nodeName, Reason: reason, Confirmed: confirmed, Evidence: evidence}
-	log.Error().Str("workflow_id", taskUUID).Str("step", step).Str("pod", podName).Str("node", nodeName).Str("reason", reason).Bool("confirmed", confirmed).Str("evidence", evidence).Msg("step pod lost")
+	entry := log.Error()
+	if recreating {
+		entry = log.Warn()
+	}
+	entry.Str("workflow_id", taskUUID).Str("step", step).Str("pod", podName).Str("node", nodeName).Str("reason", reason).Bool("confirmed", confirmed).Str("evidence", evidence).Msg("step pod lost")
 	return loss
 }
 
 // waitPodUp reports gone when the pod is deleted before it starts, so WaitStep classifies the loss.
+// On NotFound, it waits at most five seconds for an in-flight watch DELETE.
 func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) (gone bool, err error) {
 	up := make(chan struct{})
 	var upOnce sync.Once
@@ -190,6 +194,7 @@ func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) 
 	}
 	podDeleted := func(obj any) {
 		pod, ok := obj.(*kube_core_v1.Pod)
+		observedDelete := ok
 		if !ok {
 			tombstone, isTombstone := obj.(cache.DeletedFinalStateUnknown)
 			if !isTombstone {
@@ -200,6 +205,9 @@ func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) 
 			}
 		}
 		if pod.Name == podName {
+			if observedDelete && pod.Status.Phase == kube_core_v1.PodPending {
+				e.pendingDeletes.Store(podName, pod.DeepCopy())
+			}
 			deleted.Store(true)
 			upOnce.Do(func() { close(up) })
 		}
@@ -217,16 +225,23 @@ func (e *kube) waitPodUp(ctx context.Context, step *types.Step, podName string) 
 	}
 	stop := make(chan struct{})
 	si.Start(stop)
-	defer close(stop)
+	defer func() {
+		close(stop)
+		si.Shutdown()
+	}()
 	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
 		return false, ctx.Err()
 	}
 	// A pod deleted before the initial List never produces an event.
 	if _, err := e.client.CoreV1().Pods(namespace).Get(ctx, podName, kube_meta_v1.GetOptions{}); err != nil {
 		if kube_errors.IsNotFound(err) {
+			awaitObservedDelete(ctx, up)
 			return true, nil
 		}
 		return false, err
+	}
+	if deleted.Load() {
+		return true, nil
 	}
 	select {
 	case <-up:
@@ -505,7 +520,7 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 		}
 		last.Store(pod.DeepCopy())
 		e.recordNode(pod)
-		if e.snapshotObserved != nil && pod.Status.Phase == kube_core_v1.PodRunning {
+		if e.snapshotObserved != nil {
 			e.snapshotObserved(podName)
 		}
 		if isImagePullBackOffState(pod) || isInvalidImageName(pod) {
@@ -538,8 +553,8 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			return
 		}
 		if pod.Name == podName {
-			deletedOnce.Do(func() { close(deleted) })
 			podChanged(pod)
+			deletedOnce.Do(func() { close(deleted) })
 			finishedOnce.Do(func() { close(finished) })
 		}
 	}
@@ -556,7 +571,10 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 	}
 	stop := make(chan struct{})
 	si.Start(stop)
-	defer close(stop)
+	defer func() {
+		close(stop)
+		si.Shutdown()
+	}()
 	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
 		return nil, ctx.Err()
 	}
@@ -566,13 +584,18 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			if types.InTeardown(ctx) {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
+			observed := false
+			if _, ok := e.pendingDeletes.Load(podName); !ok {
+				observed = awaitObservedDelete(ctx, deleted)
+			}
 			newest := last.Load()
 			reason, lost := podLost(newest, true)
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			observed := awaitObservedDelete(ctx, deleted)
-			return nil, deletedLoss(newest, observed, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
+			recreating := e.willRecreateDeletedPod(ctx, newest, observed, podName)
+			loss := e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest), recreating)
+			return nil, deletedLoss(newest, observed, podName, loss)
 		}
 		return nil, err
 	} else {
@@ -617,18 +640,20 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 			if types.InTeardown(ctx) {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
+			observed := awaitObservedDelete(ctx, deleted)
 			newest := last.Load()
 			reason, lost := podLost(newest, true)
 			if !lost {
 				return &types.State{ExitCode: 0, Exited: true}, nil
 			}
-			observed := awaitObservedDelete(ctx, deleted)
-			return nil, deletedLoss(newest, observed, podName, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest)))
+			recreating := e.willRecreateDeletedPod(ctx, newest, observed, podName)
+			loss := e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest), recreating)
+			return nil, deletedLoss(newest, observed, podName, loss)
 		}
 		if !types.InTeardown(ctx) {
 			newest := last.Load()
 			if reason, lost := podLost(newest, false); lost {
-				return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest))
+				return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(newest), false)
 			}
 		}
 		return nil, err
@@ -639,7 +664,7 @@ func (e *kube) waitStepAttempt(ctx context.Context, step *types.Step, taskUUID s
 	}
 	if !types.InTeardown(ctx) {
 		if reason, lost := podLost(pod, false); lost {
-			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(pod))
+			return nil, e.podLoss(ctx, podName, step.Name, reason, taskUUID, lossTime(pod), false)
 		}
 	}
 	cs := pod.Status.ContainerStatuses[0]
@@ -1139,6 +1164,7 @@ func (e *kube) DestroyStep(ctx context.Context, step *types.Step, taskUUID strin
 	if podName, nameErr := stepToPodName(step); nameErr == nil {
 		e.nodes.Delete(podName)
 		e.started.Delete(podName)
+		e.pendingDeletes.Delete(podName)
 	} else {
 		errs = append(errs, nameErr)
 	}
@@ -1155,6 +1181,7 @@ func (e *kube) DestroyWorkflow(ctx context.Context, conf *types.Config, taskUUID
 			if podName, err := stepToPodName(step); err == nil {
 				e.nodes.Delete(podName)
 				e.started.Delete(podName)
+				e.pendingDeletes.Delete(podName)
 			}
 			err := stopPod(ctx, e, step, e.config.newDefaultDeleteOptions())
 			if err != nil {
